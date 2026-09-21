@@ -1,0 +1,123 @@
+# Local stack: PostgreSQL, Redis, the API and the web app.
+#
+#   cp .env.example .env    # fill in whatever provider keys you have
+#   docker compose up --build
+#
+# The planner starts with no provider credentials at all and reports which
+# sources it cannot search. Add keys to .env and restart to widen its reach.
+
+name: wayfare
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wayfare
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wayfare}
+      POSTGRES_DB: wayfare
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # The API waits for this: starting it against a database that is still
+      # initialising just produces a confusing first-request failure.
+      test: ['CMD-SHELL', 'pg_isready -U wayfare -d wayfare']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--save', '60', '1', '--loglevel', 'warning']
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: applies migrations, then exits. The API waits for it to succeed.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://wayfare:${POSTGRES_PASSWORD:-wayfare}@postgres:5432/wayfare
+    command: ['npx', 'prisma', 'migrate', 'deploy']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    ports:
+      - '4000:4000'
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://wayfare:${POSTGRES_PASSWORD:-wayfare}@postgres:5432/wayfare
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env — it is required in production}
+      DEFAULT_CURRENCY: ${DEFAULT_CURRENCY:-INR}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Provider credentials. Every one is optional; an unset value disables
+      # that adapter and the UI says which source is missing and why.
+      NOMINATIM_USER_AGENT: ${NOMINATIM_USER_AGENT:-}
+      NOMINATIM_BASE_URL: ${NOMINATIM_BASE_URL:-https://nominatim.openstreetmap.org}
+      OSRM_BASE_URL: ${OSRM_BASE_URL:-}
+      AMADEUS_CLIENT_ID: ${AMADEUS_CLIENT_ID:-}
+      AMADEUS_CLIENT_SECRET: ${AMADEUS_CLIENT_SECRET:-}
+      AMADEUS_ENV: ${AMADEUS_ENV:-test}
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      RAIL_PROVIDER_URL: ${RAIL_PROVIDER_URL:-}
+      RAIL_PROVIDER_KEY: ${RAIL_PROVIDER_KEY:-}
+      RAIL_PROVIDER_COVERAGE: ${RAIL_PROVIDER_COVERAGE:-global}
+      BUS_PROVIDER_URL: ${BUS_PROVIDER_URL:-}
+      BUS_PROVIDER_KEY: ${BUS_PROVIDER_KEY:-}
+      BUS_PROVIDER_COVERAGE: ${BUS_PROVIDER_COVERAGE:-global}
+      GROUND_TRANSPORT_TARIFFS: ${GROUND_TRANSPORT_TARIFFS:-}
+      SELF_DRIVE_PROFILE: ${SELF_DRIVE_PROFILE:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Next.js inlines this into the browser bundle at build time, so it is
+        # a build argument rather than only a runtime variable.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+    depends_on:
+      - api
+
+volumes:
+  postgres-data:
+  redis-data:

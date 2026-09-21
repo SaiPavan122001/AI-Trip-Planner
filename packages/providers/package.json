@@ -1,0 +1,31 @@
+{
+  "name": "@trip/providers",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "echo \"(lint: configured via eslint in CI)\""
+  },
+  "dependencies": {
+    "@trip/shared": "*",
+    "zod": "^3.23.8",
+    "tz-lookup": "^6.1.25"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.3",
+    "@types/node": "^22.7.5"
+  }
+}

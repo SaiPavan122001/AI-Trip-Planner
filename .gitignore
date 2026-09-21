@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+!.env.example
+.DS_Store
+.turbo/
+prisma/dev.db*
+logs/
+*.log
+*.tsbuildinfo

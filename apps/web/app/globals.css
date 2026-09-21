@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-sand-50 text-ink antialiased;
+  }
+
+  /* Focus is never removed, only restyled: the whole booking flow has to be
+     usable from a keyboard. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-teal-500 ring-offset-2 ring-offset-sand-50;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-sand-200 bg-white shadow-card;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-teal-500 px-5 py-3
+           text-sm font-medium text-white transition hover:bg-teal-600
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-sand-300
+           bg-white px-4 py-2.5 text-sm font-medium text-ink-soft transition
+           hover:border-ink-faint hover:text-ink disabled:opacity-50;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-sand-300 bg-white px-4 py-3 text-sm text-ink
+           placeholder:text-ink-faint focus:border-teal-500;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-medium uppercase tracking-wide text-ink-faint;
+  }
+
+  /* Reserved for figures the planner modelled rather than received from a
+     provider. Used nowhere else. */
+  .estimate-chip {
+    @apply inline-flex items-center gap-1 rounded-full bg-estimate/10 px-2 py-0.5
+           text-[11px] font-medium text-estimate;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

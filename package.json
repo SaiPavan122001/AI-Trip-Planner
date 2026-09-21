@@ -1,0 +1,33 @@
+{
+  "name": "ai-trip-planner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open-source, constraint-aware AI trip planner: understands the traveler, searches real providers, optimizes the whole journey.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "build": "npm run build -w @trip/shared && npm run build -w @trip/providers && npm run build -w @trip/llm && npm run build -w @trip/engine && npm run build -w @trip/api && npm run build -w @trip/web",
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @trip/api\" \"npm run dev -w @trip/web\"",
+    "dev:api": "npm run dev -w @trip/api",
+    "dev:web": "npm run dev -w @trip/web",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "db:migrate": "npm run prisma:migrate -w @trip/api",
+    "db:generate": "npm run prisma:generate -w @trip/api",
+    "db:seed": "npm run seed -w @trip/api"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.3",
+    "concurrently": "^9.0.1"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ]
+}

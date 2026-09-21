@@ -1,0 +1,145 @@
+// Database schema.
+//
+// Planning sessions are stored as a validated JSON document alongside the
+// columns worth querying and indexing. The document shape is owned by the Zod
+// schemas in @trip/shared, which are the real contract; mirroring forty
+// optional preference fields into columns would mean a migration every time a
+// question is added, for no query anybody runs.
+//
+// Bookings are the opposite: every column matters, because they are money.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  displayName  String?
+  passwordHash String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  trips    Trip[]
+  bookings Booking[]
+
+  @@map("users")
+}
+
+model Trip {
+  id      String  @id @default(uuid())
+  ownerId String?
+  owner   User?   @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  stage String
+
+  // Denormalised for listing a traveller's trips without parsing the document.
+  originName      String
+  destinationName String
+  departureDate   String
+  returnDate      String?
+  travelerCount   Int
+  currency        String
+  scope           String
+
+  /// The full PlanningSession document, validated against @trip/shared on read.
+  session Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bookings  Booking[]
+  travelers TravelerRecord[]
+  events    AuditEvent[]
+
+  @@index([ownerId, updatedAt])
+  @@map("trips")
+}
+
+model Booking {
+  id     String @id @default(uuid())
+  tripId String
+  trip   Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  ownerId String?
+  owner   User?   @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+
+  component String
+  state     String
+  provider  String
+
+  /// Set only from a provider response. Its presence is what proves a booking exists.
+  providerReference String?
+
+  quotedAmount    Int
+  quotedCurrency  String
+  confirmedAmount Int?
+
+  /// Makes a retried booking request safe: the same key returns the same booking.
+  idempotencyKey String @unique
+
+  /// Full transition history, appended to on every event.
+  history Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tripId, state])
+  @@map("bookings")
+}
+
+/// Traveller identity documents, kept in their own table so retention and
+/// access rules apply to one place. Encrypted at rest by the application
+/// before insert; never written to logs.
+model TravelerRecord {
+  id     String @id @default(uuid())
+  tripId String
+  trip   Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  travelerIndex Int
+  /// Application-encrypted payload; the plaintext never reaches the database.
+  encrypted     Bytes
+  /// Nonce for the encryption above.
+  nonce         Bytes
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tripId, travelerIndex])
+  @@map("traveler_records")
+}
+
+model IdempotencyKey {
+  key   String @id
+  scope String
+
+  /// Null while the first request is still in flight.
+  response Json?
+
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+/// Append-only trail of what the planner decided and what the traveller
+/// agreed to, including every waiver of a hard constraint.
+model AuditEvent {
+  id     String  @id @default(uuid())
+  tripId String?
+  trip   Trip?   @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  kind    String
+  actor   String
+  detail  Json
+  createdAt DateTime @default(now())
+
+  @@index([tripId, createdAt])
+  @@map("audit_events")
+}

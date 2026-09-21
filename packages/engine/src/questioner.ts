@@ -1,0 +1,594 @@
+import {
+  nightsBetween,
+  seatedTravelers,
+  totalTravelers,
+  type Answer,
+  type JourneyClassification,
+  type Question,
+  type QuestionnaireState,
+  type TravelerProfile,
+  type TripIntent,
+} from '@trip/shared';
+
+/**
+ * Adaptive questioning.
+ *
+ * Questions are declared with a `when` predicate over what is already known.
+ * The engine hands back exactly one question at a time, chosen by asking which
+ * declared question is both applicable and unanswered. This is what keeps the
+ * funnel from turning into a twenty-field form: a solo business traveller is
+ * never asked about children's meals, and nobody is asked about rail classes
+ * on a trip where rail was excluded at classification.
+ *
+ * The order of the array is the order of the interview, and it is deliberate:
+ * money first (it constrains everything), then style, then the ranking that
+ * resolves ties, then the specifics that only matter once a shape is known.
+ */
+
+export interface QuestionContext {
+  intent: TripIntent;
+  classification: JourneyClassification;
+  profile: TravelerProfile;
+}
+
+interface QuestionDef {
+  key: string;
+  /** Applicable to this trip at all? */
+  when: (ctx: QuestionContext) => boolean;
+  /** Needed before a first plan can be produced? */
+  requiredForPlanning: boolean;
+  build: (ctx: QuestionContext) => Question;
+}
+
+const nights = (ctx: QuestionContext) =>
+  nightsBetween(ctx.intent.departureDate, ctx.intent.returnDate);
+
+const isAnswered = (profile: TravelerProfile, key: string) =>
+  profile.answeredKeys.includes(key) || profile.skippedKeys.includes(key);
+
+const DEFS: QuestionDef[] = [
+  {
+    key: 'budget.total',
+    when: () => true,
+    requiredForPlanning: true,
+    build: (ctx) => ({
+      key: 'budget.total',
+      kind: 'money',
+      prompt: `What is the total budget for this trip, for all ${totalTravelers(ctx.intent.travelers)} traveller(s)?`,
+      helpText:
+        'Include transport, accommodation and the things you plan to do. The planner treats this as a ceiling and tells you before anything crosses it.',
+      options: [],
+      min: 0,
+      max: null,
+      currency: ctx.intent.currency,
+      required: true,
+      reason:
+        'Budget is the one constraint that shapes every other decision, so it is asked first and never quietly exceeded.',
+      stage: 'budget',
+    }),
+  },
+  {
+    key: 'style.travel_style',
+    when: () => true,
+    requiredForPlanning: true,
+    build: () => ({
+      key: 'style.travel_style',
+      kind: 'single_choice',
+      prompt: 'How would you like this trip to feel?',
+      helpText: null,
+      options: [
+        {
+          value: 'budget',
+          label: 'Budget',
+          description: 'Spend as little as possible; time and comfort give way to price.',
+          implication: 'Favours surface transport, hostels and simple rooms.',
+        },
+        {
+          value: 'standard',
+          label: 'Standard',
+          description: 'Reasonable comfort at a sensible price.',
+          implication: 'Typically economy flights and 3-star properties.',
+        },
+        {
+          value: 'premium',
+          label: 'Premium',
+          description: 'Comfort matters more than the last rupee.',
+          implication: 'Typically 4-star and above, direct routings where they exist.',
+        },
+        {
+          value: 'luxury',
+          label: 'Luxury',
+          description: 'The best available within the budget.',
+          implication: 'Premium cabins and 5-star properties, private transfers.',
+        },
+      ],
+      min: null,
+      max: null,
+      currency: null,
+      required: true,
+      reason:
+        'Travel style sets sensible defaults for dozens of smaller choices so you are not asked about each one.',
+      stage: 'style',
+    }),
+  },
+  {
+    key: 'priorities.ranking',
+    when: () => true,
+    requiredForPlanning: true,
+    build: (ctx) => ({
+      key: 'priorities.ranking',
+      kind: 'ranking',
+      prompt: 'When two options are close, what should decide it? Put the most important first.',
+      helpText: 'Pick up to four. Everything after the first still counts, just less.',
+      options: [
+        { value: 'cheapest', label: 'Lowest cost', description: null, implication: null },
+        { value: 'fastest', label: 'Fastest', description: null, implication: null },
+        { value: 'most_comfortable', label: 'Most comfortable', description: null, implication: null },
+        { value: 'safest', label: 'Safest', description: null, implication: null },
+        { value: 'family_friendly', label: 'Family friendly', description: null, implication: null },
+        { value: 'flexible', label: 'Flexible to change', description: null, implication: null },
+        {
+          value: 'fewest_transfers',
+          label: 'Fewest changes',
+          description: null,
+          implication: null,
+        },
+        ...(ctx.classification.eligibleModes.some((m) => m === 'train' || m === 'self_drive')
+          ? [{ value: 'scenic', label: 'Scenic journey', description: null, implication: null }]
+          : []),
+      ],
+      min: null,
+      max: null,
+      currency: null,
+      required: true,
+      reason:
+        'Ranking, rather than one "best" answer, is what lets the planner explain why it put one option above another.',
+      stage: 'priorities',
+    }),
+  },
+  {
+    key: 'transport.mode_openness',
+    when: (ctx) =>
+      ctx.classification.scope === 'domestic' && ctx.classification.eligibleModes.length > 1,
+    requiredForPlanning: false,
+    build: (ctx) => ({
+      key: 'transport.mode_openness',
+      kind: 'multi_choice',
+      prompt: 'Which ways of getting there would you consider?',
+      helpText:
+        'Leave them all selected to compare every option. The planner prices each one before recommending anything.',
+      options: ctx.classification.eligibleModes.map((m) => ({
+        value: m,
+        label: MODE_LABELS[m] ?? m,
+        description: null,
+        implication: null,
+      })),
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason:
+        'Ruling a mode out now saves searching it; leaving it in costs nothing but a moment of search time.',
+      stage: 'transport',
+    }),
+  },
+  {
+    key: 'transport.cabin_class',
+    when: (ctx) => ctx.classification.eligibleModes.includes('flight'),
+    requiredForPlanning: false,
+    build: () => ({
+      key: 'transport.cabin_class',
+      kind: 'single_choice',
+      prompt: 'Which cabin should flights be searched in?',
+      helpText: 'Only cabins the airline actually sells on a route will be offered.',
+      options: [
+        { value: 'economy', label: 'Economy', description: null, implication: null },
+        { value: 'premium_economy', label: 'Premium economy', description: null, implication: null },
+        { value: 'business', label: 'Business', description: null, implication: null },
+        { value: 'first', label: 'First', description: null, implication: null },
+      ],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason: 'Cabin changes the price by a multiple, so it is asked rather than assumed.',
+      stage: 'transport',
+    }),
+  },
+  {
+    key: 'transport.baggage',
+    when: (ctx) => ctx.classification.eligibleModes.includes('flight'),
+    requiredForPlanning: false,
+    build: () => ({
+      key: 'transport.baggage',
+      kind: 'number',
+      prompt: 'How many checked bags per traveller?',
+      helpText:
+        'Checked bags are priced separately on many fares. Telling the planner now keeps the total honest.',
+      options: [],
+      min: 0,
+      max: 5,
+      currency: null,
+      required: false,
+      reason:
+        'A fare that looks cheapest often stops being cheapest once two checked bags are added.',
+      stage: 'transport',
+    }),
+  },
+  {
+    key: 'transport.overnight',
+    when: (ctx) =>
+      ctx.classification.eligibleModes.some((m) => m === 'train' || m === 'bus') ||
+      ctx.classification.greatCircleKm > 2500,
+    requiredForPlanning: false,
+    build: () => ({
+      key: 'transport.overnight',
+      kind: 'boolean',
+      prompt: 'Is overnight travel acceptable?',
+      helpText: 'Overnight legs save a night of accommodation but cost a night of sleep.',
+      options: [],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason:
+        'This decides whether the planner may use night trains, red-eye flights and sleeper coaches.',
+      stage: 'transport',
+    }),
+  },
+  {
+    key: 'accommodation.type',
+    when: (ctx) => nights(ctx) > 0,
+    requiredForPlanning: true,
+    build: () => ({
+      key: 'accommodation.type',
+      kind: 'multi_choice',
+      prompt: 'What kind of place would you like to stay in?',
+      helpText: null,
+      options: [
+        { value: 'hotel', label: 'Hotel', description: null, implication: null },
+        { value: 'hostel', label: 'Hostel', description: null, implication: null },
+        { value: 'resort', label: 'Resort', description: null, implication: null },
+        { value: 'villa', label: 'Villa', description: null, implication: null },
+        { value: 'apartment', label: 'Apartment', description: null, implication: null },
+        { value: 'guesthouse', label: 'Guesthouse', description: null, implication: null },
+      ],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason: 'Property type changes which providers are searched and what a "room" even means.',
+      stage: 'accommodation',
+    }),
+  },
+  {
+    key: 'accommodation.category',
+    when: (ctx) => nights(ctx) > 0,
+    requiredForPlanning: false,
+    build: () => ({
+      key: 'accommodation.category',
+      kind: 'single_choice',
+      prompt: 'Is there a minimum standard the property must meet?',
+      helpText: 'Ratings come from the provider; unrated properties are labelled as such.',
+      options: [
+        { value: '0', label: 'No minimum', description: null, implication: null },
+        { value: '3', label: '3-star or above', description: null, implication: null },
+        { value: '4', label: '4-star or above', description: null, implication: null },
+        { value: '5', label: '5-star only', description: null, implication: null },
+      ],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason: 'This is treated as a hard filter, so nothing below it is ever shown to you.',
+      stage: 'accommodation',
+    }),
+  },
+  {
+    key: 'accommodation.rooms',
+    when: (ctx) => nights(ctx) > 0 && seatedTravelers(ctx.intent.travelers) > 1,
+    requiredForPlanning: true,
+    build: (ctx) => ({
+      key: 'accommodation.rooms',
+      kind: 'number',
+      prompt: `How many rooms do you need for ${seatedTravelers(ctx.intent.travelers)} people?`,
+      helpText: 'Room count is a hard requirement: the planner will not quietly put four people in one double.',
+      options: [],
+      min: 1,
+      max: 10,
+      currency: null,
+      required: true,
+      reason: 'Occupancy rules differ by property, so the number of rooms is asked rather than derived.',
+      stage: 'accommodation',
+    }),
+  },
+  {
+    key: 'accommodation.cancellation',
+    when: (ctx) => nights(ctx) > 0,
+    requiredForPlanning: false,
+    build: () => ({
+      key: 'accommodation.cancellation',
+      kind: 'boolean',
+      prompt: 'Do you need free cancellation?',
+      helpText: 'Flexible rates usually cost more. The planner shows the difference before you choose.',
+      options: [],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason:
+        'Cancellation terms are a hard filter when required, and the planner will not substitute a non-refundable rate to hit a price.',
+      stage: 'accommodation',
+    }),
+  },
+  {
+    key: 'accommodation.location',
+    when: (ctx) => nights(ctx) > 0,
+    requiredForPlanning: false,
+    build: (ctx) => ({
+      key: 'accommodation.location',
+      kind: 'text',
+      prompt: `Whereabouts in ${ctx.intent.destination.name} would you like to be?`,
+      helpText: 'For example "near the centre", "close to the station", or a neighbourhood name.',
+      options: [],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason:
+        'Where you stay decides what you spend on local transport, which the planner counts as part of the hotel decision.',
+      stage: 'accommodation',
+    }),
+  },
+  {
+    key: 'traveler.party_type',
+    when: () => true,
+    requiredForPlanning: false,
+    build: () => ({
+      key: 'traveler.party_type',
+      kind: 'single_choice',
+      prompt: 'Who is travelling?',
+      helpText: null,
+      options: [
+        { value: 'solo', label: 'Just me', description: null, implication: null },
+        { value: 'couple', label: 'A couple', description: null, implication: null },
+        { value: 'family', label: 'A family', description: null, implication: null },
+        { value: 'friends', label: 'Friends', description: null, implication: null },
+        { value: 'group', label: 'A larger group', description: null, implication: null },
+        { value: 'business_team', label: 'Colleagues', description: null, implication: null },
+      ],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason: 'Party shape changes which trade-offs matter, from room configuration to pacing.',
+      stage: 'traveler_needs',
+    }),
+  },
+  {
+    key: 'traveler.accessibility',
+    when: (ctx) =>
+      ctx.profile.special.travelingWithElderly ||
+      ctx.profile.partyType === 'family' ||
+      ctx.intent.travelers.adults > 2,
+    requiredForPlanning: false,
+    build: () => ({
+      key: 'traveler.accessibility',
+      kind: 'multi_choice',
+      prompt: 'Does anyone travelling need accessibility support?',
+      helpText:
+        'The planner uses this as a hard requirement and will say plainly when a provider does not publish enough information to confirm it.',
+      options: [
+        { value: 'step_free_access', label: 'Step-free access', description: null, implication: null },
+        {
+          value: 'wheelchair_accessible_room',
+          label: 'Wheelchair-accessible room',
+          description: null,
+          implication: null,
+        },
+        {
+          value: 'wheelchair_assistance_at_terminal',
+          label: 'Assistance at airports and stations',
+          description: null,
+          implication: null,
+        },
+        { value: 'elevator_required', label: 'Lift required', description: null, implication: null },
+        { value: 'ground_floor_room', label: 'Ground-floor room', description: null, implication: null },
+      ],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason:
+        'Accessibility is a hard constraint. It is asked explicitly because inferring it from anything else would be guesswork.',
+      stage: 'traveler_needs',
+    }),
+  },
+  {
+    key: 'traveler.children_needs',
+    when: (ctx) => ctx.intent.travelers.children > 0 || ctx.intent.travelers.infants > 0,
+    requiredForPlanning: false,
+    build: (ctx) => ({
+      key: 'traveler.children_needs',
+      kind: 'multi_choice',
+      prompt: `What do you need for the ${ctx.intent.travelers.children + ctx.intent.travelers.infants} younger traveller(s)?`,
+      helpText: null,
+      options: [
+        { value: 'cot', label: 'Cot or crib', description: null, implication: null },
+        { value: 'extra_bed', label: 'Extra bed', description: null, implication: null },
+        { value: 'stroller_space', label: 'Room for a pushchair', description: null, implication: null },
+        { value: 'short_travel_days', label: 'Shorter travel days', description: null, implication: null },
+        { value: 'child_meals', label: 'Child meals on board', description: null, implication: null },
+      ],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason:
+        'These change both the room search and how tightly the days can be scheduled.',
+      stage: 'traveler_needs',
+    }),
+  },
+  {
+    key: 'traveler.dietary',
+    when: (ctx) =>
+      ctx.classification.scope === 'international' || totalTravelers(ctx.intent.travelers) > 2,
+    requiredForPlanning: false,
+    build: () => ({
+      key: 'traveler.dietary',
+      kind: 'multi_choice',
+      prompt: 'Any dietary requirements the planner should keep in mind?',
+      helpText:
+        'Used for on-board meal requests where the carrier supports them, and when suggesting places to eat.',
+      options: [
+        { value: 'vegetarian', label: 'Vegetarian', description: null, implication: null },
+        { value: 'vegan', label: 'Vegan', description: null, implication: null },
+        { value: 'jain', label: 'Jain', description: null, implication: null },
+        { value: 'halal', label: 'Halal', description: null, implication: null },
+        { value: 'kosher', label: 'Kosher', description: null, implication: null },
+        { value: 'gluten_free', label: 'Gluten free', description: null, implication: null },
+        { value: 'nut_allergy', label: 'Nut allergy', description: null, implication: null },
+      ],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason: 'Meal requests must be made at booking time, not after tickets are issued.',
+      stage: 'traveler_needs',
+    }),
+  },
+  {
+    key: 'budget.daily_spend',
+    when: (ctx) => nights(ctx) > 0,
+    requiredForPlanning: false,
+    build: (ctx) => ({
+      key: 'budget.daily_spend',
+      kind: 'money',
+      prompt: 'Roughly how much per person, per day, for food and getting around locally?',
+      helpText:
+        'This is carried into the total so the budget you see is the budget you will actually spend.',
+      options: [],
+      min: 0,
+      max: null,
+      currency: ctx.intent.currency,
+      required: false,
+      reason:
+        'Daily spending is usually the largest line item nobody plans for, and leaving it out is how trips quietly go over budget.',
+      stage: 'budget',
+    }),
+  },
+];
+
+const MODE_LABELS: Record<string, string> = {
+  flight: 'Flight',
+  train: 'Train',
+  bus: 'Bus',
+  self_drive: 'Drive my own car',
+  rental_car: 'Rental car',
+  taxi: 'Private car or taxi',
+  ferry: 'Ferry',
+};
+
+export function applicableQuestions(ctx: QuestionContext): QuestionDef[] {
+  return DEFS.filter((d) => d.when(ctx));
+}
+
+/** The single next question, or null when the interview is done. */
+export function nextQuestion(ctx: QuestionContext): Question | null {
+  const def = applicableQuestions(ctx).find((d) => !isAnswered(ctx.profile, d.key));
+  return def ? def.build(ctx) : null;
+}
+
+export function questionnaireState(ctx: QuestionContext): QuestionnaireState {
+  const applicable = applicableQuestions(ctx);
+  const answered = applicable.filter((d) => isAnswered(ctx.profile, d.key));
+  const missingRequired = applicable.filter(
+    (d) => d.requiredForPlanning && !isAnswered(ctx.profile, d.key),
+  );
+  const next = nextQuestion(ctx);
+  return {
+    next,
+    asked: ctx.profile.answeredKeys,
+    completeness: applicable.length === 0 ? 1 : Number((answered.length / applicable.length).toFixed(2)),
+    canPlan: missingRequired.length === 0,
+  };
+}
+
+/**
+ * Applies an answer to the profile. Unknown keys are rejected rather than
+ * stored, so a malformed or model-generated answer cannot smuggle arbitrary
+ * fields into the profile that later code might trust.
+ */
+export function applyAnswer(profile: TravelerProfile, answer: Answer): TravelerProfile {
+  const def = DEFS.find((d) => d.key === answer.key);
+  if (!def) throw new Error(`Unknown question key: ${answer.key}`);
+
+  const next: TravelerProfile = structuredClone(profile);
+  if (answer.skipped) {
+    if (!next.skippedKeys.includes(answer.key)) next.skippedKeys.push(answer.key);
+    return next;
+  }
+
+  const v = answer.value;
+  switch (answer.key) {
+    case 'style.travel_style':
+      next.travelStyle = v as TravelerProfile['travelStyle'];
+      break;
+    case 'priorities.ranking':
+      next.priorities = (v as string[]) as TravelerProfile['priorities'];
+      break;
+    case 'transport.mode_openness': {
+      const chosen = new Set(v as string[]);
+      next.transport.excludedModes = Object.keys(MODE_LABELS).filter((m) => !chosen.has(m));
+      break;
+    }
+    case 'transport.cabin_class':
+      next.transport.cabinClass = v as TravelerProfile['transport']['cabinClass'];
+      break;
+    case 'transport.baggage':
+      next.transport.checkedBagsPerTraveler = Number(v);
+      break;
+    case 'transport.overnight':
+      next.transport.avoidOvernightTravel = v === false;
+      break;
+    case 'accommodation.type':
+      next.accommodation.types = (v as string[]) as TravelerProfile['accommodation']['types'];
+      break;
+    case 'accommodation.category':
+      next.accommodation.minCategory = Number(v) || null;
+      break;
+    case 'accommodation.rooms':
+      next.accommodation.rooms = Number(v);
+      break;
+    case 'accommodation.cancellation':
+      next.accommodation.freeCancellationRequired = v === true;
+      break;
+    case 'accommodation.location':
+      next.accommodation.locationPreference = (v as string) || null;
+      break;
+    case 'traveler.party_type':
+      next.partyType = v as TravelerProfile['partyType'];
+      break;
+    case 'traveler.accessibility':
+      next.special.accessibility = (v as string[]) as TravelerProfile['special']['accessibility'];
+      break;
+    case 'traveler.children_needs':
+      next.special.assistanceNotes = v as string[];
+      break;
+    case 'traveler.dietary':
+      next.special.dietary = (v as string[]) as TravelerProfile['special']['dietary'];
+      break;
+    case 'budget.total':
+    case 'budget.daily_spend':
+      // Budget answers are money and live on the constraint set, not the
+      // profile; the caller passes them to `buildConstraints`.
+      break;
+    default:
+      throw new Error(`Question ${answer.key} has no handler`);
+  }
+
+  if (!next.answeredKeys.includes(answer.key)) next.answeredKeys.push(answer.key);
+  return next;
+}
+
+export const QUESTION_KEYS = DEFS.map((d) => d.key);
