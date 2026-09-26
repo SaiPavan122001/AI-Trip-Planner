@@ -55,6 +55,7 @@ beforeEach(async () => {
       provider: 'amadeus',
       quotedPrice: { amount: 960000, currency: 'INR' },
       idempotencyKey: 'test-create-0001',
+      principal: null,
     },
     session,
   );
@@ -179,6 +180,7 @@ describe('re-pricing names the provider offer, never an internal id', () => {
         provider: 'amadeus',
         quotedPrice: { amount: 960000, currency: 'INR' },
         idempotencyKey: 'test-hotel-0001',
+        principal: null,
       },
       sessionFixture(),
     );

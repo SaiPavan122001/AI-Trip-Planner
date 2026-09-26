@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ProviderRegistry } from '@trip/providers';
 import {
   BookingEvent,
@@ -14,7 +14,7 @@ import {
   type PlanningSession,
 } from '@trip/shared';
 import { ApiError } from '../errors.js';
-import type { TripRepository } from '../repository/types.js';
+import { BookingChangedError, idempotencyId, type TripRepository } from '../repository/types.js';
 
 /**
  * Booking.
@@ -45,40 +45,72 @@ export interface CreateBookingInput {
   provider: string;
   quotedPrice: Money;
   idempotencyKey: string;
+  /** Who is asking. A key only ever means something within one principal. */
+  principal: string | null;
 }
 
 export class BookingService {
   constructor(private readonly deps: BookingServiceDeps) {}
 
+  /**
+   * Creates a booking at most once per (principal, key). The key is claimed
+   * atomically before any work starts, so concurrent retries cannot each
+   * create a booking: one does the work and the others are told it is in
+   * progress, or get its result once it finishes. A failed attempt releases
+   * the key so the client can retry it.
+   */
   async create(input: CreateBookingInput, session: PlanningSession): Promise<BookingRecord> {
-    const claim = await this.deps.repository.claimIdempotencyKey(
-      input.idempotencyKey,
-      'booking.create',
-    );
-    if (claim.existing) return claim.existing as BookingRecord;
+    const claimInput = { principal: input.principal, scope: 'booking.create', key: input.idempotencyKey };
+    // What this request asks for. The same key with a different request is a
+    // client mistake, and must not quietly return an unrelated booking.
+    const requestHash = createHash('sha256')
+      .update(
+        JSON.stringify([session.id, input.component, input.offerId, input.provider, input.quotedPrice]),
+      )
+      .digest('hex');
 
-    const now = new Date().toISOString();
-    const booking: BookingRecord = {
-      id: randomUUID(),
-      tripId: session.id,
-      state: 'draft',
-      component: input.component,
-      provider: input.provider,
-      providerReference: null,
-      quotedPrice: input.quotedPrice,
-      confirmedPrice: null,
-      idempotencyKey: input.idempotencyKey,
-      history: [],
-      createdAt: now,
-      updatedAt: now,
-    };
+    const claim = await this.deps.repository.claimIdempotencyKey({ ...claimInput, requestHash });
+    if (claim.status === 'completed') return claim.response as BookingRecord;
+    if (claim.status === 'in_progress') {
+      throw ApiError.conflict(
+        'This request is already being processed. Wait a moment and retry with the same Idempotency-Key.',
+      );
+    }
+    if (claim.status === 'mismatch') {
+      throw ApiError.unprocessable(
+        'That Idempotency-Key was already used for a different request. Use a new key for a new request.',
+      );
+    }
 
-    const created = await this.deps.repository.createBooking(booking);
-    await this.deps.repository.completeIdempotencyKey(
-      input.idempotencyKey,
-      'booking.create',
-      created,
-    );
+    let created: BookingRecord;
+    try {
+      const now = new Date().toISOString();
+      created = await this.deps.repository.createBooking({
+        id: randomUUID(),
+        tripId: session.id,
+        state: 'draft',
+        component: input.component,
+        provider: input.provider,
+        providerReference: null,
+        quotedPrice: input.quotedPrice,
+        confirmedPrice: null,
+        // Namespaced by principal and operation, so two callers who happen to
+        // pick the same key cannot collide on the bookings table either.
+        idempotencyKey: idempotencyId(claimInput),
+        history: [],
+        createdAt: now,
+        updatedAt: now,
+      });
+    } catch (err) {
+      // Nothing was created, so the client may safely retry with the same key.
+      await this.deps.repository.releaseIdempotencyKey(claimInput);
+      throw err;
+    }
+    // Deliberately outside the try: once the booking exists, the claim must
+    // not be released. If recording the result fails, the key stays claimed
+    // until it expires, and retries are refused rather than creating a second
+    // booking.
+    await this.deps.repository.completeIdempotencyKey(claimInput, created);
     return created;
   }
 
@@ -151,7 +183,14 @@ export class BookingService {
       updatedAt: new Date().toISOString(),
     };
 
-    return this.deps.repository.updateBooking(updated);
+    try {
+      return await this.deps.repository.updateBooking(updated, booking.state);
+    } catch (err) {
+      // Another request moved this booking first. The transition was not
+      // applied, and the caller is told so rather than retried blindly.
+      if (err instanceof BookingChangedError) throw ApiError.conflict(err.message);
+      throw err;
+    }
   }
 
   /**

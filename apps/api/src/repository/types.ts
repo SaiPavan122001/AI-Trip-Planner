@@ -29,6 +29,50 @@ export function storableSession(session: PlanningSession): PlanningSession {
  * PostgreSQL in production without a second code path through the routes.
  */
 
+/**
+ * Who is making the request, what for, and the client's key. All three are
+ * part of the identity of a claim: the same key from a different principal, or
+ * for a different operation, is a different claim and can never see, block or
+ * replay someone else's request.
+ */
+export interface IdempotencyInput {
+  /** The authenticated user, or null for an anonymous caller. */
+  principal: string | null;
+  scope: string;
+  key: string;
+}
+
+export type IdempotencyClaim =
+  /** This caller owns the key and must do the work, then complete or release it. */
+  | { status: 'claimed' }
+  /** The same request already finished; return its stored response. */
+  | { status: 'completed'; response: unknown }
+  /** The same request is being processed right now by another caller. */
+  | { status: 'in_progress' }
+  /** The key was already used for a different request, which is a client bug. */
+  | { status: 'mismatch' };
+
+/** How long a finished claim is remembered, so any reasonable retry is covered. */
+export const IDEMPOTENCY_RETENTION_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long an unfinished claim blocks retries. Short, so a request that
+ * crashed without releasing its key does not lock the client out for a day.
+ */
+export const IDEMPOTENCY_IN_PROGRESS_MS = 5 * 60 * 1000;
+
+/** The stored identity of a claim. JSON keeps the parts unambiguous. */
+export function idempotencyId({ principal, scope, key }: IdempotencyInput): string {
+  return JSON.stringify([principal, scope, key]);
+}
+
+/** A booking changed underneath the caller, between reading it and saving it. */
+export class BookingChangedError extends Error {
+  constructor() {
+    super('That booking was changed by another request. Reload it and try again.');
+    this.name = 'BookingChangedError';
+  }
+}
+
 export interface TripRepository {
   createSession(session: PlanningSession): Promise<PlanningSession>;
   getSession(id: string): Promise<PlanningSession | null>;
@@ -38,7 +82,13 @@ export interface TripRepository {
 
   createBooking(booking: BookingRecord): Promise<BookingRecord>;
   getBooking(id: string): Promise<BookingRecord | null>;
-  updateBooking(booking: BookingRecord): Promise<BookingRecord>;
+  /**
+   * Saves a booking only if it is still in the state the caller read it in.
+   * Two requests that both read `draft` and both try to move it on cannot
+   * both succeed: the second finds the state has changed and gets
+   * `BookingChangedError`, so a transition is applied at most once.
+   */
+  updateBooking(booking: BookingRecord, expectedState: BookingRecord['state']): Promise<BookingRecord>;
   listBookingsForTrip(tripId: string): Promise<BookingRecord[]>;
 
   /**
@@ -50,12 +100,20 @@ export interface TripRepository {
   getTravelerDetails(tripId: string): Promise<TravelerDetails[]>;
 
   /**
-   * Returns the stored response for an idempotency key, or null when this is
-   * the first time the key has been seen. Booking routes use this so a retried
-   * request cannot create a second reservation.
+   * Atomically claims an idempotency key for one request. Exactly one of any
+   * number of concurrent callers with the same key gets `claimed`; the rest
+   * are told the work is still `in_progress`, or is `completed` and what
+   * its response was. See `IdempotencyClaim`.
    */
-  claimIdempotencyKey(key: string, scope: string): Promise<{ existing: unknown | null }>;
-  completeIdempotencyKey(key: string, scope: string, response: unknown): Promise<void>;
+  claimIdempotencyKey(input: IdempotencyInput & { requestHash: string }): Promise<IdempotencyClaim>;
+  /** Stores the response for a claimed key, so retries return it. */
+  completeIdempotencyKey(input: IdempotencyInput, response: unknown): Promise<void>;
+  /**
+   * Gives up a claim because the work failed, so the client may retry with the
+   * same key. Without this, one failed request would block its key until the
+   * claim expired.
+   */
+  releaseIdempotencyKey(input: IdempotencyInput): Promise<void>;
 
   healthCheck(): Promise<{ ok: boolean; store: string; detail?: string }>;
 }

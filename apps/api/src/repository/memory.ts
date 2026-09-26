@@ -1,5 +1,14 @@
 import type { BookingRecord, PlanningSession, TravelerDetails } from '@trip/shared';
-import { storableSession, type TripRepository } from './types.js';
+import {
+  BookingChangedError,
+  IDEMPOTENCY_IN_PROGRESS_MS,
+  IDEMPOTENCY_RETENTION_MS,
+  idempotencyId,
+  storableSession,
+  type IdempotencyClaim,
+  type IdempotencyInput,
+  type TripRepository,
+} from './types.js';
 
 /**
  * In-memory store for local development and tests.
@@ -12,7 +21,13 @@ export class InMemoryRepository implements TripRepository {
   private readonly sessions = new Map<string, PlanningSession>();
   private readonly bookings = new Map<string, BookingRecord>();
   private readonly travelers = new Map<string, TravelerDetails[]>();
-  private readonly idempotency = new Map<string, unknown | null>();
+  private readonly idempotency = new Map<
+    string,
+    { requestHash: string; response: unknown; expiresAt: number }
+  >();
+
+  /** The clock is a parameter so expiry can be tested without waiting. */
+  constructor(private readonly now: () => number = () => Date.now()) {}
 
   // Sessions are validated on write and copied in and out, so a caller that
   // mutates an object after saving it cannot change what is stored, exactly
@@ -57,9 +72,14 @@ export class InMemoryRepository implements TripRepository {
     return this.bookings.get(id) ?? null;
   }
 
-  async updateBooking(booking: BookingRecord): Promise<BookingRecord> {
-    this.bookings.set(booking.id, { ...booking, updatedAt: new Date().toISOString() });
-    return this.bookings.get(booking.id)!;
+  async updateBooking(booking: BookingRecord, expectedState: BookingRecord['state']): Promise<BookingRecord> {
+    // No await between the check and the write, so in one process they are
+    // atomic; the PostgreSQL store does the same in a single statement.
+    const current = this.bookings.get(booking.id);
+    if (!current || current.state !== expectedState) throw new BookingChangedError();
+    const saved = { ...booking, updatedAt: new Date().toISOString() };
+    this.bookings.set(booking.id, saved);
+    return saved;
   }
 
   async listBookingsForTrip(tripId: string): Promise<BookingRecord[]> {
@@ -74,19 +94,43 @@ export class InMemoryRepository implements TripRepository {
     return this.travelers.get(tripId) ?? [];
   }
 
-  async claimIdempotencyKey(key: string, scope: string): Promise<{ existing: unknown | null }> {
-    const composite = `${scope}:${key}`;
-    if (this.idempotency.has(composite)) {
-      return { existing: this.idempotency.get(composite) ?? null };
+  async claimIdempotencyKey(input: IdempotencyInput & { requestHash: string }): Promise<IdempotencyClaim> {
+    // Everything from the lookup to the write is synchronous, so in one
+    // process two concurrent callers cannot both find the key free. The
+    // PostgreSQL store gets the same guarantee from a unique primary key.
+    const id = idempotencyId(input);
+    const now = this.now();
+    const existing = this.idempotency.get(id);
+    if (existing && existing.expiresAt > now) {
+      if (existing.requestHash !== input.requestHash) return { status: 'mismatch' };
+      return existing.response === undefined
+        ? { status: 'in_progress' }
+        : { status: 'completed', response: structuredClone(existing.response) };
     }
-    // Reserved with a null body: a concurrent retry sees the claim and waits
-    // for the first request's result rather than starting a second booking.
-    this.idempotency.set(composite, null);
-    return { existing: null };
+    this.idempotency.set(id, {
+      requestHash: input.requestHash,
+      response: undefined,
+      expiresAt: now + IDEMPOTENCY_IN_PROGRESS_MS,
+    });
+    return { status: 'claimed' };
   }
 
-  async completeIdempotencyKey(key: string, scope: string, response: unknown): Promise<void> {
-    this.idempotency.set(`${scope}:${key}`, response);
+  async completeIdempotencyKey(input: IdempotencyInput, response: unknown): Promise<void> {
+    const id = idempotencyId(input);
+    const claim = this.idempotency.get(id);
+    if (!claim) return;
+    this.idempotency.set(id, {
+      ...claim,
+      response: structuredClone(response),
+      expiresAt: this.now() + IDEMPOTENCY_RETENTION_MS,
+    });
+  }
+
+  async releaseIdempotencyKey(input: IdempotencyInput): Promise<void> {
+    const id = idempotencyId(input);
+    // Only an unfinished claim can be released; a completed one is a record
+    // of something that happened.
+    if (this.idempotency.get(id)?.response === undefined) this.idempotency.delete(id);
   }
 
   async healthCheck(): Promise<{ ok: boolean; store: string; detail?: string }> {
