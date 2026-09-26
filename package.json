@@ -5,7 +5,7 @@
   "description": "Open-source, constraint-aware AI trip planner: understands the traveler, searches real providers, optimizes the whole journey.",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22"
   },
   "scripts": {
     "build": "npm run build -w @trip/shared && npm run build -w @trip/providers && npm run build -w @trip/llm && npm run build -w @trip/engine && npm run build -w @trip/api && npm run build -w @trip/web",
@@ -16,8 +16,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "db:migrate": "npm run prisma:migrate -w @trip/api",
-    "db:generate": "npm run prisma:generate -w @trip/api",
-    "db:seed": "npm run seed -w @trip/api"
+    "db:generate": "npm run prisma:generate -w @trip/api"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

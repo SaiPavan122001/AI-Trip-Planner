@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import type { TripRepository } from '../repository/types.js';
 import { TRIP_ID, buildTestApp } from './helpers.js';
 
 let app: FastifyInstance;
@@ -38,5 +39,31 @@ describe('system endpoints', () => {
     });
 
     expect(res.statusCode).not.toBe(400);
+  });
+});
+
+describe('health endpoints', () => {
+  it('never returns the underlying database error to the public', async () => {
+    const { repository } = await buildTestApp();
+    const failing: TripRepository = Object.create(repository, {
+      healthCheck: {
+        value: async () => ({
+          ok: false,
+          store: 'postgresql',
+          detail: 'The database could not be reached.',
+          cause: 'connect ECONNREFUSED db.internal.example:5432 (user wayfare)',
+        }),
+      },
+    });
+    const { app: failingApp } = await buildTestApp({ repository: failing });
+
+    for (const url of ['/health', '/ready']) {
+      const res = await failingApp.inject({ method: 'GET', url });
+      expect(res.statusCode).toBe(503);
+      expect(res.body).not.toMatch(/ECONNREFUSED|db.internal|wayfare/);
+    }
+    expect((await failingApp.inject({ method: 'GET', url: '/health' })).json().store.detail).toBe(
+      'The database could not be reached.',
+    );
   });
 });

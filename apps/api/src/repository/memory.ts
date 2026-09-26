@@ -7,6 +7,7 @@ import {
   storableSession,
   type IdempotencyClaim,
   type IdempotencyInput,
+  type StoreHealth,
   type TripRepository,
 } from './types.js';
 
@@ -133,7 +134,7 @@ export class InMemoryRepository implements TripRepository {
     if (this.idempotency.get(id)?.response === undefined) this.idempotency.delete(id);
   }
 
-  async healthCheck(): Promise<{ ok: boolean; store: string; detail?: string }> {
+  async healthCheck(): Promise<StoreHealth> {
     return {
       ok: true,
       store: 'in-memory',

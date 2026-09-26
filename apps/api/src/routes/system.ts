@@ -8,8 +8,9 @@ import { sendError } from '../errors.js';
  * configured, and what each missing one would add.
  */
 export function registerSystemRoutes(app: FastifyInstance, ctx: AppContext): void {
-  app.get('/health', async (_req, reply) => {
-    const store = await ctx.repository.healthCheck();
+  app.get('/health', async (req, reply) => {
+    const { cause, ...store } = await ctx.repository.healthCheck();
+    if (cause) req.log.error({ cause }, 'Store health check failed');
     return reply.status(store.ok ? 200 : 503).send({
       status: store.ok ? 'ok' : 'degraded',
       store,
@@ -18,8 +19,9 @@ export function registerSystemRoutes(app: FastifyInstance, ctx: AppContext): voi
   });
 
   /** Kubernetes-style readiness: can this instance actually serve a request? */
-  app.get('/ready', async (_req, reply) => {
-    const store = await ctx.repository.healthCheck();
+  app.get('/ready', async (req, reply) => {
+    const { cause, ...store } = await ctx.repository.healthCheck();
+    if (cause) req.log.error({ cause }, 'Store health check failed');
     const canResolvePlaces = ctx.registry.geocoding.length > 0;
     const ready = store.ok && canResolvePlaces;
     return reply.status(ready ? 200 : 503).send({

@@ -65,6 +65,15 @@ export function idempotencyId({ principal, scope, key }: IdempotencyInput): stri
   return JSON.stringify([principal, scope, key]);
 }
 
+export interface StoreHealth {
+  ok: boolean;
+  store: string;
+  /** Safe to show anyone. */
+  detail?: string;
+  /** The underlying error, for logs only. Never put this in a response. */
+  cause?: string;
+}
+
 /** A booking changed underneath the caller, between reading it and saving it. */
 export class BookingChangedError extends Error {
   constructor() {
@@ -115,5 +124,5 @@ export interface TripRepository {
    */
   releaseIdempotencyKey(input: IdempotencyInput): Promise<void>;
 
-  healthCheck(): Promise<{ ok: boolean; store: string; detail?: string }>;
+  healthCheck(): Promise<StoreHealth>;
 }

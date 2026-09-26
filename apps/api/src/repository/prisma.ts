@@ -13,6 +13,7 @@ import {
   storableSession,
   type IdempotencyClaim,
   type IdempotencyInput,
+  type StoreHealth,
   type TripRepository,
 } from './types.js';
 
@@ -226,15 +227,19 @@ export class PrismaRepository implements TripRepository {
     });
   }
 
-  async healthCheck(): Promise<{ ok: boolean; store: string; detail?: string }> {
+  async healthCheck(): Promise<StoreHealth> {
     try {
       await this.prisma.$queryRaw`SELECT 1`;
       return { ok: true, store: 'postgresql' };
     } catch (err) {
+      // The health endpoint is public, and a driver's error text can name
+      // the host, the database and the user. `detail` is safe to send; the
+      // route logs `cause` for operators and never returns it.
       return {
         ok: false,
         store: 'postgresql',
-        detail: err instanceof Error ? err.message : 'Database unreachable',
+        detail: 'The database could not be reached.',
+        cause: err instanceof Error ? err.message : String(err),
       };
     }
   }
