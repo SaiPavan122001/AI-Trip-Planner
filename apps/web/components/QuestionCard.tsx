@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { SUPPORTED_CURRENCY, minorUnitExponent } from '@trip/shared/currency';
 import type { Question } from '@/lib/api';
 
 /**
@@ -292,8 +293,8 @@ function MoneyInput({
   onAnswer: (v: unknown) => void;
 }) {
   const [value, setValue] = useState('');
-  const currency = question.currency ?? 'INR';
-  const exponent = ['JPY', 'KRW', 'VND'].includes(currency) ? 0 : 2;
+  const currency = question.currency ?? SUPPORTED_CURRENCY;
+  const exponent = minorUnitExponent(currency);
 
   return (
     <form

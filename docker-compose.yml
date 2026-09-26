@@ -69,7 +69,6 @@ services:
       REDIS_URL: redis://redis:6379
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env — it is required in production}
-      DEFAULT_CURRENCY: ${DEFAULT_CURRENCY:-INR}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # Provider credentials. Every one is optional; an unset value disables
       # that adapter and the UI says which source is missing and why.

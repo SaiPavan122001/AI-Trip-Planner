@@ -22,6 +22,7 @@ import {
   type TripIntent,
 } from '@trip/shared';
 import { assumedDuration, isOpenAt } from './activities.js';
+import { supportedPriceOrUnknown } from './currency.js';
 import { addMinutes, instantFrom, localParts, minutesBetween, utcFromLocal } from './time.js';
 
 /**
@@ -619,7 +620,15 @@ async function transferItem(
 
   // Prefer a car for terminal transfers: walking an airport run with luggage
   // is not a realistic default whatever the distance says.
-  const offer = res.data.find((o) => o.mode === 'taxi') ?? res.data[0]!;
+  const chosen = res.data.find((o) => o.mode === 'taxi') ?? res.data[0]!;
+  // The route and time are still right when the fare is in another currency;
+  // only the fare becomes unknown.
+  const priced = supportedPriceOrUnknown(chosen.price, chosen.provenance);
+  if (priced.note && !notes.some((n) => n.message === priced.note!.message)) notes.push(priced.note);
+  const offer: TransferOffer =
+    priced.price === chosen.price
+      ? chosen
+      : { ...chosen, price: null, priceIsEstimate: false, estimateBasis: null };
   for (const warning of res.warnings) {
     notes.push({
       provider: res.provenance.provider,

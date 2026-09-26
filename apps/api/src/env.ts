@@ -55,11 +55,6 @@ const EnvSchema = z.object({
   /** Signing secret for session tokens. Required outside development. */
   JWT_SECRET: z.string().min(32).optional(),
 
-  DEFAULT_CURRENCY: z
-    .string()
-    .regex(/^[A-Z]{3}$/)
-    .default('INR'),
-
   RATE_LIMIT_MAX: z.coerce.number().int().default(120),
   RATE_LIMIT_WINDOW: z.string().default('1 minute'),
 

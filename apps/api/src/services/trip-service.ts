@@ -41,7 +41,6 @@ export interface TripServiceDeps {
   registry: ProviderRegistry;
   llm: TripLlm;
   repository: TripRepository;
-  defaultCurrency: string;
 }
 
 export class TripService {

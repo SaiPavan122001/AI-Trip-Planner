@@ -1,5 +1,6 @@
 export * from './accessibility.js';
 export * from './classify.js';
+export * from './currency.js';
 export * from './questioner.js';
 export * from './constraints.js';
 export * from './scoring.js';

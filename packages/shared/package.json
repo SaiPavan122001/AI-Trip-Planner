@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./currency": {
+      "types": "./dist/currency.d.ts",
+      "default": "./dist/currency.js"
     }
   },
   "scripts": {

@@ -20,6 +20,7 @@ import {
   type TripIntent,
 } from '@trip/shared';
 import { describeNeeds, unconfirmedHotelNeeds } from './accessibility.js';
+import { keepSupportedHotels } from './currency.js';
 import { cheapestRoom, scoreHotels, type ScoredCandidate } from './scoring.js';
 
 /**
@@ -136,7 +137,10 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
     }
   }
 
-  const { kept, filtered } = filterHotels(offers, intent, profile, constraints, nights);
+  // Currency first: nothing below may compare a rupee rate with another.
+  const supported = keepSupportedHotels(offers);
+  notes.push(...supported.notes);
+  const { kept, filtered } = filterHotels(supported.kept, intent, profile, constraints, nights);
 
   const distanceKm = new Map<string, number>();
   const transportCost = new Map<string, Money>();
@@ -263,16 +267,23 @@ function filterHotels(
     }
 
     const cheapest = [...usableRooms].sort((a, b) => compare(a.totalPrice, b.totalPrice))[0]!;
-    if (
-      accommodationBudget &&
-      accommodationBudget.currency === cheapest.totalPrice.currency &&
-      compare(cheapest.totalPrice, accommodationBudget) > 0
-    ) {
-      filtered.push({
-        hotelId: hotel.id,
-        reason: `Cheapest rate for ${nights} night(s) exceeds the accommodation budget.`,
-      });
-      continue;
+    if (accommodationBudget) {
+      // A rate that cannot be compared with the budget cannot be shown to
+      // meet it; skipping the check would quietly relax a hard constraint.
+      if (cheapest.totalPrice.currency !== accommodationBudget.currency) {
+        filtered.push({
+          hotelId: hotel.id,
+          reason: `Priced in ${cheapest.totalPrice.currency}, so it cannot be checked against your ${accommodationBudget.currency} budget.`,
+        });
+        continue;
+      }
+      if (compare(cheapest.totalPrice, accommodationBudget) > 0) {
+        filtered.push({
+          hotelId: hotel.id,
+          reason: `Cheapest rate for ${nights} night(s) exceeds the accommodation budget.`,
+        });
+        continue;
+      }
     }
 
     // Occupancy is a hard requirement: four people do not go into one double

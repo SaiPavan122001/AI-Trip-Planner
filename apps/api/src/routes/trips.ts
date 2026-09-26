@@ -13,7 +13,6 @@ export function registerTripRoutes(app: FastifyInstance, ctx: AppContext): void 
     registry: ctx.registry,
     llm: ctx.llm,
     repository: ctx.repository,
-    defaultCurrency: ctx.env.DEFAULT_CURRENCY,
   });
 
   const ownerOf = (req: { headers: Record<string, unknown> }): string | null => {

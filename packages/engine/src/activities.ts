@@ -9,6 +9,7 @@ import {
   type ProviderNote,
   type TravelerProfile,
 } from '@trip/shared';
+import { supportedPriceOrUnknown } from './currency.js';
 import { localParts } from './time.js';
 
 /**
@@ -92,7 +93,12 @@ export async function planActivities(
       limit: Math.min(20, target * 2),
     });
     if (isOk(res)) {
-      found.push(...res.data);
+      for (const activity of res.data) {
+        // A foreign entry price becomes unknown; the place is still worth visiting.
+        const priced = supportedPriceOrUnknown(activity.price, activity.provenance);
+        if (priced.note && !notes.some((n) => n.message === priced.note!.message)) notes.push(priced.note);
+        found.push(priced.price === activity.price ? activity : { ...activity, price: null, priceIsEstimate: false });
+      }
       for (const warning of res.warnings) {
         notes.push({
           provider: res.provenance.provider,

@@ -7,6 +7,11 @@
  * provider was unavailable and why.
  */
 
+import type { Question } from '@trip/shared';
+// The dependency-free entry point, so the browser bundle does not pull in the
+// schema library the rest of @trip/shared uses.
+import { minorUnitExponent } from '@trip/shared/currency';
+
 export interface ApiFailure {
   code: string;
   message: string;
@@ -154,7 +159,6 @@ export interface TripSession {
 
 // The engine's own type, so the limits the UI enforces are exactly the ones
 // the server validates against.
-import type { Question } from '@trip/shared';
 export type { Question };
 
 export interface TransportOffer {
@@ -310,7 +314,7 @@ export interface ProvidersResponse {
 
 export function formatMoney(m: Money | null | undefined, locale = 'en-IN'): string {
   if (!m) return '—';
-  const exponent = ['JPY', 'KRW', 'VND'].includes(m.currency) ? 0 : 2;
+  const exponent = minorUnitExponent(m.currency);
   return new Intl.NumberFormat(locale, {
     style: 'currency',
     currency: m.currency,

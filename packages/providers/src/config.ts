@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SUPPORTED_CURRENCY } from '@trip/shared';
 
 /**
  * Provider configuration is read once, from the environment, and validated.
@@ -7,8 +8,15 @@ import { z } from 'zod';
  * rather than to fall over or to substitute sample data.
  */
 
+// Configured costs must be in the one currency the planner works in. A
+// tariff or vehicle profile in another currency would otherwise be ignored
+// or, worse, summed with rupees; failing at boot names the problem instead.
+const InrOnly = z.literal(SUPPORTED_CURRENCY, {
+  errorMap: () => ({ message: `must be ${SUPPORTED_CURRENCY}; this planner works in Indian rupees only` }),
+});
+
 const TariffSchema = z.object({
-  currency: z.string().length(3),
+  currency: InrOnly,
   baseFare: z.number().nonnegative(),
   perKm: z.number().nonnegative(),
   perMinute: z.number().nonnegative(),
@@ -16,7 +24,7 @@ const TariffSchema = z.object({
 });
 
 const VehicleProfileSchema = z.object({
-  currency: z.string().length(3),
+  currency: InrOnly,
   consumptionPer100Km: z.number().positive(),
   energyPrice: z.number().positive(),
   perKmAllowance: z.number().nonnegative().default(0),

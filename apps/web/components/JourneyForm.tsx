@@ -2,6 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
+import { SUPPORTED_CURRENCY } from '@trip/shared/currency';
 import { ApiClientError, api } from '@/lib/api';
 
 /**
@@ -23,7 +24,6 @@ export function JourneyForm() {
   const [adults, setAdults] = useState(1);
   const [children, setChildren] = useState(0);
   const [infants, setInfants] = useState(0);
-  const [currency, setCurrency] = useState('INR');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,7 +38,7 @@ export function JourneyForm() {
         departureDate,
         returnDate: oneWay ? null : returnDate || null,
         travelers: { adults, children, infants },
-        currency,
+        currency: SUPPORTED_CURRENCY,
       });
       router.push(`/trips/${trip.id}`);
     } catch (err) {
@@ -129,21 +129,8 @@ export function JourneyForm() {
           <Counter label="Children" value={children} min={0} onChange={setChildren} />
           <Counter label="Infants" value={infants} min={0} onChange={setInfants} />
           <div>
-            <label className="label" htmlFor="currency">
-              Currency
-            </label>
-            <select
-              id="currency"
-              className="field"
-              value={currency}
-              onChange={(e) => setCurrency(e.target.value)}
-            >
-              {['INR', 'USD', 'EUR', 'GBP', 'AED', 'SGD', 'AUD', 'JPY'].map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
+            <span className="label">Currency</span>
+            <p className="field bg-sand-50 text-ink-soft">₹ Indian rupees</p>
           </div>
         </div>
       </fieldset>

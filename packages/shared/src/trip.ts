@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Place } from './geo.js';
+import { SUPPORTED_CURRENCY } from './money.js';
 
 /** ISO date, no time component: the traveller thinks in dates, not instants. */
 export const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD');
@@ -19,11 +20,13 @@ export const TripIntentInput = z.object({
     children: z.number().int().min(0).max(20).default(0),
     infants: z.number().int().min(0).max(10).default(0),
   }),
-  /** Currency the traveller thinks in. Host-configured default, never guessed silently. */
+  /** Always INR: see SUPPORTED_CURRENCY. Accepted in the request so the API
+   *  contract can widen later without changing shape. */
   currency: z
-    .string()
-    .regex(/^[A-Z]{3}$/)
-    .default('INR'),
+    .literal(SUPPORTED_CURRENCY, {
+      errorMap: () => ({ message: 'Trips are planned in Indian rupees (INR).' }),
+    })
+    .default(SUPPORTED_CURRENCY),
 });
 export type TripIntentInput = z.infer<typeof TripIntentInput>;
 

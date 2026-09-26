@@ -14,6 +14,7 @@ import {
   type TravelerProfile,
   type TripIntent,
 } from '@trip/shared';
+import { keepSupportedTransport } from './currency.js';
 import { scoreTransportOffers, type ScoredCandidate } from './scoring.js';
 
 /**
@@ -153,7 +154,10 @@ export async function searchTransport(
   const filtered: Array<{ offerId: string; reason: string }> = [];
 
   for (const result of settled) {
-    const { kept, dropped } = applyHardConstraints(result.offers.map((o) => o.candidate), constraints, profile);
+    // Currency first: nothing below may compare a rupee price with another.
+    const supported = keepSupportedTransport(result.offers.map((o) => o.candidate));
+    notes.push(...supported.notes);
+    const { kept, dropped } = applyHardConstraints(supported.kept, constraints, profile);
     filtered.push(...dropped);
     const scored = scoreTransportOffers(kept, profile);
     const enriched: ModeResult = {
@@ -164,6 +168,9 @@ export async function searchTransport(
       bestForYou: scored[0]?.candidate ?? null,
       note:
         result.note ??
+        // Everything this mode returned was in another currency: say that,
+        // not that the traveller's requirements ruled it out.
+        (supported.kept.length === 0 && result.offers.length > 0 ? (supported.notes[0] ?? null) : null) ??
         (kept.length === 0 && result.offers.length > 0
           ? noteFrom(
               'no_availability',
@@ -353,16 +360,24 @@ export function applyHardConstraints(
       });
       continue;
     }
-    if (
-      transportBudget &&
-      transportBudget.currency === offer.totalPrice.currency &&
-      compare(offer.totalPrice, transportBudget) > 0
-    ) {
-      dropped.push({
-        offerId: offer.id,
-        reason: 'Costs more than the transport budget on its own.',
-      });
-      continue;
+    if (transportBudget) {
+      // A price that cannot be compared with the budget cannot be shown to
+      // meet it. Skipping the check, as a currency mismatch used to, would
+      // quietly relax a hard constraint.
+      if (offer.totalPrice.currency !== transportBudget.currency) {
+        dropped.push({
+          offerId: offer.id,
+          reason: `Priced in ${offer.totalPrice.currency}, so it cannot be checked against your ${transportBudget.currency} budget.`,
+        });
+        continue;
+      }
+      if (compare(offer.totalPrice, transportBudget) > 0) {
+        dropped.push({
+          offerId: offer.id,
+          reason: 'Costs more than the transport budget on its own.',
+        });
+        continue;
+      }
     }
     if (needsRefundable && offer.refundable === false) {
       dropped.push({ offerId: offer.id, reason: 'Non-refundable, and you required flexibility.' });
