@@ -3,6 +3,7 @@ import type { ProviderRegistry } from '@trip/providers';
 import {
   BookingEvent,
   CONFIRMED_STATES,
+  isClientBookingEvent,
   TravelerDetails,
   compare,
   formatMoney,
@@ -88,11 +89,32 @@ export class BookingService {
   }
 
   /**
-   * Applies one event. An event that is not a declared transition from the
-   * current state is rejected with the list of what would be valid, which
-   * makes client bugs obvious instead of silent.
+   * The only way a client may move a booking. Events that record what a
+   * provider or payment processor did are refused outright, whatever state
+   * the booking is in: those facts can only come from this service's own
+   * provider workflows, never from a request body.
    */
-  async apply(
+  async applyClientEvent(
+    id: string,
+    event: BookingEvent,
+    detail: { note?: string } = {},
+  ): Promise<BookingRecord> {
+    if (!isClientBookingEvent(event)) {
+      throw ApiError.forbidden(
+        'event_not_permitted',
+        `"${event}" records something a provider or payment processor did, so it can only be produced by the server.`,
+      );
+    }
+    return this.transition(id, event, detail.note === undefined ? {} : { note: detail.note });
+  }
+
+  /**
+   * Applies one event. An event that is not a declared transition from the
+   * current state is rejected, which makes client bugs obvious instead of
+   * silent. Private: server-side workflows call it with facts they obtained
+   * from a provider; clients go through `applyClientEvent`.
+   */
+  private async transition(
     id: string,
     event: BookingEvent,
     detail: { note?: string; providerReference?: string; confirmedPrice?: Money } = {},
@@ -142,14 +164,14 @@ export class BookingService {
     revalidationToken: string | null,
   ): Promise<{ booking: BookingRecord; message: string }> {
     let booking = await this.get(id);
-    booking = await this.apply(id, 'START_REVALIDATION', { note: 'Re-pricing with the provider.' });
+    booking = await this.transition(id, 'START_REVALIDATION', { note: 'Re-pricing with the provider.' });
 
     if (booking.component === 'transport_outbound' || booking.component === 'transport_return') {
       const provider = this.deps.registry.flights.find(
         (p) => p.descriptor.id === booking.provider,
       );
       if (!provider || !revalidationToken) {
-        const updated = await this.apply(id, 'REVALIDATION_UNAVAILABLE', {
+        const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', {
           note: 'The provider that quoted this fare is no longer connected.',
         });
         return {
@@ -161,7 +183,7 @@ export class BookingService {
 
       const res = await provider.revalidateFlight(booking.id, revalidationToken);
       if (!isOk(res)) {
-        const updated = await this.apply(id, 'REVALIDATION_UNAVAILABLE', { note: res.message });
+        const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', { note: res.message });
         return { booking: updated, message: res.message };
       }
 
@@ -170,14 +192,14 @@ export class BookingService {
         current.currency === booking.quotedPrice.currency &&
         compare(current, booking.quotedPrice) === 0
       ) {
-        const updated = await this.apply(id, 'REVALIDATION_OK', {
+        const updated = await this.transition(id, 'REVALIDATION_OK', {
           note: `Confirmed at ${formatMoney(current)}.`,
           confirmedPrice: current,
         });
         return { booking: updated, message: `Still available at ${formatMoney(current)}.` };
       }
 
-      const updated = await this.apply(id, 'REVALIDATION_PRICE_CHANGED', {
+      const updated = await this.transition(id, 'REVALIDATION_PRICE_CHANGED', {
         note: `Provider now quotes ${formatMoney(current)}, was ${formatMoney(booking.quotedPrice)}.`,
         confirmedPrice: current,
       });
@@ -190,18 +212,18 @@ export class BookingService {
     if (booking.component === 'hotel') {
       const provider = this.deps.registry.hotels.find((p) => p.descriptor.id === booking.provider);
       if (!provider || !revalidationToken) {
-        const updated = await this.apply(id, 'REVALIDATION_UNAVAILABLE', {
+        const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', {
           note: 'The provider that quoted this rate is no longer connected.',
         });
         return { booking: updated, message: 'This rate cannot be re-priced.' };
       }
       const res = await provider.revalidateHotel(booking.id, revalidationToken);
       if (!isOk(res)) {
-        const updated = await this.apply(id, 'REVALIDATION_UNAVAILABLE', { note: res.message });
+        const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', { note: res.message });
         return { booking: updated, message: res.message };
       }
       const room = res.data.rooms[0]!;
-      const updated = await this.apply(
+      const updated = await this.transition(
         id,
         compare(room.totalPrice, booking.quotedPrice) === 0
           ? 'REVALIDATION_OK'
@@ -211,7 +233,7 @@ export class BookingService {
       return { booking: updated, message: `Provider quotes ${formatMoney(room.totalPrice)}.` };
     }
 
-    const updated = await this.apply(id, 'REVALIDATION_UNAVAILABLE', {
+    const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', {
       note: 'No provider supports re-pricing this component.',
     });
     return {
@@ -242,13 +264,13 @@ export class BookingService {
       );
     }
 
-    await this.apply(id, 'PROVIDER_BOOKING_STARTED', { note: 'Sending the booking to the provider.' });
+    await this.transition(id, 'PROVIDER_BOOKING_STARTED', { note: 'Sending the booking to the provider.' });
 
     // No connected adapter implements ticketing yet: Amadeus Self-Service
     // requires a separate production agreement for the Flight Create Orders
     // endpoint. Rather than simulate a confirmation, the booking fails with
     // an accurate reason and the payment is flagged for release.
-    const failed = await this.apply(id, 'PROVIDER_FAILED', {
+    const failed = await this.transition(id, 'PROVIDER_FAILED', {
       note: 'No connected provider is authorised to issue tickets for this deployment.',
     });
     return {

@@ -100,6 +100,29 @@ export function nextBookingState(state: BookingState, event: BookingEvent): Book
   return BOOKING_TRANSITIONS[state][event] ?? null;
 }
 
+/**
+ * The only events a client may send. Everything else records a fact that only
+ * a trusted server-side workflow can know: that a provider re-priced the
+ * offer (`REVALIDATION_*`), that a payment provider authorised a charge
+ * (`PAYMENT_*`), or that a booking provider confirmed, ticketed or refunded
+ * (`PROVIDER_*`, `REFUND_*`). A client that could send those could mark a
+ * booking paid or confirmed without either having happened.
+ *
+ * `START_REVALIDATION` is also server-only: re-pricing is started by the
+ * server when it actually calls the provider, never as a bare state change.
+ */
+export const CLIENT_BOOKING_EVENTS: ReadonlySet<BookingEvent> = new Set<BookingEvent>([
+  'SUBMIT_TRAVELER_DETAILS',
+  'SUBMIT_REVIEW',
+  'USER_CONFIRM',
+  'ACCEPT_NEW_PRICE',
+  'CANCEL',
+]);
+
+export function isClientBookingEvent(event: BookingEvent): boolean {
+  return CLIENT_BOOKING_EVENTS.has(event);
+}
+
 /** States in which the system may tell the traveller a reservation exists. */
 export const CONFIRMED_STATES: ReadonlySet<BookingState> = new Set(['confirmed', 'ticketed']);
 

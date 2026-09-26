@@ -41,6 +41,11 @@ export class ApiError extends Error {
     return new ApiError(409, 'conflict', message);
   }
 
+  /** Understood and well-formed, but the caller may never perform it. */
+  static forbidden(code: string, message: string): ApiError {
+    return new ApiError(403, code, message);
+  }
+
   static unprocessable(message: string, details?: unknown): ApiError {
     return new ApiError(422, 'unprocessable', message, details);
   }
