@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import { ApiError, sendError } from '../errors.js';
-import { TripService } from '../services/trip-service.js';
+import { TripService, type ModificationResult } from '../services/trip-service.js';
 
 /**
  * Trip planning endpoints, in the order a traveller meets them:
@@ -147,16 +147,24 @@ export function registerTripRoutes(app: FastifyInstance, ctx: AppContext): void 
       if (rejectedParameters.length > 0) {
         req.log.warn({ tripId: id, rejectedParameters }, 'Modification parameters failed validation and were dropped');
       }
-      return reply.send({
-        trip: outcome.session,
-        interpretation: outcome.interpretation,
-        understoodBy: outcome.understoodBy,
-        reSearched: outcome.reSearch,
-        preserved: outcome.preserved,
-        requiresConsent: outcome.requiresConsent,
-        plans: outcome.result?.plans ?? outcome.session.plans,
-        budgetConflict: outcome.result?.budgetConflict ?? null,
-      });
+      return reply.send({ ...modificationBody(outcome), understoodBy: outcome.understoodBy });
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  /**
+   * The traveller's answer to a change that needed their say-so. Answering a
+   * question that is no longer pending returns 409 and changes nothing.
+   */
+  app.post('/v1/trips/:id/modify/consent', async (req, reply) => {
+    try {
+      const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+      const { pendingModificationId, accept } = z
+        .object({ pendingModificationId: z.string().uuid(), accept: z.boolean() })
+        .parse(req.body);
+      const outcome = await service.consent(id, pendingModificationId, accept);
+      return reply.send(modificationBody(outcome));
     } catch (err) {
       return sendError(reply, err);
     }
@@ -211,5 +219,20 @@ function summariseSearch(search: {
       unavailableReason: m.note,
     })),
     filteredByYourRequirements: search.filtered,
+  };
+}
+
+/** The response shape shared by a modification and the answer to its question. */
+function modificationBody(outcome: Omit<ModificationResult, 'understoodBy' | 'diagnostics'>) {
+  return {
+    trip: outcome.session,
+    status: outcome.status,
+    interpretation: outcome.interpretation,
+    reSearched: outcome.reSearched,
+    kept: outcome.kept,
+    released: outcome.released,
+    consent: outcome.consent,
+    plans: outcome.result?.plans ?? outcome.session.plans,
+    budgetConflict: outcome.result?.budgetConflict ?? null,
   };
 }

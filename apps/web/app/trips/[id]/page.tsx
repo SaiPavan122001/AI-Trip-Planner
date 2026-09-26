@@ -79,28 +79,37 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
     }
   }, [id]);
 
+  // One path for a change and for the answer to its question. Plans always
+  // follow the response: when a change clears plans that no longer fit the
+  // trip (new dates, a different group), the old ones must not stay on screen.
+  const applyModification = useCallback(async (request: () => Promise<ModifyResponse>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await request();
+      setLastModification(result);
+      setTrip(result.trip);
+      setPlanResult((current) =>
+        current
+          ? { ...current, plans: result.plans, budgetConflict: result.budgetConflict, trip: result.trip }
+          : current,
+      );
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : 'That change could not be applied.');
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
   const modify = useCallback(
-    async (utterance: string) => {
-      setBusy(true);
-      setError(null);
-      try {
-        const result = await api.modify(id, utterance);
-        setLastModification(result);
-        setTrip(result.trip);
-        if (result.plans.length > 0) {
-          setPlanResult((current) =>
-            current
-              ? { ...current, plans: result.plans, budgetConflict: result.budgetConflict, trip: result.trip }
-              : current,
-          );
-        }
-      } catch (err) {
-        setError(err instanceof ApiClientError ? err.message : 'That change could not be applied.');
-      } finally {
-        setBusy(false);
-      }
-    },
-    [id],
+    (utterance: string) => applyModification(() => api.modify(id, utterance)),
+    [id, applyModification],
+  );
+
+  const answerModification = useCallback(
+    (pendingId: string, accept: boolean) =>
+      applyModification(() => api.answerModification(id, pendingId, accept)),
+    [id, applyModification],
   );
 
   const selectPlan = useCallback(
@@ -216,7 +225,9 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
                 <ModifyBar
                   busy={busy}
                   lastResult={lastModification}
+                  pending={trip.pendingModification}
                   onSubmit={(utterance) => void modify(utterance)}
+                  onAnswer={(pendingId, accept) => void answerModification(pendingId, accept)}
                 />
               </aside>
             </div>

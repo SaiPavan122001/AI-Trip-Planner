@@ -4,6 +4,7 @@ import {
   formatMoney,
   money,
   nightsBetween,
+  type ActivityOffer,
   type ConstraintSet,
   type HotelOffer,
   type Money,
@@ -15,7 +16,7 @@ import {
   type TripIntent,
   type TripPlan,
 } from '@trip/shared';
-import { planActivities, type ActivityPlanResult } from './activities.js';
+import { clusterByProximity, planActivities, type ActivityPlanResult } from './activities.js';
 import { classifyJourney } from './classify.js';
 import { computeCost, detectBudgetConflict, type BudgetConflict } from './cost.js';
 import { searchHotels, modelLocalTransport, type HotelSearchResult } from './hotels.js';
@@ -44,6 +45,19 @@ export interface PlanGenerationDeps {
   intent: TripIntent;
   profile: TravelerProfile;
   constraints: ConstraintSet;
+  /**
+   * Parts of an earlier plan to keep exactly as they are. Each one replaces
+   * its search entirely: the kept offer is used in every plan, with its
+   * original provenance, so it is visibly the same item and not a new quote.
+   */
+  keep?: KeptComponents;
+}
+
+export interface KeptComponents {
+  outbound?: TransportOffer | null;
+  return?: TransportOffer | null;
+  hotel?: SelectedHotel | null;
+  activities?: ActivityOffer[] | null;
 }
 
 export interface PlanGenerationResult {
@@ -67,6 +81,7 @@ const ARCHETYPE_LABEL: Record<PlanArchetype, string> = {
 
 export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGenerationResult> {
   const { registry, intent, profile, constraints } = deps;
+  const kept = deps.keep ?? {};
   const log: Array<{ at: string; step: string; detail: string }> = [];
   const note = (step: string, detail: string) =>
     log.push({ at: new Date().toISOString(), step, detail });
@@ -84,12 +99,23 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
   // Transport and activities are independent, so they run together. Hotels
   // wait for activities, because where you will spend your days is an input
   // to where it makes sense to sleep.
+  const activityDays = Math.max(0, nights - 1);
   const [outbound, inbound, activities] = await Promise.all([
-    searchTransport({ registry, intent, classification, profile, constraints }, 'outbound'),
-    intent.returnDate
-      ? searchTransport({ registry, intent, classification, profile, constraints }, 'return')
-      : Promise.resolve(null),
-    planActivities(registry, intent.destination, profile, Math.max(0, nights - 1), intent.currency),
+    kept.outbound
+      ? Promise.resolve(keptTransport('outbound', intent.departureDate, kept.outbound, profile))
+      : searchTransport({ registry, intent, classification, profile, constraints }, 'outbound'),
+    !intent.returnDate
+      ? Promise.resolve(null)
+      : kept.return
+        ? Promise.resolve(keptTransport('return', intent.returnDate, kept.return, profile))
+        : searchTransport({ registry, intent, classification, profile, constraints }, 'return'),
+    kept.activities
+      ? Promise.resolve<ActivityPlanResult>({
+          activities: kept.activities,
+          clusters: clusterByProximity(kept.activities, activityDays),
+          notes: [],
+        })
+      : planActivities(registry, intent.destination, profile, activityDays, intent.currency),
   ]);
 
   const searchedModes = outbound.modes.filter((m) => m.offers.length > 0);
@@ -106,14 +132,16 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
   );
 
   const localTransportPerKm = perKmRate(registry, intent.currency);
-  const hotels = await searchHotels({
-    registry,
-    intent,
-    profile,
-    constraints,
-    activities: activities.activities,
-    localTransportPerKm,
-  });
+  const hotels = kept.hotel
+    ? keptHotel(kept.hotel)
+    : await searchHotels({
+        registry,
+        intent,
+        profile,
+        constraints,
+        activities: activities.activities,
+        localTransportPerKm,
+      });
   note(
     'hotel_search',
     hotels.candidates.length
@@ -126,7 +154,24 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
     ...(inbound?.notes ?? []),
     ...hotels.notes,
     ...activities.notes,
+    ...keptNotes(kept),
   ];
+
+  // "Use the train": every plan takes that mode where an option was found.
+  // If none was, the plans use the best alternatives and say so.
+  const preferred = profile.transport.preferredMode;
+  if (preferred && !kept.outbound) {
+    const found = outbound.modes.some((m) => m.mode === preferred && m.offers.length > 0);
+    if (!found) {
+      notes.push({
+        provider: 'engine',
+        providerLabel: 'Planner',
+        status: 'no_availability',
+        message: `You asked to travel by ${preferred.replace('_', ' ')}, but no such option could be found for these dates, so the plans use other ways of travelling.`,
+        occurredAt: new Date().toISOString(),
+      });
+    }
+  }
 
   const plans: TripPlan[] = [];
   const seen = new Set<string>();
@@ -134,7 +179,7 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
   for (const archetype of ARCHETYPES) {
     const outboundOffer = pickTransport(outbound, archetype, profile);
     const inboundOffer = inbound ? pickTransport(inbound, archetype, profile) : null;
-    const hotel = pickHotel(hotels, archetype, intent, profile, localTransportPerKm, nights);
+    const hotel = kept.hotel ?? pickHotel(hotels, archetype, intent, profile, localTransportPerKm, nights);
 
     // Nothing to plan with is not a plan. It is reported through the notes.
     if (!outboundOffer && !hotel) continue;
@@ -247,8 +292,12 @@ function pickTransport(
   archetype: PlanArchetype,
   profile: TravelerProfile,
 ): TransportOffer | null {
-  const all = search.modes.flatMap((m) => m.offers.map((o) => o.candidate));
-  if (all.length === 0) return null;
+  const every = search.modes.flatMap((m) => m.offers.map((o) => o.candidate));
+  if (every.length === 0) return null;
+  // A mode the traveller asked for narrows every archetype to it, when it
+  // has options; otherwise all modes remain and the plans say why.
+  const preferred = profile.transport.preferredMode;
+  const all = preferred && every.some((o) => o.mode === preferred) ? every.filter((o) => o.mode === preferred) : every;
 
   switch (archetype) {
     case 'budget':
@@ -393,4 +442,78 @@ function buildTradeoffs(
 function perKmRate(registry: ProviderRegistry, currency: string): Money | null {
   const perKm = registry.taxiTariffs[currency]?.perKm;
   return perKm === undefined ? null : money(perKm, currency);
+}
+
+// ---------------------------------------------------------------- kept parts
+
+/**
+ * A kept journey stands in for its whole search: the comparison shows it as
+ * the only option for that direction, because nothing else was searched.
+ */
+function keptTransport(
+  direction: 'outbound' | 'return',
+  date: string,
+  offer: TransportOffer,
+  profile: TravelerProfile,
+): TransportSearchResult {
+  return {
+    direction,
+    date,
+    modes: [
+      {
+        mode: offer.mode,
+        offers: scoreTransportOffers([offer], profile),
+        cheapest: offer,
+        fastest: offer,
+        bestForYou: offer,
+        note: null,
+      },
+    ],
+    notes: [],
+    filtered: [],
+  };
+}
+
+function keptHotel(selected: SelectedHotel): HotelSearchResult {
+  return {
+    candidates: [{ candidate: selected.hotel, score: 1, breakdown: {} }],
+    selected,
+    notes: [],
+    filtered: [],
+    distanceKm: new Map(
+      selected.distanceToActivitiesKm === null ? [] : [[selected.hotel.id, selected.distanceToActivitiesKm]],
+    ),
+    localTransportCost: new Map(),
+  };
+}
+
+/**
+ * Tells the traveller which parts were kept and when their prices were
+ * retrieved: a kept price is the one quoted then, not a new quote.
+ */
+function keptNotes(kept: KeptComponents): ProviderNote[] {
+  const items: Array<[string, string | undefined]> = [
+    ['outbound journey', kept.outbound?.provenance.retrievedAt],
+    ['return journey', kept.return?.provenance.retrievedAt],
+    ['hotel', kept.hotel?.hotel.provenance.retrievedAt],
+  ];
+  const notes: ProviderNote[] = items
+    .filter((i): i is [string, string] => i[1] !== undefined)
+    .map(([what, at]) => ({
+      provider: 'engine',
+      providerLabel: 'Planner',
+      status: 'ok',
+      message: `Kept from your earlier plan: the ${what}, with the price as retrieved on ${at.slice(0, 10)}. Prices can change after they are retrieved.`,
+      occurredAt: new Date().toISOString(),
+    }));
+  if (kept.activities) {
+    notes.push({
+      provider: 'engine',
+      providerLabel: 'Planner',
+      status: 'ok',
+      message: 'Kept from your earlier plan: the places to visit.',
+      occurredAt: new Date().toISOString(),
+    });
+  }
+  return notes;
 }

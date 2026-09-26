@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import {
   ModificationIntent,
+  SUPPORTED_CURRENCY,
   TripComponent,
+  money,
   sanitizeModificationParameters,
   type ModificationRequest,
 } from '@trip/shared';
@@ -45,6 +47,8 @@ const ModificationSchema = z.object({
       adults: z.number().nullable().default(null),
       children: z.number().nullable().default(null),
       infants: z.number().nullable().default(null),
+      /** A new total budget in rupees; converted to exact paise by code, not the model. */
+      budgetTotalRupees: z.number().nullable().default(null),
     })
     .default({}),
   pinnedComponents: z.array(TripComponent).default([]),
@@ -59,6 +63,8 @@ Rules:
 - Fill only the parameters the traveller actually stated. Leave everything else null or empty.
 - "Keep the same X" means X goes in pinnedComponents.
 - "Make it cheaper" is reduce_cost. "I want a nicer hotel" is change_hotel_tier. "Use the train" is change_transport_mode with mode: "train".
+- "Move the trip to 12 December" is change_dates. "Two of my friends are joining" is change_party_size with the new totals. "Make the budget 80,000" is change_budget with budgetTotalRupees: 80000.
+- Only fill departureDate, returnDate or traveller counts with values the traveller actually gave; never work them out or guess.
 - Valid modes: flight, train, bus, self_drive, rental_car, taxi, ferry.
 - Valid priorities: cheapest, fastest, most_comfortable, safest, luxury, family_friendly, flexible, scenic, least_travel_time, fewest_transfers.
 - Times are HH:MM on the 24-hour clock. Dates are YYYY-MM-DD. Traveller counts are whole numbers.
@@ -140,9 +146,17 @@ function finalise(
   pinned: ModificationRequest['pinnedComponents'],
   source: { fromFallback: boolean; fallbackReason: string | null },
 ): InterpretedModification {
-  const nonEmpty = Object.fromEntries(
-    Object.entries(raw).filter(([, v]) => !(Array.isArray(v) && v.length === 0)),
+  const { budgetTotalRupees, ...rest } = raw;
+  const nonEmpty: Record<string, unknown> = Object.fromEntries(
+    Object.entries(rest).filter(([, v]) => !(Array.isArray(v) && v.length === 0)),
   );
+  // Rupees to exact paise here, in code; the model never produces money.
+  if (budgetTotalRupees !== null && budgetTotalRupees !== undefined) {
+    nonEmpty['budgetTotal'] =
+      typeof budgetTotalRupees === 'number' && Number.isFinite(budgetTotalRupees)
+        ? money(budgetTotalRupees, SUPPORTED_CURRENCY)
+        : budgetTotalRupees;
+  }
   const { parameters, rejected } = sanitizeModificationParameters(nonEmpty);
   const request: ModificationRequest = {
     utterance,
@@ -169,6 +183,7 @@ const INTENT_DESCRIPTION: Record<ModificationRequest['intent'], string> = {
   shift_departure_time: 'change your travel times',
   change_party_size: 'change who is travelling',
   change_dates: 'change your travel dates',
+  change_budget: 'change your budget',
   reprioritise: 'change what matters most',
   replace_component: 'replace part of the plan',
   add_activity: 'add something to do',
@@ -233,6 +248,18 @@ export function interpretModificationByRules(utterance: string): {
     };
   };
 
+  // "Make the budget ₹80,000", "budget of 1.5 lakh": only when an amount is
+  // actually given, and converted to exact paise in code.
+  const budget = /\bbudget\b[^\d₹]*(?:₹|rs\.?\s*|inr\s*)?([\d][\d,]*(?:\.\d+)?)\s*(k|lakh|lac)?\b/.exec(text);
+  if (budget) {
+    const unit = budget[2] === 'k' ? 1_000 : budget[2] ? 100_000 : 1;
+    const rupees = Number(budget[1]!.replace(/,/g, '')) * unit;
+    return build(
+      'change_budget',
+      { budgetTotal: money(rupees, SUPPORTED_CURRENCY) },
+      `Setting the total budget to ₹${rupees.toLocaleString('en-IN')}.`,
+    );
+  }
   if (/cheaper|less expensive|lower (the )?(cost|price)|reduce (the )?cost|save money/.test(text)) {
     return build('reduce_cost', {}, 'Re-planning with price as the first priority.');
   }

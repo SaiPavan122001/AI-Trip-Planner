@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { LocalTime } from './trip.js';
+import { LocalTime, TransportMode } from './trip.js';
 
 export const TravelStyle = z.enum(['budget', 'standard', 'premium', 'luxury']);
 export type TravelStyle = z.infer<typeof TravelStyle>;
@@ -108,6 +108,12 @@ export const TransportPreferences = z.object({
   cabinBagsPerTraveler: z.number().int().min(0).max(3).default(1),
   /** Modes the traveller ruled out explicitly, for example "no buses". */
   excludedModes: z.array(z.string()).default([]),
+  /**
+   * The way the traveller asked to travel ("use the train"). Plans use it
+   * where an option exists; every other mode is still searched and shown,
+   * so the comparison stays honest and the traveller can change their mind.
+   */
+  preferredMode: TransportMode.nullable().default(null),
   refundableRequired: z.boolean().default(false),
 });
 export type TransportPreferences = z.infer<typeof TransportPreferences>;

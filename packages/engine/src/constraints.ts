@@ -188,6 +188,43 @@ export function deriveEnvelope(
   };
 }
 
+/**
+ * The budget figures the traveller actually stated, recovered from a
+ * constraint set. Only the total and the daily allowance are ever asked;
+ * the transport and accommodation splits are always derived from the total
+ * and the travel style, so they are returned as null to be derived afresh.
+ *
+ * Passing the derived envelope back in as if it were stated used to turn the
+ * split into explicit hard constraints on the next answer, and kept it fixed
+ * when the total later changed.
+ */
+export function statedBudget(constraints: ConstraintSet, profile: TravelerProfile): BudgetAnswers {
+  return {
+    total: constraints.budget.total,
+    transport: null,
+    accommodation: null,
+    // The envelope fills dailySpend from the total when none was stated, so
+    // only count it as stated when the question was answered.
+    dailySpendPerPerson: profile.answeredKeys.includes('budget.daily_spend')
+      ? constraints.budget.dailySpend
+      : null,
+  };
+}
+
+/**
+ * Rebuilds the constraint set after the trip, the profile or the budget
+ * changes, so every derived figure and rule follows the change. Waivers the
+ * traveller granted are kept unless the change makes them meaningless.
+ */
+export function rebuildConstraints(
+  intent: TripIntent,
+  profile: TravelerProfile,
+  previous: ConstraintSet,
+  budget: BudgetAnswers = statedBudget(previous, profile),
+): ConstraintSet {
+  return { ...buildConstraints(intent, profile, budget), waivers: previous.waivers };
+}
+
 /** Which envelope figures were inferred rather than stated, for the UI. */
 export function derivedBudgetKeys(budget: BudgetAnswers): string[] {
   const derived: string[] = [];

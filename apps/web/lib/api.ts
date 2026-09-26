@@ -114,6 +114,12 @@ export const api = {
       body: JSON.stringify({ utterance }),
     }),
 
+  answerModification: (id: string, pendingModificationId: string, accept: boolean) =>
+    request<ModifyResponse>(`/v1/trips/${id}/modify/consent`, {
+      method: 'POST',
+      body: JSON.stringify({ pendingModificationId, accept }),
+    }),
+
   providers: () => request<ProvidersResponse>('/v1/providers'),
 };
 
@@ -129,6 +135,13 @@ export interface Money {
 export interface TripSession {
   id: string;
   stage: string;
+  /** A change waiting for the traveller's answer; survives a page reload. */
+  pendingModification: {
+    id: string;
+    question: string;
+    acceptLabel: string;
+    declineLabel: string;
+  } | null;
   intent: {
     origin: { name: string; displayName: string; countryName: string; timezone: string };
     destination: { name: string; displayName: string; countryName: string; timezone: string };
@@ -308,11 +321,20 @@ export interface PlanResponse {
 
 export interface ModifyResponse {
   trip: TripSession;
+  /**
+   * no_change: nothing changed; `interpretation` says why.
+   * needs_consent: nothing changes until `consent` is answered.
+   * applied: saved, and plans rebuilt where needed.
+   * saved: saved; plans will use it when next built.
+   */
+  status: 'no_change' | 'needs_consent' | 'applied' | 'saved';
   interpretation: string;
-  understoodBy: string;
+  /** Absent on the answer to a consent question. */
+  understoodBy?: string;
   reSearched: string[];
-  preserved: string[];
-  requiresConsent: { constraint: string; question: string } | null;
+  kept: string[];
+  released: Array<{ component: string; reason: string }>;
+  consent: { id: string; question: string; acceptLabel: string; declineLabel: string } | null;
   plans: TripPlan[];
   budgetConflict: PlanResponse['budgetConflict'];
 }
