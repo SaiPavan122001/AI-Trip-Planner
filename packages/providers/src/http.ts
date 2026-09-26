@@ -32,6 +32,14 @@ export class HttpError extends Error {
   }
 }
 
+/** The caller stopped waiting (its AbortSignal fired). Never retried. */
+export class RequestAbortedError extends Error {
+  constructor(readonly url: string) {
+    super(`Request to ${url} was cancelled`);
+    this.name = 'RequestAbortedError';
+  }
+}
+
 export class TimeoutError extends Error {
   constructor(readonly url: string, readonly timeoutMs: number) {
     super(`Request to ${url} timed out after ${timeoutMs}ms`);
@@ -97,6 +105,7 @@ export async function httpJson<T>(url: string, opts: HttpOptions = {}): Promise<
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
+    if (signal?.aborted) throw new RequestAbortedError(finalUrl);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const onAbort = () => controller.abort();
@@ -141,6 +150,9 @@ export async function httpJson<T>(url: string, opts: HttpOptions = {}): Promise<
       return (await res.json()) as T;
     } catch (err) {
       if (err instanceof HttpError) throw err;
+      // Stopped by the caller, not by the timeout: waiting or trying again
+      // would only spend a provider's quota on an answer nobody wants.
+      if (signal?.aborted) throw new RequestAbortedError(finalUrl);
       const aborted = err instanceof Error && err.name === 'AbortError';
       lastError = aborted ? new TimeoutError(finalUrl, timeoutMs) : err;
       if (attempt >= retries) break;
@@ -169,6 +181,9 @@ export function toProviderFailure(
   provider: string,
   providerLabel: string,
 ): ProviderFailure {
+  if (err instanceof RequestAbortedError) {
+    return fail('timeout', provider, providerLabel, 'The search was stopped before ' + providerLabel + ' answered.');
+  }
   if (err instanceof TimeoutError) {
     return fail('timeout', provider, providerLabel, `${providerLabel} did not respond in time.`);
   }

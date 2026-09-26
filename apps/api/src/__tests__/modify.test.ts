@@ -1,33 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { TripLlm, type ExtractRequest, type LlmProvider, type LlmResult } from '@trip/llm';
+import type { TripLlm } from '@trip/llm';
 import { InMemoryRepository } from '../repository/memory.js';
 import { TRIP_ID, buildTestApp } from './helpers.js';
+import { modelSaying } from './test-kit.js';
 
 /**
  * The modification round trip over HTTP. The fixture trip has no plan yet, so
  * changes are saved for the next search; the pin behaviour against a real
  * plan is covered in the engine's tests.
  */
-
-/** A model that always returns the same structured answer. */
-function modelSaying(output: unknown): TripLlm {
-  const provider: LlmProvider = {
-    id: 'fixed',
-    label: 'Fixed model',
-    model: 'fixed',
-    isConfigured: () => true,
-    async extract<T>(req: ExtractRequest<T>): Promise<LlmResult<T>> {
-      return {
-        data: req.schema.parse(output),
-        usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
-        model: 'fixed',
-        fromFallback: false,
-      };
-    },
-  };
-  return new TripLlm(provider);
-}
 
 async function appWith(llm?: TripLlm): Promise<{ app: FastifyInstance; repository: InMemoryRepository }> {
   return buildTestApp(llm ? { llm } : {});

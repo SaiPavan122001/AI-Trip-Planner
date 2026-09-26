@@ -1,9 +1,13 @@
 import { ProviderRegistry } from '@trip/providers';
 import { llmFromEnv, type TripLlm } from '@trip/llm';
 import pino, { type Logger } from 'pino';
+import { mailerFromEnv, type Mailer } from './auth/mailer.js';
+import { AuthService } from './auth/service.js';
 import { loadEnv, type Env } from './env.js';
 import { InMemoryRepository } from './repository/memory.js';
-import type { TripRepository } from './repository/types.js';
+import type { Store } from './repository/store.js';
+import { RunService } from './services/run-service.js';
+import { RunWorker } from './worker/run-worker.js';
 
 /**
  * The application container: one place that knows how the service is wired,
@@ -16,7 +20,12 @@ export interface AppContext {
   logger: Logger;
   registry: ProviderRegistry;
   llm: TripLlm;
-  repository: TripRepository;
+  repository: Store;
+  mailer: Mailer;
+  auth: AuthService;
+  runs: RunService;
+  /** Built but not started: the entry point decides whether this process runs searches. */
+  worker: RunWorker;
 }
 
 export async function buildContext(overrides: Partial<AppContext> = {}): Promise<AppContext> {
@@ -32,6 +41,7 @@ export async function buildContext(overrides: Partial<AppContext> = {}): Promise
         paths: [
           'req.headers.authorization',
           'req.headers.cookie',
+          'res.headers["set-cookie"]',
           '*.apiKey',
           '*.clientSecret',
           '*.password',
@@ -62,6 +72,17 @@ export async function buildContext(overrides: Partial<AppContext> = {}): Promise
     }
   }
 
+  const mailer = overrides.mailer ?? mailerFromEnv(env, logger);
+  const auth = overrides.auth ?? new AuthService({ store: repository, env, mailer, logger });
+
+  // The worker and the run service refer to each other only through `wake`:
+  // queuing a run nudges an in-process worker to look for it now.
+  let worker: RunWorker | null = null;
+  const runs =
+    overrides.runs ??
+    new RunService({ store: repository, registry, env, logger, onQueued: () => worker?.wake() });
+  worker = overrides.worker ?? new RunWorker({ store: repository, runs, env, logger });
+
   for (const disabled of registry.disabled) {
     logger.info({ provider: disabled.id, requires: disabled.requiredEnv }, disabled.reason);
   }
@@ -71,5 +92,5 @@ export async function buildContext(overrides: Partial<AppContext> = {}): Promise
     );
   }
 
-  return { env, logger, registry, llm, repository };
+  return { env, logger, registry, llm, repository, mailer, auth, runs, worker };
 }

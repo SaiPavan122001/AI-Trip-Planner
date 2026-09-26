@@ -61,6 +61,7 @@ export async function planActivities(
   profile: TravelerProfile,
   days: number,
   currency: string,
+  signal?: AbortSignal,
 ): Promise<ActivityPlanResult> {
   const notes: ProviderNote[] = [];
   if (days <= 0) return { activities: [], clusters: [], notes };
@@ -91,6 +92,7 @@ export async function planActivities(
       accessibilityNeeds: profile.special.accessibility,
       currency,
       limit: Math.min(20, target * 2),
+      ...(signal ? { signal } : {}),
     });
     if (isOk(res)) {
       for (const activity of res.data) {

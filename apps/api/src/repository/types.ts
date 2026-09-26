@@ -82,11 +82,29 @@ export class BookingChangedError extends Error {
   }
 }
 
+/**
+ * A trip was saved by someone else between the caller reading it and saving
+ * it (or was deleted). The caller's change was not applied.
+ */
+export class TripChangedError extends Error {
+  constructor() {
+    super('This trip was changed elsewhere. Reload it and try again.');
+    this.name = 'TripChangedError';
+  }
+}
+
 export interface TripRepository {
+  /** Stores a new trip at version 0. */
   createSession(session: PlanningSession): Promise<PlanningSession>;
   getSession(id: string): Promise<PlanningSession | null>;
+  /**
+   * Saves a trip only if its stored version is still `session.version`, the
+   * one the caller read, and returns it with the version incremented.
+   * Otherwise nothing is written and `TripChangedError` is thrown.
+   */
   updateSession(session: PlanningSession): Promise<PlanningSession>;
-  listSessions(ownerId: string | null, limit: number): Promise<PlanningSession[]>;
+  /** A person's own trips, newest first. */
+  listSessions(ownerId: string, limit: number): Promise<PlanningSession[]>;
   deleteSession(id: string): Promise<void>;
 
   createBooking(booking: BookingRecord): Promise<BookingRecord>;

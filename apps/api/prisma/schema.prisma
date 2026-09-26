@@ -17,16 +17,25 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// A person using the planner. Someone who has not signed in still has a row,
+/// with no email: their trips belong to it, and signing in later attaches an
+/// email to the same row (or moves the trips to the account that owns it), so
+/// nothing they planned is lost.
 model User {
-  id           String   @id @default(uuid())
-  email        String   @unique
-  displayName  String?
+  id          String  @id @default(uuid())
+  /// Null until the person signs in with an email link.
+  email       String? @unique
+  displayName String?
+  /// Unused. Sign-in is by emailed link; the column is kept because removing
+  /// it would be a destructive migration for no benefit.
   passwordHash String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  lastSeenAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   trips    Trip[]
   bookings Booking[]
+  sessions AuthSession[]
 
   @@map("users")
 }
@@ -50,12 +59,17 @@ model Trip {
   /// The full PlanningSession document, validated against @trip/shared on read.
   session Json
 
+  /// Optimistic-locking counter: a save only succeeds if this is still the
+  /// value the caller read, and increments it.
+  version Int @default(0)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   bookings  Booking[]
   travelers TravelerRecord[]
   events    AuditEvent[]
+  runs      PlanningRun[]
 
   @@index([ownerId, updatedAt])
   @@map("trips")
@@ -142,4 +156,84 @@ model AuditEvent {
 
   @@index([tripId, createdAt])
   @@map("audit_events")
+}
+
+/// A browser or device signed in as a user. Only a keyed hash of the cookie
+/// token is stored, so a copy of this table cannot be used to impersonate.
+model AuthSession {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash String @unique
+
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt  DateTime
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("auth_sessions")
+}
+
+/// A single-use, short-lived sign-in link sent by email. As with sessions, only
+/// a hash of the token is kept.
+model LoginChallenge {
+  id        String    @id @default(uuid())
+  email     String
+  tokenHash String    @unique
+  /// The anonymous user who asked, whose trips follow them into the account.
+  anonymousUserId String?
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  consumedAt DateTime?
+
+  @@index([email, createdAt])
+  @@index([expiresAt])
+  @@map("login_challenges")
+}
+
+/// One background search for a trip. A worker takes it with a lease
+/// (FOR UPDATE SKIP LOCKED), renews the lease while it works, and a run whose
+/// lease lapses is picked up again, so a crashed worker loses nothing.
+///
+/// The migration adds a partial unique index on trip_id where the run is
+/// queued or running: a trip has at most one active run, enforced by the
+/// database rather than by hoping two requests do not race. Prisma cannot
+/// express a partial index, so it lives in the migration SQL only.
+model PlanningRun {
+  id      String @id @default(uuid())
+  tripId  String
+  trip    Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  ownerId String?
+
+  /// plan | replan
+  kind   String
+  /// queued | running | succeeded | failed | cancelled | superseded
+  status String
+
+  /// Hash of everything the search depends on. A result is only saved if the
+  /// trip still has the same inputs when the search finishes.
+  inputsHash  String
+  /// The trip version the run was created against.
+  baseVersion Int
+  /// What to keep from the earlier plan, and why the run exists.
+  params      Json
+
+  progress Json?
+  error    Json?
+
+  attempts        Int       @default(0)
+  workerId        String?
+  leaseUntil      DateTime?
+  cancelRequested Boolean   @default(false)
+
+  createdAt  DateTime  @default(now())
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  @@index([status, createdAt])
+  @@index([tripId, createdAt])
+  @@index([ownerId, createdAt])
+  @@map("planning_runs")
 }

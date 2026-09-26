@@ -57,6 +57,8 @@ export interface TransportSearchDeps {
   classification: JourneyClassification;
   profile: TravelerProfile;
   constraints: ConstraintSet;
+  /** Stops every provider call in the search when it fires. */
+  signal?: AbortSignal;
 }
 
 function noteFrom(status: string, provider: string, label: string, message: string): ProviderNote {
@@ -78,6 +80,7 @@ function noteFrom(status: string, provider: string, label: string, message: stri
 export async function enrichWithAirports(
   registry: ProviderRegistry,
   place: Place,
+  signal?: AbortSignal,
 ): Promise<{ place: Place; note: ProviderNote | null }> {
   if (place.airports.length > 0 || place.iataCityCode) return { place, note: null };
   const amadeus = registry.amadeus;
@@ -92,7 +95,7 @@ export async function enrichWithAirports(
       ),
     };
   }
-  const res = await amadeus.nearestAirports(place.coordinates);
+  const res = await amadeus.nearestAirports(place.coordinates, undefined, signal);
   if (!isOk(res)) {
     return {
       place,
@@ -216,8 +219,8 @@ async function searchFlightMode(
   }
 
   const [origin, destination] = await Promise.all([
-    enrichWithAirports(registry, from),
-    enrichWithAirports(registry, to),
+    enrichWithAirports(registry, from, deps.signal),
+    enrichWithAirports(registry, to, deps.signal),
   ]);
   if (origin.note) return { ...empty, note: origin.note };
   if (destination.note) return { ...empty, note: destination.note };
@@ -246,6 +249,7 @@ async function searchFlightMode(
       // and it keeps obviously unaffordable inventory out of the comparison.
       maxPrice: transportBudget ? Math.round(toMajor(transportBudget)) : null,
       limit: 20,
+      ...(deps.signal ? { signal: deps.signal } : {}),
     });
     if (isOk(res)) all.push(...res.data);
     else lastNote = fromFailure(res);
@@ -279,6 +283,7 @@ async function searchRailMode(
       currency: intent.currency,
       classCode: null,
       limit: 20,
+      ...(deps.signal ? { signal: deps.signal } : {}),
     });
     if (isOk(res)) all.push(...res.data);
     else lastNote = fromFailure(res);
@@ -311,6 +316,7 @@ async function searchBusMode(
       currency: intent.currency,
       classCode: null,
       limit: 20,
+      ...(deps.signal ? { signal: deps.signal } : {}),
     });
     if (isOk(res)) all.push(...res.data);
     else lastNote = fromFailure(res);
@@ -338,6 +344,7 @@ async function searchDriveMode(
     date,
     departLocalTime: profile.transport.earliestDepartureLocal ?? '08:00',
     currency: intent.currency,
+      ...(deps.signal ? { signal: deps.signal } : {}),
   });
   if (!isOk(res)) return { ...emptyMode('self_drive'), note: fromFailure(res) };
   return { ...emptyMode('self_drive'), offers: [asUnscored(res.data)] };

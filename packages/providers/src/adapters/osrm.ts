@@ -73,6 +73,7 @@ export class OsrmRoutingProvider implements RoutingProvider {
       const res = await this.pacer.run(() =>
         httpJson<OsrmResponse>(`${this.config.baseUrl}/route/v1/${req.profile}/${coords}`, {
           query: { overview: 'simplified', geometries: 'polyline', alternatives: false },
+          ...(req.signal ? { signal: req.signal } : {}),
         }),
       );
       const route = res.routes?.[0];

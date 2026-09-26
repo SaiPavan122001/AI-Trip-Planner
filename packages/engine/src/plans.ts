@@ -52,6 +52,21 @@ export interface PlanGenerationDeps {
    * original provenance, so it is visibly the same item and not a new quote.
    */
   keep?: KeptComponents;
+  /**
+   * Stops the search when it fires: provider calls in flight are cancelled,
+   * and nothing further is started. The search then rejects with the
+   * signal's reason, and no partial plans are returned.
+   */
+  signal?: AbortSignal;
+  /** Told where the search is, in words a traveller can read. */
+  onProgress?: (progress: PlanProgress) => void;
+}
+
+export interface PlanProgress {
+  /** A stable name for the step, for a client to key on. */
+  step: 'classify' | 'search' | 'hotels' | 'assemble' | 'rank';
+  label: string;
+  percent: number;
 }
 
 export interface KeptComponents {
@@ -81,8 +96,18 @@ const ARCHETYPE_LABEL: Record<PlanArchetype, string> = {
 };
 
 export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGenerationResult> {
-  const { registry, intent, profile, constraints } = deps;
+  const { registry, intent, profile, constraints, signal } = deps;
   const kept = deps.keep ?? {};
+  // Checked between steps, so a cancelled search stops at the next boundary
+  // even where a provider ignores the signal.
+  const checkpoint = () => signal?.throwIfAborted();
+  const progress = (p: PlanProgress) => {
+    checkpoint();
+    deps.onProgress?.(p);
+    // The listener may have cancelled the search.
+    checkpoint();
+  };
+  progress({ step: 'classify', label: 'Understanding your trip', percent: 5 });
   const log: Array<{ at: string; step: string; detail: string }> = [];
   const note = (step: string, detail: string) =>
     log.push({ at: new Date().toISOString(), step, detail });
@@ -101,23 +126,25 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
   // wait for activities, because where you will spend your days is an input
   // to where it makes sense to sleep.
   const activityDays = Math.max(0, nights - 1);
+  progress({ step: 'search', label: 'Searching how to get there and what to do', percent: 15 });
   const [outbound, inbound, activities] = await Promise.all([
     kept.outbound
       ? Promise.resolve(keptTransport('outbound', intent.departureDate, kept.outbound, profile))
-      : searchTransport({ registry, intent, classification, profile, constraints }, 'outbound'),
+      : searchTransport({ registry, intent, classification, profile, constraints, ...(signal ? { signal } : {}) }, 'outbound'),
     !intent.returnDate
       ? Promise.resolve(null)
       : kept.return
         ? Promise.resolve(keptTransport('return', intent.returnDate, kept.return, profile))
-        : searchTransport({ registry, intent, classification, profile, constraints }, 'return'),
+        : searchTransport({ registry, intent, classification, profile, constraints, ...(signal ? { signal } : {}) }, 'return'),
     kept.activities
       ? Promise.resolve<ActivityPlanResult>({
           activities: kept.activities,
           clusters: clusterByProximity(kept.activities, activityDays),
           notes: [],
         })
-      : planActivities(registry, intent.destination, profile, activityDays, intent.currency),
+      : planActivities(registry, intent.destination, profile, activityDays, intent.currency, signal),
   ]);
+  checkpoint();
 
   const searchedModes = outbound.modes.filter((m) => m.offers.length > 0);
   note(
@@ -133,6 +160,7 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
   );
 
   const localTransportPerKm = perKmRate(registry, intent.currency);
+  progress({ step: 'hotels', label: 'Finding places to stay', percent: 55 });
   const hotels = kept.hotel
     ? keptHotel(kept.hotel)
     : await searchHotels({
@@ -142,7 +170,9 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
         constraints,
         activities: activities.activities,
         localTransportPerKm,
+        ...(signal ? { signal } : {}),
       });
+  checkpoint();
   note(
     'hotel_search',
     hotels.candidates.length
@@ -183,7 +213,12 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
   const plans: TripPlan[] = [];
   const seen = new Set<string>();
 
-  for (const archetype of ARCHETYPES) {
+  for (const [index, archetype] of ARCHETYPES.entries()) {
+    progress({
+      step: 'assemble',
+      label: 'Putting your plans together',
+      percent: 70 + Math.round((index / ARCHETYPES.length) * 22),
+    });
     const outboundOffer = pickTransport(outbound, archetype, profile);
     const inboundOffer = inbound ? pickTransport(inbound, archetype, profile) : null;
     const hotel = kept.hotel ?? pickHotel(hotels, archetype, intent, profile, localTransportPerKm, nights);
@@ -270,6 +305,7 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
     });
   }
 
+  progress({ step: 'rank', label: 'Comparing your options', percent: 95 });
   markMostExpensive(plans);
 
   // Ranked by how well each plan matches the traveller's own priorities, so

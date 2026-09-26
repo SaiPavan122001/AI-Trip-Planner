@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import type { TripRepository } from '../repository/types.js';
+import type { Store } from '../repository/store.js';
 import { TRIP_ID, buildTestApp } from './helpers.js';
 
 let app: FastifyInstance;
@@ -45,7 +45,7 @@ describe('system endpoints', () => {
 describe('health endpoints', () => {
   it('never returns the underlying database error to the public', async () => {
     const { repository } = await buildTestApp();
-    const failing: TripRepository = Object.create(repository, {
+    const failing: Store = Object.create(repository, {
       healthCheck: {
         value: async () => ({
           ok: false,

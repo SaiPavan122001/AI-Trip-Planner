@@ -77,6 +77,8 @@ export interface FlightSearchRequest {
   /** Hard ceiling passed to the provider where supported, to cut noise. */
   maxPrice: number | null;
   limit: number;
+  /** Stops the search, and any waiting or retrying, when it fires. */
+  signal?: AbortSignal;
 }
 
 export interface FlightProvider extends BaseProvider {
@@ -106,6 +108,7 @@ export interface HotelSearchRequest {
   near: Coordinates | null;
   radiusKm: number;
   limit: number;
+  signal?: AbortSignal;
 }
 
 export interface HotelProvider extends BaseProvider {
@@ -123,6 +126,7 @@ export interface SurfaceSearchRequest {
   /** Provider-specific class filter, passed through untranslated. */
   classCode: string | null;
   limit: number;
+  signal?: AbortSignal;
 }
 
 /** Rail and bus share a shape but stay separate interfaces: their class
@@ -140,6 +144,7 @@ export interface RouteRequest {
   to: Coordinates;
   profile: 'driving' | 'walking' | 'cycling';
   departAt?: string;
+  signal?: AbortSignal;
 }
 
 export interface RouteResult {
@@ -189,6 +194,7 @@ export interface ActivitySearchRequest {
   accessibilityNeeds: string[];
   currency: string;
   limit: number;
+  signal?: AbortSignal;
 }
 
 export interface ActivityProvider extends BaseProvider {

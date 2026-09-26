@@ -35,6 +35,9 @@ loadDotenvFromNearestRoot();
  * The system is designed to run with none of them and to say so.
  */
 
+/** "true" / "false" from an environment variable; anything else is a mistake worth failing on. */
+const flag = z.enum(['true', 'false']).transform((v) => v === 'true');
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(4000),
@@ -52,17 +55,65 @@ const EnvSchema = z.object({
   /** Comma-separated origins allowed to call the API from a browser. */
   CORS_ORIGINS: z.string().default('http://localhost:3000'),
 
-  /** Signing secret for session tokens. Required outside development. */
+  /**
+   * Keys the hash of every sign-in token before it is stored, so a copy of the
+   * database cannot be used to sign in. Required in production. `JWT_SECRET`
+   * is accepted under its old name.
+   */
+  SESSION_SECRET: z.string().min(32).optional(),
   JWT_SECRET: z.string().min(32).optional(),
+  COOKIE_NAME: z.string().default('tp_session'),
+  /** Defaults to on in production, where cookies must only travel over HTTPS. */
+  COOKIE_SECURE: flag.optional(),
+  /** Use `none` (with COOKIE_SECURE) only if the web app and API are on unrelated sites. */
+  COOKIE_SAMESITE: z.enum(['lax', 'strict', 'none']).default('lax'),
+  COOKIE_DOMAIN: z.string().optional(),
+  SESSION_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+
+  /** Where the web app lives; sign-in links point here. */
+  WEB_BASE_URL: z.string().url().default('http://localhost:3000'),
+  /**
+   * How sign-in links are delivered: `console` logs them (development),
+   * `webhook` posts them to MAIL_WEBHOOK_URL, `disabled` turns email sign-in
+   * off. Unset means webhook if a URL is given, console outside production,
+   * and disabled in production.
+   */
+  MAILER: z.enum(['console', 'webhook', 'disabled']).optional(),
+  MAIL_WEBHOOK_URL: z.string().url().optional(),
+  MAIL_WEBHOOK_TOKEN: z.string().optional(),
+  MAGIC_LINK_TTL_MINUTES: z.coerce.number().int().min(1).max(120).default(15),
+  MAGIC_LINK_MAX_PER_HOUR: z.coerce.number().int().min(1).max(50).default(5),
+
+  /**
+   * Which proxies to believe about the client's address: `false` (none),
+   * `true` (any), a number of hops, or a comma-separated list of addresses.
+   * Wrong in either direction is a problem: too trusting lets anyone pick
+   * their own rate-limit identity; too strict rate-limits everyone as one.
+   */
+  TRUST_PROXY: z.string().default('false'),
 
   RATE_LIMIT_MAX: z.coerce.number().int().default(120),
   RATE_LIMIT_WINDOW: z.string().default('1 minute'),
 
-  /** Hard ceiling on a planning request, so a slow provider cannot hang a request. */
+  /** Hard ceiling on one planning run, so a slow provider cannot hold a worker. */
   PLANNING_TIMEOUT_MS: z.coerce.number().int().default(60_000),
+
+  /** Run background searches inside this process. Turn off where a separate worker runs them. */
+  RUN_WORKER: flag.default('true'),
+  RUN_LEASE_MS: z.coerce.number().int().min(1000).default(30_000),
+  RUN_POLL_MS: z.coerce.number().int().min(50).default(1000),
+  RUN_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(3),
+  RUN_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(2),
+  /** Searches a person may start per day; each one calls paid provider APIs. */
+  PLAN_RUNS_PER_DAY_ANONYMOUS: z.coerce.number().int().min(1).default(15),
+  PLAN_RUNS_PER_DAY_SIGNED_IN: z.coerce.number().int().min(1).default(60),
 });
 
-export type Env = z.infer<typeof EnvSchema>;
+export type Env = Omit<z.infer<typeof EnvSchema>, 'COOKIE_SECURE'> & {
+  COOKIE_SECURE: boolean;
+  /** SESSION_SECRET, or JWT_SECRET under its old name. Always set outside development. */
+  sessionSecret: string;
+};
 
 let cached: Env | null = null;
 
@@ -82,9 +133,11 @@ export function loadEnv(source?: NodeJS.ProcessEnv): Env {
       .join('\n');
     throw new Error(`Invalid environment configuration:\n${detail}`);
   }
-  if (parsed.data.NODE_ENV === 'production') {
-    if (!parsed.data.JWT_SECRET) {
-      throw new Error('JWT_SECRET is required in production.');
+  const production = parsed.data.NODE_ENV === 'production';
+  const secret = parsed.data.SESSION_SECRET ?? parsed.data.JWT_SECRET;
+  if (production) {
+    if (!secret) {
+      throw new Error('SESSION_SECRET is required in production (at least 32 characters).');
     }
     if (!parsed.data.DATABASE_URL) {
       throw new Error(
@@ -92,8 +145,34 @@ export function loadEnv(source?: NodeJS.ProcessEnv): Env {
       );
     }
   }
-  if (!explicit) cached = parsed.data;
-  return parsed.data;
+  const secure = parsed.data.COOKIE_SECURE ?? production;
+  if (parsed.data.COOKIE_SAMESITE === 'none' && !secure) {
+    throw new Error('COOKIE_SAMESITE=none needs COOKIE_SECURE=true: browsers reject the cookie otherwise.');
+  }
+  const env: Env = {
+    ...parsed.data,
+    COOKIE_SECURE: secure,
+    // Outside production a fixed development secret keeps sign-in working
+    // with no setup. It is public, so it is never accepted in production.
+    sessionSecret: secret ?? 'development-only-session-secret-not-for-production',
+  };
+  if (!explicit) cached = env;
+  return env;
+}
+
+/**
+ * The value Fastify's `trustProxy` option takes for a TRUST_PROXY setting. A
+ * number of hops becomes a function that believes that many proxies.
+ */
+export function trustProxyOption(env: Env): boolean | string[] | ((address: string, hop: number) => boolean) {
+  const raw = env.TRUST_PROXY.trim().toLowerCase();
+  if (raw === 'true') return true;
+  if (raw === 'false' || raw === '') return false;
+  if (/^[0-9]+$/.test(raw)) {
+    const hops = Number(raw);
+    return (_address, hop) => hop < hops;
+  }
+  return env.TRUST_PROXY.split(',').map((a) => a.trim()).filter(Boolean);
 }
 
 export function corsOrigins(env: Env): string[] {

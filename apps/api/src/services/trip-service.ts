@@ -4,18 +4,18 @@ import {
   applyAnswer,
   applyModification,
   classifyJourney,
-  generatePlans,
   questionnaireState,
   rebuildConstraints,
   statedBudget,
   type BudgetAnswers,
-  type PlanGenerationResult,
+  type KeptComponents,
   type ValidatedAnswer,
 } from '@trip/engine';
 import type { ProviderRegistry } from '@trip/providers';
 import type { TripLlm } from '@trip/llm';
 import {
   Answer,
+  TripComponent,
   TripIntentInput,
   emptyConstraintSet,
   emptyTravelerProfile,
@@ -24,15 +24,17 @@ import {
   type Money,
   type PendingModification,
   type Place,
+  type PlanningRunView,
   type PlanningSession,
   type ProposedChange,
-  type ProviderNote,
   type TravelerProfile,
-  type TripComponent,
   type TripPlan,
 } from '@trip/shared';
 import { ApiError } from '../errors.js';
-import type { TripRepository } from '../repository/types.js';
+import type { RunRecord, Store } from '../repository/store.js';
+import { TripChangedError } from '../repository/types.js';
+import { checkPins, componentsOf, selectedPlanOf } from './pins.js';
+import { runView, type Actor, type RunService } from './run-service.js';
 
 /**
  * Trip planning use cases.
@@ -41,22 +43,70 @@ import type { TripRepository } from '../repository/types.js';
  * product: resolve where the traveller means, decide what kind of journey it
  * is, interview them, then plan. Each step persists the session, so a
  * traveller can close the tab and come back.
+ *
+ * Every method takes the person acting, and a trip that is not theirs is
+ * reported as not found, the same as one that does not exist, so ids cannot
+ * be probed for.
  */
 
 export interface TripServiceDeps {
   registry: ProviderRegistry;
   llm: TripLlm;
-  repository: TripRepository;
+  repository: Store;
+  runs: RunService;
 }
 
 export class TripService {
   constructor(private readonly deps: TripServiceDeps) {}
 
+  private get store(): Store {
+    return this.deps.repository;
+  }
+
+  // ------------------------------------------------------------ ownership
+
+  private async owned(id: string, actor: Actor): Promise<PlanningSession> {
+    const session = await this.store.getSession(id);
+    if (!session || session.ownerId !== actor.userId) throw ApiError.notFound('That trip');
+    return session;
+  }
+
+  /**
+   * Reads, changes and saves a trip. If another request saved it in between,
+   * the whole thing is done again on what it saved: right for changes that are
+   * worked out afresh from the trip each time (an answer, a pin, a selection),
+   * where losing a race should not cost the traveller a retry.
+   */
+  private async mutate(
+    id: string,
+    actor: Actor,
+    change: (session: PlanningSession) => PlanningSession | Promise<PlanningSession>,
+  ): Promise<PlanningSession> {
+    for (let attempt = 0; ; attempt += 1) {
+      const session = await this.owned(id, actor);
+      try {
+        return await this.store.updateSession(await change(session));
+      } catch (err) {
+        if (!(err instanceof TripChangedError) || attempt >= 3) throw err;
+      }
+    }
+  }
+
+  private async audit(tripId: string, actor: Actor, kind: string, detail: Record<string, unknown>): Promise<void> {
+    try {
+      await this.store.recordAudit({ tripId, kind, actor: actor.userId, detail });
+    } catch {
+      // The trail is a record, not a gate.
+    }
+  }
+
+  // ---------------------------------------------------------------- trips
+
   /**
    * Step one of the funnel, and the only step with required questions:
    * where from, where to, when, and how many people.
    */
-  async createTrip(input: unknown, ownerId: string | null): Promise<PlanningSession> {
+  async createTrip(input: unknown, actor: Actor): Promise<PlanningSession> {
     const intent = TripIntentInput.parse(input);
 
     if (intent.returnDate && intent.returnDate < intent.departureDate) {
@@ -85,7 +135,10 @@ export class TripService {
 
     const session: PlanningSession = {
       id: randomUUID(),
-      ownerId,
+      ownerId: actor.userId,
+      version: 0,
+      pins: [],
+      lastSearch: null,
       stage: 'profiling',
       intent: { ...intent, origin, destination },
       classification,
@@ -113,71 +166,151 @@ export class TripService {
       profile: session.profile,
     });
 
-    return this.deps.repository.createSession(session);
+    const created = await this.store.createSession(session);
+    await this.audit(created.id, actor, 'trip.created', {});
+    return created;
   }
 
-  async getTrip(id: string): Promise<PlanningSession> {
-    const session = await this.deps.repository.getSession(id);
-    if (!session) throw ApiError.notFound('That trip');
-    return session;
+  async getTrip(id: string, actor: Actor): Promise<PlanningSession> {
+    return this.owned(id, actor);
   }
+
+  /** The trip with the state of its latest background search, which is what a screen needs. */
+  async getTripWithRun(id: string, actor: Actor): Promise<{ session: PlanningSession; run: PlanningRunView | null }> {
+    const session = await this.owned(id, actor);
+    const run = await this.store.latestRunForTrip(id);
+    return { session, run: run ? runView(run) : null };
+  }
+
+  async listTrips(actor: Actor, limit: number): Promise<PlanningSession[]> {
+    return this.store.listSessions(actor.userId, limit);
+  }
+
+  async deleteTrip(id: string, actor: Actor): Promise<void> {
+    await this.owned(id, actor);
+    // Its runs go with it; a worker in the middle of one finds its lease gone and stops.
+    await this.store.deleteSession(id);
+  }
+
+  // -------------------------------------------------------------- answers
 
   /**
    * Records one answer and returns the next question. Budget answers are the
    * one case where the answer becomes a constraint rather than a preference,
    * so they are routed to the constraint builder.
    */
-  async answer(id: string, raw: unknown): Promise<PlanningSession> {
-    const session = await this.getTrip(id);
+  async answer(id: string, actor: Actor, raw: unknown): Promise<PlanningSession> {
     const parsed = Answer.parse(raw);
-
-    let profile: TravelerProfile;
-    let answer: ValidatedAnswer;
-    try {
-      ({ profile, answer } = applyAnswer(
-        { intent: session.intent, classification: session.classification, profile: session.profile },
-        parsed,
-      ));
-    } catch (err) {
-      // Only a rejected answer is the caller's fault. Anything else is a bug
-      // here, and reporting it as a 400 would hide it.
-      if (err instanceof AnswerValidationError) {
-        throw ApiError.badRequest(err.message, { key: err.key });
+    return this.mutate(id, actor, (session) => {
+      let profile: TravelerProfile;
+      let answer: ValidatedAnswer;
+      try {
+        ({ profile, answer } = applyAnswer(
+          { intent: session.intent, classification: session.classification, profile: session.profile },
+          parsed,
+        ));
+      } catch (err) {
+        // Only a rejected answer is the caller's fault. Anything else is a bug
+        // here, and reporting it as a 400 would hide it.
+        if (err instanceof AnswerValidationError) {
+          throw ApiError.badRequest(err.message, { key: err.key });
+        }
+        throw err;
       }
-      throw err;
-    }
 
-    let constraints = rebuildConstraints(session.intent, profile, session.constraints, this.budgetFrom(session, profile, answer));
-    // A new total budget replaces any earlier agreement to go over the old one.
-    if (answer.key === 'budget.total') {
-      constraints = { ...constraints, waivers: constraints.waivers.filter((w) => w.kind !== 'max_total_budget') };
-    }
-
-    const updated: PlanningSession = {
-      ...session,
-      profile,
-      constraints,
-      questionnaire: questionnaireState({
-        intent: session.intent,
-        classification: session.classification,
+      let constraints = rebuildConstraints(
+        session.intent,
         profile,
-      }),
-      // A pending modification is a snapshot of the trip before this answer;
-      // accepting it later would silently undo the answer, so it lapses.
-      ...withdrawPending(session, 'the trip was changed by answering a question'),
-      updatedAt: new Date().toISOString(),
-    };
+        session.constraints,
+        this.budgetFrom(session, profile, answer),
+      );
+      // A new total budget replaces any earlier agreement to go over the old one.
+      if (answer.key === 'budget.total') {
+        constraints = { ...constraints, waivers: constraints.waivers.filter((w) => w.kind !== 'max_total_budget') };
+      }
 
-    return this.deps.repository.updateSession(updated);
+      return {
+        ...session,
+        profile,
+        constraints,
+        questionnaire: questionnaireState({
+          intent: session.intent,
+          classification: session.classification,
+          profile,
+        }),
+        // A pending modification is a snapshot of the trip before this answer;
+        // accepting it later would silently undo the answer, so it lapses.
+        ...withdrawPending(session, 'the trip was changed by answering a question'),
+        updatedAt: new Date().toISOString(),
+      };
+    });
   }
 
+  // ---------------------------------------------------------------- pins
+
   /**
-   * Runs the full pipeline. Provider failures are attached to the session
-   * rather than thrown, because "no trains are searchable" is information the
-   * traveller needs, not an error that should lose their whole session.
+   * Sets which parts of the selected plan the traveller wants kept. Only
+   * parts the plan actually has can be pinned, and the answer says which
+   * were refused and why.
    */
-  async plan(id: string): Promise<{ session: PlanningSession; result: PlanGenerationResult }> {
-    const session = await this.getTrip(id);
+  async setPins(
+    id: string,
+    actor: Actor,
+    requested: TripComponent[],
+  ): Promise<{ session: PlanningSession; refused: Array<{ component: TripComponent; reason: string }> }> {
+    const refused: Array<{ component: TripComponent; reason: string }> = [];
+    const session = await this.mutate(id, actor, (current) => {
+      refused.length = 0;
+      const plan = selectedPlanOf(current);
+      const available = new Set(componentsOf(plan));
+      const pins: TripComponent[] = [];
+      for (const component of new Set(requested)) {
+        if (component === 'transfers') {
+          refused.push({ component, reason: 'Transfers are recalculated whenever the journey or hotel changes.' });
+        } else if (!available.has(component)) {
+          refused.push({ component, reason: 'The selected plan has nothing of that kind to keep.' });
+        } else pins.push(component);
+      }
+      return {
+        ...current,
+        pins,
+        decisionLog: [
+          ...current.decisionLog,
+          {
+            at: new Date().toISOString(),
+            step: 'pins',
+            detail: pins.length ? `Kept as the traveller asked: ${pins.join(', ')}.` : 'No parts are being kept.',
+          },
+        ],
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    await this.audit(id, actor, 'pins.changed', { pins: session.pins });
+    return { session, refused };
+  }
+
+  // ------------------------------------------------------------- planning
+
+  /**
+   * Starts a search. It returns at once with the run, which a worker carries
+   * out; the traveller watches it. Provider failures are attached to the
+   * session rather than thrown, because "no trains are searchable" is
+   * information the traveller needs, not an error that should lose their
+   * whole session.
+   *
+   * Anything the traveller pinned is kept exactly, if it still fits the trip.
+   * A pin that no longer fits is released and reported, not quietly kept.
+   */
+  async plan(
+    id: string,
+    actor: Actor,
+  ): Promise<{
+    session: PlanningSession;
+    run: RunRecord;
+    reused: boolean;
+    pinsReleased: Array<{ component: TripComponent; reason: string }>;
+  }> {
+    let session = await this.owned(id, actor);
     if (session.questionnaire && !session.questionnaire.canPlan) {
       throw ApiError.unprocessable(
         'Some required answers are still missing, so a plan cannot be built yet.',
@@ -185,28 +318,46 @@ export class TripService {
       );
     }
 
-    const result = await generatePlans({
-      registry: this.deps.registry,
-      intent: session.intent,
-      profile: session.profile,
-      constraints: session.constraints,
+    const check = checkPins(session);
+    const withdrawn = withdrawPending(session, 'new plans were requested');
+    if (check.released.length > 0 || withdrawn.pendingModification !== undefined) {
+      const now = new Date().toISOString();
+      session = await this.store.updateSession({
+        ...session,
+        ...withdrawn,
+        pins: check.keep,
+        decisionLog: [
+          ...(withdrawn.decisionLog ?? session.decisionLog),
+          ...check.released.map((r) => ({ at: now, step: 'pins', detail: `Released ${r.component}: ${r.reason}` })),
+        ],
+        updatedAt: now,
+      });
+    }
+
+    const { run, reused } = await this.deps.runs.enqueue(session, actor, {
+      kind: session.plans.length > 0 ? 'replan' : 'plan',
+      keep: keptFrom(selectedPlanOf(session), check.keep),
+      reason: 'The traveller asked for plans.',
     });
-
-    const withdrawn = withdrawPending(session, 'new plans were built');
-    const updated: PlanningSession = {
-      ...session,
-      ...withdrawn,
-      stage: result.plans.length > 0 ? 'planned' : 'searching',
-      plans: result.plans,
-      selectedPlanId: result.plans[0]?.id ?? null,
-      providerNotes: dedupeNotes([...session.providerNotes, ...result.notes]),
-      decisionLog: [...(withdrawn.decisionLog ?? session.decisionLog), ...result.decisionLog],
-      updatedAt: new Date().toISOString(),
-    };
-
-    await this.deps.repository.updateSession(updated);
-    return { session: updated, result };
+    return { session, run, reused, pinsReleased: check.released };
   }
+
+  async getRun(id: string, actor: Actor, runId: string): Promise<PlanningRunView> {
+    await this.owned(id, actor);
+    const run = await this.store.getRun(runId);
+    if (!run || run.tripId !== id) throw ApiError.notFound('That search');
+    return runView(run);
+  }
+
+  async cancelRun(id: string, actor: Actor, runId: string): Promise<PlanningRunView> {
+    await this.getRun(id, actor, runId);
+    const run = await this.deps.runs.cancel(runId);
+    if (!run) throw ApiError.notFound('That search');
+    await this.audit(id, actor, 'run.cancel_requested', { runId });
+    return runView(run);
+  }
+
+  // --------------------------------------------------------- modification
 
   /**
    * Conversational modification. The model only classifies what was asked;
@@ -214,8 +365,9 @@ export class TripService {
    * that needs the traveller's say-so is stored and asked about; everything
    * else is applied, keeping pinned parts of the plan exactly as they were.
    */
-  async modify(id: string, utterance: string): Promise<ModificationResult> {
-    const session = await this.getTrip(id);
+  async modify(id: string, actor: Actor, utterance: string): Promise<ModificationResult> {
+    const session = await this.owned(id, actor);
+    await this.refuseWhileSearching(id);
     const selected = selectedPlanOf(session);
 
     const interpreted = await this.deps.llm.interpretModification(utterance, {
@@ -230,31 +382,37 @@ export class TripService {
       },
     };
 
-    const outcome = applyModification(interpreted.request, {
-      intent: session.intent,
-      classification: session.classification,
-      profile: session.profile,
-      constraints: session.constraints,
-      planComponents: componentsOf(selected),
-    });
+    // What the traveller said to keep, and what they had already pinned.
+    const pinned = [...new Set([...session.pins, ...interpreted.request.pinnedComponents])];
+    const outcome = applyModification(
+      { ...interpreted.request, pinnedComponents: pinned },
+      {
+        intent: session.intent,
+        classification: session.classification,
+        profile: session.profile,
+        constraints: session.constraints,
+        planComponents: componentsOf(selected),
+      },
+    );
 
     // A new request replaces any question still waiting for an answer.
     const base = { ...session, ...withdrawPending(session, 'a new change was requested') };
 
     if (outcome.status === 'no_change') {
-      if (base.pendingModification !== session.pendingModification) {
-        await this.deps.repository.updateSession({ ...base, updatedAt: new Date().toISOString() });
-      }
+      const saved =
+        base.pendingModification !== session.pendingModification
+          ? await this.store.updateSession({ ...base, updatedAt: new Date().toISOString() })
+          : base;
       return {
         ...common,
-        session: base,
+        session: saved,
         status: 'no_change',
         interpretation: outcome.summary,
         reSearched: [],
         kept: [],
         released: [],
         consent: null,
-        result: null,
+        run: null,
       };
     }
 
@@ -270,7 +428,7 @@ export class TripService {
         decline: outcome.decline,
         createdAt: new Date().toISOString(),
       };
-      const staged = await this.deps.repository.updateSession({
+      const staged = await this.store.updateSession({
         ...base,
         stage: 'modifying',
         pendingModification: pending,
@@ -294,13 +452,13 @@ export class TripService {
           acceptLabel: pending.acceptLabel,
           declineLabel: pending.declineLabel,
         },
-        result: null,
+        run: null,
       };
     }
 
     return {
       ...common,
-      ...(await this.commit(base, outcome.change, `"${utterance}" → ${interpreted.request.intent}.`)),
+      ...(await this.commit(base, actor, pinned, outcome.change, `"${utterance}" → ${interpreted.request.intent}.`)),
     };
   }
 
@@ -312,14 +470,19 @@ export class TripService {
    */
   async consent(
     id: string,
+    actor: Actor,
     pendingId: string,
     accept: boolean,
   ): Promise<Omit<ModificationResult, 'understoodBy' | 'diagnostics'>> {
-    const session = await this.getTrip(id);
+    const session = await this.owned(id, actor);
     const pending = session.pendingModification;
     if (!pending || pending.id !== pendingId) {
-      throw ApiError.conflict('That change is no longer waiting for an answer. Ask for it again if you still want it.');
+      throw ApiError.conflict(
+        'That change is no longer waiting for an answer. Ask for it again if you still want it.',
+        'consent_stale',
+      );
     }
+    await this.refuseWhileSearching(id);
 
     const change = accept ? pending.accept : pending.decline;
     const cleared: PlanningSession = {
@@ -331,9 +494,13 @@ export class TripService {
         { at: new Date().toISOString(), step: 'consent', detail: `${accept ? 'Accepted' : 'Declined'}: ${pending.question}` },
       ],
     };
+    await this.audit(id, actor, accept ? 'consent.accepted' : 'consent.declined', {
+      intent: pending.intent,
+      question: pending.question,
+    });
 
     if (!change) {
-      const saved = await this.deps.repository.updateSession({ ...cleared, updatedAt: new Date().toISOString() });
+      const saved = await this.store.updateSession({ ...cleared, updatedAt: new Date().toISOString() });
       return {
         session: saved,
         status: 'no_change',
@@ -342,19 +509,37 @@ export class TripService {
         kept: [],
         released: [],
         consent: null,
-        result: null,
+        run: null,
       };
     }
-    return this.commit(cleared, change, `${accept ? 'Accepted' : 'Declined'} "${pending.utterance}".`);
+    return this.commit(cleared, actor, session.pins, change, `${accept ? 'Accepted' : 'Declined'} "${pending.utterance}".`);
+  }
+
+  /** A change while a search is running would be made against plans about to be replaced. */
+  private async refuseWhileSearching(id: string): Promise<void> {
+    const active = await this.store.activeRunForTrip(id);
+    if (active) {
+      throw ApiError.conflict(
+        'Your plans are still being built. Wait for them to finish, or stop the search, before changing the trip.',
+        'run_in_progress',
+        { run: runView(active) },
+      );
+    }
   }
 
   /**
    * Applies a worked-out change: the new trip facts, preferences and
    * constraints are saved, the parts the change keeps are taken from the
-   * selected plan exactly as they are, and only the rest is searched again.
+   * selected plan exactly as they are, and only the rest is searched again,
+   * in the background.
+   *
+   * Pins the change could not honour are released, and reported, so the
+   * traveller is told rather than left believing a part was kept.
    */
   private async commit(
     session: PlanningSession,
+    actor: Actor,
+    pinnedBefore: TripComponent[],
     change: ProposedChange,
     detail: string,
   ): Promise<Omit<ModificationResult, 'understoodBy' | 'diagnostics'>> {
@@ -366,14 +551,20 @@ export class TripService {
       profile: change.profile,
     });
     const tripChanged = JSON.stringify(change.intent) !== JSON.stringify(session.intent);
+    const releasedComponents = new Set(change.released.map((r) => r.component));
     const updated: PlanningSession = {
       ...session,
       intent: change.intent,
       profile: change.profile,
       constraints: change.constraints,
       questionnaire,
+      pins: pinnedBefore.filter((p) => !releasedComponents.has(p)),
       pendingModification: null,
-      decisionLog: [...session.decisionLog, { at: now, step: 'modify', detail: `${detail} ${change.summary}` }],
+      decisionLog: [
+        ...session.decisionLog,
+        { at: now, step: 'modify', detail: `${detail} ${change.summary}` },
+        ...change.released.map((r) => ({ at: now, step: 'pins', detail: `Released ${r.component}: ${r.reason}` })),
+      ],
       updatedAt: now,
     };
     const answer = { reSearched: change.reSearch, kept: change.keep, released: change.released, consent: null };
@@ -382,58 +573,56 @@ export class TripService {
     // more answer before plans can be built. Plans for the old trip are not
     // left looking current.
     if (!selected || !questionnaire.canPlan) {
-      const saved = await this.deps.repository.updateSession({
+      const saved = await this.store.updateSession({
         ...updated,
-        ...(tripChanged ? { plans: [], selectedPlanId: null } : {}),
+        ...(tripChanged ? { plans: [], selectedPlanId: null, lastSearch: null } : {}),
         stage: selected && !tripChanged ? 'planned' : 'profiling',
       });
-      const next = selected && !questionnaire.canPlan
-        ? ' One more question needs answering before new plans can be built.'
-        : ' Your plans will use this when you next search.';
-      return { ...answer, session: saved, status: 'saved', interpretation: `${change.summary}${next}`, result: null };
+      const next =
+        selected && !questionnaire.canPlan
+          ? ' One more question needs answering before new plans can be built.'
+          : ' Your plans will use this when you next search.';
+      return { ...answer, session: saved, status: 'saved', interpretation: `${change.summary}${next}`, run: null };
     }
 
     // Everything the change touches was pinned: the plan stays as it is.
     if (change.reSearch.length === 0 && !tripChanged) {
-      const saved = await this.deps.repository.updateSession({ ...updated, stage: 'planned' });
-      return { ...answer, session: saved, status: 'applied', interpretation: change.summary, result: null };
+      const saved = await this.store.updateSession({ ...updated, stage: 'planned' });
+      return { ...answer, session: saved, status: 'applied', interpretation: change.summary, run: null };
     }
 
-    const kept = change.keep;
-    const result = await generatePlans({
-      registry: this.deps.registry,
-      intent: change.intent,
-      profile: change.profile,
-      constraints: change.constraints,
-      keep: {
-        outbound: kept.includes('outbound') ? selected.outboundTransport : null,
-        return: kept.includes('return') ? selected.returnTransport : null,
-        hotel: kept.includes('hotel') ? (selected.hotels[0] ?? null) : null,
-        activities: kept.includes('activities') && selected.activities.length > 0 ? selected.activities : null,
-      },
-    });
-    const saved = await this.deps.repository.updateSession({
+    // The search is queued against the trip as it will be saved, and the
+    // parts to keep are captured now, because a changed trip's old plans are
+    // cleared below and the search must not depend on them still being there.
+    const staged: PlanningSession = {
       ...updated,
-      stage: 'planned',
-      plans: result.plans,
-      selectedPlanId: result.plans[0]?.id ?? null,
-      providerNotes: dedupeNotes([...session.providerNotes, ...result.notes]),
-      decisionLog: [...updated.decisionLog, ...result.decisionLog],
+      stage: 'searching',
+      ...(tripChanged ? { plans: [], selectedPlanId: null, lastSearch: null } : {}),
+    };
+    await this.deps.runs.assertQuota(actor);
+    const saved = await this.store.updateSession(staged);
+    const { run } = await this.deps.runs.enqueue(saved, actor, {
+      kind: 'replan',
+      keep: keptFrom(selected, change.keep),
+      reason: change.summary,
     });
-    return { ...answer, session: saved, status: 'applied', interpretation: change.summary, result };
+    return {
+      ...answer,
+      session: saved,
+      status: 'replanning',
+      interpretation: change.summary,
+      run: runView(run),
+    };
   }
 
-  async selectPlan(id: string, planId: string): Promise<PlanningSession> {
-    const session = await this.getTrip(id);
-    if (!session.plans.some((p) => p.id === planId)) {
-      throw ApiError.notFound('That plan');
-    }
-    return this.deps.repository.updateSession({
-      ...session,
-      selectedPlanId: planId,
-      updatedAt: new Date().toISOString(),
+  async selectPlan(id: string, actor: Actor, planId: string): Promise<PlanningSession> {
+    return this.mutate(id, actor, (session) => {
+      if (!session.plans.some((p) => p.id === planId)) throw ApiError.notFound('That plan');
+      return { ...session, selectedPlanId: planId, updatedAt: new Date().toISOString() };
     });
   }
+
+  // --------------------------------------------------------------- places
 
   /**
    * Resolves free text to exactly one place. A query that cannot be resolved
@@ -535,36 +724,33 @@ export interface ModificationResult {
   /**
    * no_change: nothing was changed, and `interpretation` says why.
    * needs_consent: nothing changes until the question in `consent` is answered.
-   * applied: the change is saved and, where needed, plans were rebuilt.
+   * replanning: the change is saved and new plans are being built; see `run`.
+   * applied: the change is saved and needed no new search.
    * saved: the change is saved; plans will use it when next built.
    */
-  status: 'no_change' | 'needs_consent' | 'applied' | 'saved';
+  status: 'no_change' | 'needs_consent' | 'replanning' | 'applied' | 'saved';
   /** Written from the validated request and the engine's outcome, never by a model. */
   interpretation: string;
   reSearched: TripComponent[];
   kept: TripComponent[];
+  /** Pins that could not be honoured, each with the reason. */
   released: Array<{ component: TripComponent; reason: string }>;
   consent: { id: string; question: string; acceptLabel: string; declineLabel: string } | null;
   understoodBy: string;
-  result: PlanGenerationResult | null;
+  run: PlanningRunView | null;
   /** For operators only: why the model was not used, and what it proposed that failed validation. */
   diagnostics: { llmFallbackReason: string | null; rejectedParameters: string[] };
 }
 
-function selectedPlanOf(session: PlanningSession): TripPlan | undefined {
-  return session.plans.find((p) => p.id === session.selectedPlanId) ?? session.plans[0];
-}
-
-/** The parts a plan actually has, so the engine knows what can be kept. */
-function componentsOf(plan: TripPlan | undefined): TripComponent[] {
-  if (!plan) return [];
-  const parts: TripComponent[] = [];
-  if (plan.outboundTransport) parts.push('outbound');
-  if (plan.returnTransport) parts.push('return');
-  if (plan.hotels.length > 0) parts.push('hotel');
-  if (plan.transfers.length > 0) parts.push('transfers');
-  if (plan.activities.length > 0) parts.push('activities');
-  return parts;
+/** The parts of a plan to carry into the next search unchanged. */
+function keptFrom(plan: TripPlan | undefined, keep: TripComponent[]): KeptComponents {
+  if (!plan) return {};
+  return {
+    outbound: keep.includes('outbound') ? plan.outboundTransport : null,
+    return: keep.includes('return') ? plan.returnTransport : null,
+    hotel: keep.includes('hotel') ? (plan.hotels[0] ?? null) : null,
+    activities: keep.includes('activities') && plan.activities.length > 0 ? plan.activities : null,
+  };
 }
 
 /**
@@ -591,11 +777,3 @@ function withdrawPending(
   };
 }
 
-/** Provider notes repeat across searches; the traveller only needs each once. */
-function dedupeNotes(notes: ProviderNote[]): ProviderNote[] {
-  const seen = new Map<string, ProviderNote>();
-  for (const note of notes) {
-    seen.set(`${note.provider}|${note.status}|${note.message}`, note);
-  }
-  return [...seen.values()];
-}

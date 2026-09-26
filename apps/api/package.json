@@ -13,9 +13,11 @@
     "lint": "eslint src",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
-    "prisma:dev": "prisma migrate dev"
+    "prisma:dev": "prisma migrate dev",
+    "test:integration": "vitest run -c vitest.integration.config.ts"
   },
   "dependencies": {
+    "@fastify/cookie": "^11.1.2",
     "@fastify/cors": "^10.0.1",
     "@fastify/helmet": "^12.0.1",
     "@fastify/rate-limit": "^10.1.1",

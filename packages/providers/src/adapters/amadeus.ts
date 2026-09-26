@@ -202,6 +202,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           maxPrice: req.maxPrice ?? undefined,
           max: req.limit,
         },
+        req.signal,
       );
 
       const carriers = res.dictionaries?.carriers ?? {};
@@ -264,6 +265,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
   async nearestAirports(
     coords: Coordinates,
     radiusKm = 300,
+    signal?: AbortSignal,
   ): Promise<
     ProviderResult<
       Array<{ iataCode: string; name: string; distanceKm: number; coordinates: Coordinates | null }>
@@ -284,7 +286,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
         radius: Math.min(radiusKm, 500),
         'page[limit]': 5,
         sort: 'distance',
-      });
+      }, signal);
       const airports = res.data
         .filter((a) => a.iataCode)
         .map((a) => ({
@@ -340,6 +342,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           ratings: req.minCategory ? ratingsAtOrAbove(req.minCategory).join(',') : undefined,
           hotelSource: 'ALL',
         },
+        req.signal,
       );
       const hotelIds = list.data.slice(0, 40).map((h) => h.hotelId);
       if (hotelIds.length === 0) {
@@ -364,6 +367,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           bestRateOnly: false,
           priceRange: req.maxPricePerNight ? `0-${req.maxPricePerNight}` : undefined,
         },
+        req.signal,
       );
 
       const hotels = offersRes.data
@@ -610,13 +614,14 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
     return this.token.value;
   }
 
-  private async get<T>(path: string, query: Record<string, unknown>): Promise<T> {
+  private async get<T>(path: string, query: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
     const token = await this.accessToken();
     return this.pacer.run(() =>
       httpJson<T>(`${this.baseUrl}${path}`, {
         query: query as Record<string, string | number | boolean | undefined>,
         headers: { Authorization: `Bearer ${token}` },
         timeoutMs: 20_000,
+        ...(signal ? { signal } : {}),
       }),
     );
   }

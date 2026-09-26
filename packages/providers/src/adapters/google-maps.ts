@@ -133,6 +133,7 @@ export class GooglePlacesProvider implements ActivityProvider {
             rankPreference: 'POPULARITY',
           },
           timeoutMs: 15_000,
+          ...(req.signal ? { signal: req.signal } : {}),
         }),
       );
 
@@ -259,6 +260,7 @@ export class GoogleRoutesProvider implements RoutingProvider {
                 : {}),
             },
             timeoutMs: 15_000,
+            ...(req.signal ? { signal: req.signal } : {}),
           },
         ),
       );

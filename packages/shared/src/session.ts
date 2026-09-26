@@ -172,9 +172,39 @@ export type PendingModification = z.infer<typeof PendingModification>;
 
 // ----------------------------------------------------------------- session
 
+/**
+ * What the last search found, in the form the comparison screen shows. It is
+ * kept with the trip so a traveller who reloads, or comes back tomorrow, sees
+ * the same comparison without paying for the search again. The offer detail
+ * is the engine's own output and is only rendered, never re-read, so it is
+ * stored as it was produced.
+ */
+export const SearchSummary = z.object({
+  builtAt: z.string().datetime(),
+  outbound: z.unknown(),
+  inbound: z.unknown().nullable().default(null),
+  hotelsConsidered: z.number().int().min(0),
+  hotelsFiltered: z.array(z.unknown()).default([]),
+  budgetConflict: z.unknown().nullable().default(null),
+});
+export type SearchSummary = z.infer<typeof SearchSummary>;
+
 export const PlanningSession = z.object({
   id: z.string(),
   ownerId: z.string().nullable().default(null),
+  /**
+   * Bumped by the store on every save. A save is refused if the stored
+   * version is not the one the caller read, so two tabs, or a tab and a
+   * background planning run, cannot silently overwrite one another.
+   */
+  version: z.number().int().min(0).default(0),
+  /**
+   * Parts of the trip the traveller asked to keep. A pin survives a re-plan
+   * exactly as it was, until a change makes it impossible to keep, and then
+   * the traveller is told which pin was released and why.
+   */
+  pins: z.array(TripComponent).default([]),
+  lastSearch: SearchSummary.nullable().default(null),
   stage: PlanningStage,
   intent: TripIntent,
   classification: JourneyClassification,

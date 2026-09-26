@@ -138,6 +138,7 @@ abstract class GenericSurfaceProvider {
           method: 'POST',
           headers: this.authHeaders(),
           timeoutMs: this.config.timeoutMs,
+          ...(req.signal ? { signal: req.signal } : {}),
           body: {
             origin: {
               name: req.origin.name,

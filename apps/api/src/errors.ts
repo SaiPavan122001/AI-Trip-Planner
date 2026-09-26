@@ -1,5 +1,6 @@
 import type { FastifyReply } from 'fastify';
 import { ZodError } from 'zod';
+import { TripChangedError } from './repository/types.js';
 
 /**
  * A single error shape for the whole API. Clients get a machine-readable
@@ -37,8 +38,16 @@ export class ApiError extends Error {
     return new ApiError(400, 'bad_request', message, details);
   }
 
-  static conflict(message: string): ApiError {
-    return new ApiError(409, 'conflict', message);
+  static conflict(message: string, code = 'conflict', details?: unknown): ApiError {
+    return new ApiError(409, code, message, details);
+  }
+
+  static unauthorized(message = 'Sign in to do that.'): ApiError {
+    return new ApiError(401, 'unauthorized', message);
+  }
+
+  static tooManyRequests(code: string, message: string, details?: unknown): ApiError {
+    return new ApiError(429, code, message, details);
   }
 
   /** Understood and well-formed, but the caller may never perform it. */
@@ -71,6 +80,13 @@ export function sendError(reply: FastifyReply, err: unknown): FastifyReply {
       },
     };
     return reply.status(err.statusCode).send(body);
+  }
+
+  // Two edits to one trip collided and this one lost. Nothing was changed.
+  if (err instanceof TripChangedError) {
+    return reply.status(409).send({
+      error: { code: 'trip_changed', message: err.message },
+    } satisfies ApiErrorBody);
   }
 
   if (err instanceof ZodError) {

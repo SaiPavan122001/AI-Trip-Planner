@@ -53,6 +53,8 @@ export interface HotelSearchDeps {
   activities: ActivityOffer[];
   /** Per-km cost used to model local transport. Null when no tariff exists. */
   localTransportPerKm: Money | null;
+  /** Stops every provider call in the search when it fires. */
+  signal?: AbortSignal;
 }
 
 /** The point the trip actually revolves around, used to bias the search. */
@@ -114,6 +116,7 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
       near: centre,
       radiusKm: profile.accommodation.maxDistanceToActivitiesKm ?? 15,
       limit: 30,
+      ...(deps.signal ? { signal: deps.signal } : {}),
     });
     if (isOk(res)) {
       offers.push(...res.data);

@@ -57,6 +57,7 @@ export interface SelfDriveOptions {
   departLocalTime: string;
   /** Currency the trip is costed in; a drive with no profile is still summed. */
   currency: string;
+  signal?: AbortSignal;
 }
 
 export class SelfDriveProvider implements BaseProvider {
@@ -103,6 +104,7 @@ export class SelfDriveProvider implements BaseProvider {
       to: opts.destination.coordinates,
       profile: 'driving',
       departAt: departUtc,
+      ...(opts.signal ? { signal: opts.signal } : {}),
     });
     if (route.status !== 'ok') return route;
 
