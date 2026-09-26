@@ -309,10 +309,24 @@ function toOpeningHours(p: GooglePlace): OpeningHours[] | null {
   return out.length ? out : null;
 }
 
-function matchesAccessibility(a: ActivityOffer, needs: string[]): boolean {
-  const wheelchairNeeded = needs.some((n) => n.includes('wheelchair') || n === 'step_free_access');
-  if (!wheelchairNeeded) return true;
-  return a.accessibility.some((f) => /wheelchair/i.test(f));
+/**
+ * The Google accessibility option that confirms each need, where Google
+ * publishes one. A wheelchair-accessible car park does not make the entrance
+ * step-free, so each need is matched only to its own field. Needs Google has
+ * no field for (service animals, visual or hearing support) cannot be
+ * checked here; the planner's validator says so on the plan.
+ */
+const PLACE_EVIDENCE: Record<string, string> = {
+  step_free_access: 'wheelchairAccessibleEntrance',
+  wheelchair_accessible_room: 'wheelchairAccessibleEntrance',
+  accessible_bathroom: 'wheelchairAccessibleRestroom',
+};
+
+export function matchesAccessibility(a: Pick<ActivityOffer, 'accessibility'>, needs: string[]): boolean {
+  return needs.every((need) => {
+    const field = PLACE_EVIDENCE[need];
+    return field === undefined || a.accessibility.includes(field);
+  });
 }
 
 function pad(n: number): string {

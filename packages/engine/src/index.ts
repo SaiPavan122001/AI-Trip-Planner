@@ -1,3 +1,4 @@
+export * from './accessibility.js';
 export * from './classify.js';
 export * from './questioner.js';
 export * from './constraints.js';

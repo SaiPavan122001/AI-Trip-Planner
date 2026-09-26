@@ -19,6 +19,7 @@ import {
   type TravelerProfile,
   type TripIntent,
 } from '@trip/shared';
+import { describeNeeds, unconfirmedHotelNeeds } from './accessibility.js';
 import { cheapestRoom, scoreHotels, type ScoredCandidate } from './scoring.js';
 
 /**
@@ -164,11 +165,16 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
     : null;
 
   if (!selected && offers.length > 0) {
+    const found = `${offers.length} propert${offers.length === 1 ? 'y was' : 'ies were'} found but none met your requirements; the reason for each is listed.`;
+    const accessibilityNeeds = findHard(constraints, 'required_accessibility')?.value ?? [];
+    const byAccessibility = filtered.some((f) => f.reason.startsWith('Does not publish that it offers'));
     notes.push({
       provider: 'engine',
       providerLabel: 'Planner',
       status: 'no_availability',
-      message: `${offers.length} propert${offers.length === 1 ? 'y was' : 'ies were'} found but none met your requirements. Relaxing the star rating or cancellation policy would open more options.`,
+      message: byAccessibility
+        ? `${found} Hotel providers rarely publish accessibility details, so properties that do not state ${describeNeeds(accessibilityNeeds)} were not included. Contacting properties directly is the most reliable way to confirm.`
+        : `${found} Relaxing one of them, such as the star rating or cancellation policy, would open more options.`,
       occurredAt: new Date().toISOString(),
     });
   }
@@ -220,11 +226,24 @@ function filterHotels(
   const rooms = Math.max(1, requiredRooms);
   const guests = seatedTravelers(intent.travelers);
 
+  const accessibilityNeeds = findHard(constraints, 'required_accessibility')?.value ?? [];
+
   for (const hotel of offers) {
     if (minCategory !== null && hotel.category !== null && hotel.category < minCategory) {
       filtered.push({
         hotelId: hotel.id,
         reason: `Rated ${hotel.category}; you asked for ${minCategory} or above.`,
+      });
+      continue;
+    }
+
+    // Accessibility is a hard requirement, so a property is only kept when
+    // it publishes that it meets every stated need. Silence is not a yes.
+    const unconfirmed = unconfirmedHotelNeeds(hotel, accessibilityNeeds);
+    if (unconfirmed.length > 0) {
+      filtered.push({
+        hotelId: hotel.id,
+        reason: `Does not publish that it offers ${describeNeeds(unconfirmed)}. This is missing information, not a statement that the property is inaccessible.`,
       });
       continue;
     }

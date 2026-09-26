@@ -1,11 +1,14 @@
 import {
   money,
+  type ConstraintSet,
+  type HotelOffer,
   type Place,
   type TransportOffer,
   type TravelerProfile,
   type TripIntent,
 } from '@trip/shared';
 import { emptyTravelerProfile } from '@trip/shared';
+import { buildConstraints } from '../constraints.js';
 
 /** Shared fixtures. Real coordinates and timezones, so scheduling tests
  *  exercise genuine offsets rather than a convenient fiction. */
@@ -141,4 +144,60 @@ export function transportOffer(overrides: Partial<TransportOffer> = {}): Transpo
     },
   };
   return { ...base, ...overrides };
+}
+
+export function hotel(overrides: Partial<HotelOffer> = {}): HotelOffer {
+  const provenance = {
+    provider: 'test',
+    providerLabel: 'Test provider',
+    retrievedAt: '2026-01-01T00:00:00.000Z',
+    validUntil: null,
+    searchId: null,
+    attribution: null,
+  };
+  return {
+    id: 'test-hotel',
+    name: 'Test Hotel',
+    propertyType: null,
+    category: 4,
+    guestRating: null,
+    guestRatingCount: null,
+    coordinates: { lat: 12.9716, lon: 77.5946 },
+    address: null,
+    neighbourhood: null,
+    amenities: [],
+    checkInTime: null,
+    checkOutTime: null,
+    rooms: [
+      {
+        id: 'room-1',
+        description: 'Double room',
+        roomType: null,
+        beds: null,
+        maxOccupancy: 2,
+        boardType: null,
+        breakfastIncluded: null,
+        refundable: true,
+        cancellationDeadline: null,
+        cancellationPolicy: null,
+        totalPrice: money(24000, 'INR'),
+        pricePerNight: money(6000, 'INR'),
+        taxesIncluded: null,
+        revalidationToken: null,
+      },
+    ],
+    images: [],
+    provenance,
+    ...overrides,
+  };
+}
+
+/** The constraint set a profile implies for the default trip, with no budget. */
+export function buildConstraintsOnly(p: TravelerProfile, tripIntent: TripIntent = intent()): ConstraintSet {
+  return buildConstraints(tripIntent, p, {
+    total: null,
+    transport: null,
+    accommodation: null,
+    dailySpendPerPerson: null,
+  });
 }

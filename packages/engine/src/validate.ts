@@ -4,6 +4,7 @@ import {
   hasWaiver,
   isGreater,
   seatedTravelers,
+  type AccessibilityNeed,
   type ConstraintSet,
   type CostBreakdown,
   type ItineraryItem,
@@ -14,6 +15,7 @@ import {
   type TripIntent,
   type ValidationIssue,
 } from '@trip/shared';
+import { describeNeeds, unconfirmedHotelNeeds } from './accessibility.js';
 import { localParts, minutesBetween } from './time.js';
 
 /**
@@ -41,6 +43,13 @@ export interface ValidationInput {
   inbound: TransportOffer | null;
   hotel: SelectedHotel | null;
 }
+
+/** Needs that no connected activity source publishes anything about. */
+const UNCHECKABLE_FOR_ACTIVITIES: ReadonlySet<AccessibilityNeed> = new Set<AccessibilityNeed>([
+  'service_animal',
+  'visual_assistance',
+  'hearing_assistance',
+]);
 
 /** Shortest gap that counts as making a connection at all. */
 const MIN_CONNECTION_MINUTES = 20;
@@ -252,22 +261,55 @@ function checkHardConstraints(input: ValidationInput): ValidationIssue[] {
 
 function checkTravelerNeeds(input: ValidationInput): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  const needs = input.profile.special.accessibility;
+  const needs = findHard(input.constraints, 'required_accessibility')?.value ?? [];
   if (needs.length > 0) {
-    const hotelAmenities = (input.hotel?.hotel.amenities ?? []).map((a) => a.toLowerCase());
-    const confirmsAccess = hotelAmenities.some((a) => /wheelchair|accessib/i.test(a));
-    if (input.hotel && !confirmsAccess) {
+    // A hard requirement: the hotel filter should already have removed any
+    // property that does not confirm it, and this is the final check that
+    // nothing reached a plan without that confirmation.
+    const unconfirmed = input.hotel ? unconfirmedHotelNeeds(input.hotel.hotel, needs) : [];
+    if (input.hotel && unconfirmed.length > 0) {
       issues.push({
-        code: 'accessibility_unconfirmed',
-        severity: 'warning',
-        message: `You listed accessibility requirements, and ${input.hotel.hotel.name} does not publish enough detail to confirm them. This is missing data, not a statement that the property is inaccessible.`,
+        code: 'accessibility_requirement_unmet',
+        severity: 'blocker',
+        message: `${input.hotel.hotel.name} does not publish that it offers ${describeNeeds(unconfirmed)}, which you said is required. This is missing information, not a statement that the property is inaccessible.`,
         itemIds: [],
         suggestions: [
-          'Contact the property directly before booking.',
-          'Ask the planner for properties that publish accessibility information.',
+          'Choose a property that publishes this information.',
+          'Contact the property directly to confirm before relying on it.',
         ],
       });
     }
+
+    // No connected rail, bus or road source publishes accessibility, so the
+    // planner cannot confirm it for those legs and says so rather than
+    // staying silent.
+    const surface = [input.outbound, input.inbound].filter(
+      (o): o is TransportOffer => o !== null && o.mode !== 'flight',
+    );
+    if (surface.length > 0) {
+      const modes = [...new Set(surface.map((o) => o.mode.replace('_', ' ')))].join(' and ');
+      issues.push({
+        code: 'transport_accessibility_unconfirmed',
+        severity: 'warning',
+        message: `The ${modes} in this plan cannot be confirmed to meet your accessibility needs: the connected sources do not publish that information.`,
+        itemIds: [],
+        suggestions: ['Confirm with the operator before travelling.'],
+      });
+    }
+
+    // Activity sources publish wheelchair details only. Other needs cannot
+    // be checked against them, and the traveller should know which.
+    const uncheckable = needs.filter((n) => UNCHECKABLE_FOR_ACTIVITIES.has(n));
+    if (uncheckable.length > 0 && input.items.some((i) => i.kind === 'activity')) {
+      issues.push({
+        code: 'activity_accessibility_unconfirmed',
+        severity: 'warning',
+        message: `The places to visit in this plan could not be checked for ${describeNeeds(uncheckable)}: the connected sources do not publish it.`,
+        itemIds: input.items.filter((i) => i.kind === 'activity').map((i) => i.id),
+        suggestions: ['Confirm with each venue before visiting.'],
+      });
+    }
+
     if (input.outbound?.mode === 'flight' || input.inbound?.mode === 'flight') {
       issues.push({
         code: 'assistance_must_be_requested',

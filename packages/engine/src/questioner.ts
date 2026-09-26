@@ -381,17 +381,17 @@ const DEFS: QuestionDef[] = [
   },
   {
     key: 'traveler.accessibility',
-    when: (ctx) =>
-      ctx.profile.special.travelingWithElderly ||
-      ctx.profile.partyType === 'family' ||
-      ctx.intent.travelers.adults > 2,
+    // Asked of everyone. Needing step-free access or a hearing loop has
+    // nothing to do with party size or age, and gating the question on
+    // either meant a solo traveller using a wheelchair was never asked.
+    when: () => true,
     requiredForPlanning: false,
     build: () => ({
       key: 'traveler.accessibility',
       kind: 'multi_choice',
       prompt: 'Does anyone travelling need accessibility support?',
       helpText:
-        'The planner uses this as a hard requirement and will say plainly when a provider does not publish enough information to confirm it.',
+        'Choose any that apply, or continue with none selected. Each one is treated as a requirement: only places that publish that they meet it are included, and the planner says plainly when a provider does not publish enough to confirm it.',
       options: [
         { value: 'step_free_access', label: 'Step-free access', description: null, implication: null },
         {
@@ -400,6 +400,7 @@ const DEFS: QuestionDef[] = [
           description: null,
           implication: null,
         },
+        { value: 'accessible_bathroom', label: 'Accessible bathroom', description: null, implication: null },
         {
           value: 'wheelchair_assistance_at_terminal',
           label: 'Assistance at airports and stations',
@@ -408,13 +409,17 @@ const DEFS: QuestionDef[] = [
         },
         { value: 'elevator_required', label: 'Lift required', description: null, implication: null },
         { value: 'ground_floor_room', label: 'Ground-floor room', description: null, implication: null },
+        { value: 'service_animal', label: 'Travelling with a service animal', description: null, implication: null },
+        { value: 'visual_assistance', label: 'Support for visual impairment', description: null, implication: null },
+        { value: 'hearing_assistance', label: 'Support for hearing impairment', description: null, implication: null },
       ],
+      minSelections: 0,
       min: null,
       max: null,
       currency: null,
       required: false,
       reason:
-        'Accessibility is a hard constraint. It is asked explicitly because inferring it from anything else would be guesswork.',
+        'Accessibility is a hard requirement. It is asked of everyone because inferring it from anything else would be guesswork.',
       stage: 'traveler_needs',
     }),
   },
