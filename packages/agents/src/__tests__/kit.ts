@@ -248,3 +248,35 @@ export async function realPlans(
   });
   return { result, plans: result.plans, intent: tripIntent, profile: p, constraints, fake };
 }
+
+/** A drive in the traveller's own car: a real ₹0 fare, with its distance and time, and costs that cannot be priced named. */
+export function driveOffer(date: string, fromCode: string, toCode: string, leaveHour = 6): TransportOffer {
+  return {
+    ...flightOn(date, fromCode, toCode, leaveHour, `drive-${fromCode}-${date}`),
+    mode: 'self_drive',
+    segments: [
+      {
+        mode: 'self_drive',
+        operatorCode: null,
+        operatorName: 'Your own car',
+        serviceNumber: null,
+        origin: { code: fromCode, name: fromCode, coordinates: null, timezone: 'Asia/Kolkata', terminal: null },
+        destination: { code: toCode, name: toCode, coordinates: null, timezone: 'Asia/Kolkata', terminal: null },
+        departureAt: `${date}T${two(leaveHour)}:00:00`,
+        arrivalAt: `${date}T${two(leaveHour + 8)}:00:00`,
+        durationMinutes: 480,
+        vehicleType: null,
+      },
+    ],
+    totalPrice: money(0, 'INR'),
+    pricePerTraveler: money(0, 'INR'),
+    itemisedFees: [
+      { label: 'Fuel (estimate)', amount: money(3_000, 'INR'), included: false, isEstimate: true, basis: 'distance and the configured vehicle profile' },
+    ],
+    unpricedCosts: ['Tolls and parking'],
+    fareClasses: [],
+    selectedFareCode: null,
+    totalDurationMinutes: 480,
+    revalidationToken: null,
+  } as unknown as TransportOffer;
+}

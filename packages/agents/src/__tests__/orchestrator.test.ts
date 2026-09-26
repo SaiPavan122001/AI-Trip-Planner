@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { generatePlans, type PlanGenerationDeps, type PlanProgress } from '@trip/engine';
 import type { ProviderRegistry } from '@trip/providers';
-import { emptyRequirements, money, type RequirementsState, type TripPlan } from '@trip/shared';
+import { emptyRequirements, money, ok, type RequirementsState, type TripPlan } from '@trip/shared';
 import { PlanningOrchestrator, engineServices, type OrchestratorInput, type PlanningServices } from '../index.js';
-import { classificationFor, constraintsFor, fakeLlm, fakeTravel, hotelOffer, intent, noModel, profile, realPlans, type Fake } from './kit.js';
+import { classificationFor, constraintsFor, driveOffer, fakeLlm, fakeTravel, hotelOffer, intent, noModel, profile, realPlans, type Fake } from './kit.js';
 
 /**
  * The orchestrator: a fixed workflow over bounded agents and deterministic
@@ -402,6 +402,37 @@ describe('pins and re-planning', () => {
     const viaPlan = await orchestrator(a).plan(inputFor(a).input);
     const viaReplan = await orchestrator(b).replan({ ...inputFor(b).input, pins: [], previous });
     expect(stripTimes(viaReplan.plans)).toEqual(stripTimes(viaPlan.plans));
+  });
+});
+
+describe('self-drive', () => {
+  it('keeps a drive in your own car at ₹0, with its distance and time and fuel apart, and never counts what cannot be priced as zero', async () => {
+    const fake = fakeTravel();
+    const meta = { provider: 'fake-drive', providerLabel: 'Fake drive', retrievedAt: '2026-01-01T00:00:00.000Z', validUntil: null, searchId: null, attribution: null };
+    Object.assign(fake.registry, {
+      selfDrive: {
+        estimate: async (opts: { date: string; origin: { name: string } }) =>
+          ok(opts.origin.name === 'Bengaluru' ? driveOffer(opts.date, 'BLR', 'HYD', 13) : driveOffer(opts.date, 'HYD', 'BLR', 6), meta),
+      },
+    });
+    const p = profile({ priorities: ['cheapest'] });
+    p.transport.excludedModes = ['flight', 'train', 'bus', 'rental_car', 'taxi', 'ferry'];
+    const result = await orchestrator(fake).plan(inputFor(fake, { profile: p, constraints: constraintsFor(p, intent(), { total: 500_000 }) }).input);
+
+    expect(result.status).toBe('planned');
+    const plan = result.plans[0]!;
+    expect(plan.outboundTransport!.mode).toBe('self_drive');
+    // The fare is a real ₹0; the drive's length and duration are kept apart from money; fuel is a separate, labelled estimate.
+    expect(plan.outboundTransport!.totalPrice.amount).toBe(0);
+    expect(plan.cost.transport.amount).toBe(0);
+    expect(plan.outboundTransport!.totalDurationMinutes).toBe(480);
+    expect(plan.cost.transportFees.amount).toBe(600_000);
+    expect(plan.cost.estimatedPortion.amount).toBeGreaterThanOrEqual(600_000);
+    // What cannot be priced is named, and never counted as zero or hidden by "within budget".
+    expect(plan.cost.notIncluded.map((n) => n.label)).toContain('Tolls and parking');
+    expect(result.narrative.summary).toMatch(/does not include: .*Tolls and parking/);
+    // Validation treats a ₹0 fare as a known amount, not a missing one.
+    expect(result.validation!.results.every((r) => r.valid)).toBe(true);
   });
 });
 
