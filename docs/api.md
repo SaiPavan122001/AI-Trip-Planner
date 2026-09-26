@@ -33,15 +33,22 @@ failures; `provider` appears when a travel provider was the cause.
 | `unprocessable` | 422 | Understood, but preconditions unmet |
 | `provider_unavailable` | 503 | A required provider could not answer |
 | `planning_timeout` | 504 | The search exceeded `PLANNING_TIMEOUT_MS` |
+| `conflict` on a consent answer | 409 | The question is no longer pending |
+| `booking_unavailable` | 501 | Booking is not available in this release |
 | `internal_error` | 500 | Unhandled. Nothing was booked or charged. |
 
 **Headers**
 
-- `X-User-Id` — optional. Associates a trip with an account. Planning is anonymous by default.
-- `Idempotency-Key` — **required** on every booking mutation, minimum 8 characters. A repeated key
-  returns the original result rather than creating a second booking.
+- `X-User-Id` — optional, and **not authenticated**: it is a label the client chooses, used to group
+  trips, and must never be treated as proof of who someone is. There is no authentication yet, so
+  anyone who has a trip's id can read and change it.
+- `Idempotency-Key` — used by booking, which is not available in this release.
 
-**Rate limiting** — `RATE_LIMIT_MAX` requests per `RATE_LIMIT_WINDOW`, keyed by `X-User-Id` or IP.
+**Rate limiting** — `RATE_LIMIT_MAX` requests per `RATE_LIMIT_WINDOW`, keyed by `X-User-Id` or IP. Because
+that header is client-supplied it does not stop a determined caller; it is a courtesy limit until real
+identity exists.
+
+**Currency** — every amount is in Indian rupees (`INR`). There is no conversion.
 
 ---
 
@@ -61,6 +68,9 @@ Creates a planning session. This is the only step with required questions.
   "currency": "INR"
 }
 ```
+
+`currency` must be `"INR"` (it is the default) and `departureDate` cannot be in the past where the trip
+starts; either returns `400`. Dates must be real calendar dates.
 
 `201` with `{ "trip": PlanningSession }`. The session already carries the journey classification and
 the first question.
@@ -115,8 +125,16 @@ client renders whatever it is handed. `kind` is one of `single_choice`, `multi_c
 `value` shape follows `kind`: a string for `single_choice`, an array for `multi_choice` and
 `ranking`, a Money object for `money`, a number for `number`, a boolean for `boolean`.
 
-Set `"skipped": true` with `"value": null` to decline. A skipped question leaves no trace of a
-preference — it is recorded as skipped, never as a default.
+Every answer is checked against the question as it was asked for this trip before anything is stored:
+an option that was not offered, a list outside `minSelections`/`maxSelections`, a fractional or
+out-of-range number (`min`/`max`), money in another currency or not above zero, text over
+`maxLength` or with control characters, and a question that does not apply to this trip are all
+refused with `400`. The error names the question (`details.key`) and never repeats the value. A
+rejected answer leaves the trip exactly as it was.
+
+Set `"skipped": true` with `"value": null` to decline a question that is not `required`. Skipping a
+required one returns `400`. A skipped question leaves no trace of a preference — it is recorded as
+skipped, never as a default, and skipping a question you answered earlier withdraws that answer.
 
 An unknown `key` returns `400`. Returns the updated trip and questionnaire.
 
@@ -194,6 +212,12 @@ When the best plan exceeds the stated budget, `budgetConflict` is populated:
 
 Nothing is applied. These are offers; the traveller chooses.
 
+Each plan's `cost.notIncluded` lists costs the total leaves out because no connected source can price
+them, each with a reason (tolls and parking for a drive, a transfer with no fare, entry to a place with
+no published price, meals when no daily allowance was given). The total is complete only when that list
+is empty; an unknown cost is never counted as ₹0. A drive in your own car has a known fare of ₹0, with
+fuel and wear listed separately as estimates only when a vehicle profile makes them calculable.
+
 ### `POST /v1/trips/:id/select`
 
 ```json
@@ -209,22 +233,64 @@ Nothing is applied. These are offers; the traveller chooses.
 ```json
 {
   "trip": { "...": "PlanningSession" },
-  "interpretation": "Re-planning with price as the first priority. Kept as-is: hotel.",
+  "status": "applied",
+  "interpretation": "Understood as a request to make the trip cheaper. Keeping: hotel. Price is now the first thing the planner optimises for. Kept as you asked: hotel.",
   "understoodBy": "Anthropic Claude",
-  "reSearched": ["outbound", "return", "transfers"],
-  "preserved": ["hotel"],
-  "requiresConsent": null,
+  "reSearched": ["outbound", "return"],
+  "kept": ["hotel", "activities"],
+  "released": [],
+  "consent": null,
   "plans": [ { "...": "TripPlan" } ],
   "budgetConflict": null
 }
 ```
 
-`understoodBy` is `"rules"` when the deterministic fallback handled it. An unclear request returns
-`reSearched: []` and changes nothing.
+`status` is one of:
 
-`requiresConsent` is set when the change would breach a hard constraint — changing party size or
-dates invalidates every quoted price, and asking for more comfort under a fixed budget may exceed
-it. The plan is not changed until the traveller answers.
+| status | Meaning |
+|---|---|
+| `applied` | The change is saved and plans were rebuilt where needed. |
+| `saved` | The change is saved; there was no plan to rebuild, so the next search uses it. |
+| `needs_consent` | **Nothing has changed.** `consent` holds a question to answer first. |
+| `no_change` | Nothing was changed; `interpretation` says why, or what to say instead. |
+
+`kept` parts of the plan are used exactly as they were, with the date their price was retrieved
+noted under `providerNotes`; only `reSearched` parts were searched again. Anything the traveller
+pinned is in `kept` unless it could not be, in which case it appears in `released` with the reason
+(for example, a hotel that was for the old dates). `interpretation` is written from the validated
+request; it is never text produced by a model. `understoodBy` is `"rules"` when the keyword fallback
+handled the request.
+
+Supported changes: cheaper, more comfortable, a different way of travelling ("use the train" becomes a
+preferred mode; other modes still appear for comparison), a minimum star rating, no overnight
+travel, departure or arrival times, a new total budget, new dates, a new group size, priorities, and
+replacing one part of the plan. Adding or removing a single place to visit is not supported and says
+so.
+
+**Consent.** A change that would break something you set is not applied. `consent` is:
+
+```json
+{
+  "id": "c3f1…",
+  "question": "Change the trip to 2026-12-01 to 2026-12-05? Every price and schedule will be searched again for the new dates.",
+  "acceptLabel": "Yes, change the dates",
+  "declineLabel": "No, keep my dates"
+}
+```
+
+The question is also stored on the trip (`trip.pendingModification`), so it survives a reload. A new
+`modify` request, a new answer to the interview, or new plans replaces it.
+
+### `POST /v1/trips/:id/modify/consent`
+
+```json
+{ "pendingModificationId": "c3f1…", "accept": true }
+```
+
+Applies the answer, and returns the same shape as `modify`. Accepting applies exactly what the
+question described; declining changes nothing, except that for a comfort upgrade under a budget both
+answers act (yes shows options above the budget, no keeps it a firm limit). Answering a question that
+is no longer pending returns `409` and changes nothing.
 
 ### `DELETE /v1/trips/:id`
 
@@ -238,57 +304,28 @@ Place lookup for autocomplete. `{ "places": Place[] }`.
 
 ## Booking
 
-Every mutation below requires `Idempotency-Key`.
-
-### `POST /v1/trips/:id/bookings`
+**Booking is not available in this release.** Every route below is registered and answers `501`:
 
 ```json
 {
-  "component": "transport_outbound",
-  "offerId": "amadeus-flight:1",
-  "provider": "amadeus",
-  "quotedPrice": { "amount": 960000, "currency": "INR" }
+  "error": {
+    "code": "booking_unavailable",
+    "message": "Booking is not available yet. You can plan, compare and adjust trips here, and booking will be added in a later release. Nothing has been booked or charged."
+  }
 }
 ```
 
-`201` with a booking in state `draft`.
+- `POST /v1/trips/:id/bookings`
+- `GET /v1/trips/:id/bookings`
+- `POST /v1/trips/:id/travelers` — stores nothing, and traveller names, dates of birth and document
+  numbers are not collected
+- `GET /v1/bookings/:id`
+- `POST /v1/bookings/:id/revalidate`
+- `POST /v1/bookings/:id/events`
+- `POST /v1/bookings/:id/confirm`
 
-### `POST /v1/bookings/:id/revalidate`
-
-```json
-{ "revalidationToken": "<from the offer>" }
-```
-
-Re-prices with the provider. Three real outcomes: still available at the same price
-(`revalidated`), available at a different price (`price_changed`), or gone (`unavailable`). The
-response `message` is written for the traveller and states explicitly that nothing has been charged.
-
-### `POST /v1/trips/:id/travelers`
-
-An array of `TravelerDetails`. Returns `{ "saved": n }` — identity documents are never echoed back.
-
-### `POST /v1/bookings/:id/events`
-
-```json
-{ "event": "USER_CONFIRM", "note": "optional", "providerReference": "optional" }
-```
-
-Drives the state machine. An event that is not a declared transition from the current state returns
-`409` with what would be valid. A transition into `confirmed` or `ticketed` without a provider
-reference is refused.
-
-### `POST /v1/bookings/:id/confirm`
-
-Attempts the provider booking. Requires state `payment_authorized` and saved traveller details.
-
-```json
-{ "booking": { "...": "BookingRecord" }, "message": "…", "confirmed": false }
-```
-
-`confirmed` is explicit so no client can read a `2xx` as "we have a reservation". With no
-booking-capable provider connected this returns `503` and says so — no charge should be captured.
-
-### `GET /v1/bookings/:id`, `GET /v1/trips/:id/bookings`
+None reads its request body, writes anything or contacts a provider. See [booking.md](booking.md) for
+what exists in the code for the release that adds booking.
 
 ---
 
@@ -296,7 +333,8 @@ booking-capable provider connected this returns `503` and says so — no charge 
 
 ### `GET /health`
 
-`200` or `503`. Reports the store in use, including whether it is in-memory and therefore volatile.
+`200` or `503`. Reports the store in use, including whether it is in-memory and therefore volatile. When
+the database is unreachable it says so in fixed words; the underlying error is logged, never returned.
 
 ### `GET /ready`
 
@@ -309,4 +347,6 @@ an LLM is configured, and the data policy string the UI displays.
 
 ### `GET /v1/providers/health`
 
-Live probe of each connected provider. `207` if any is degraded.
+Live probe of each connected provider. `207` if any is degraded. **Unauthenticated, and some probes call
+billed APIs** (Google Places and Routes make a real request), so do not expose it publicly without
+authentication or a network restriction.

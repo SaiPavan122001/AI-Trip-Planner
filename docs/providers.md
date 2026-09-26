@@ -6,7 +6,10 @@ provider did not return.
 
 ## The two rules
 
-Every adapter, including any you write, must hold to these:
+Every adapter, including any you write, must hold to these. A third rule applies to money: **prices
+are in INR, and nothing is converted.** A result in any other currency is set aside by the planner
+with a note naming your provider (see `currency.ts`), so an adapter should request INR and should not
+try to convert.
 
 1. **Return a failure rather than partial or invented data.** If the provider timed out, said no, or
    is not configured, return a `ProviderFailure` with the right status. Never a plausible default,
@@ -69,14 +72,31 @@ is enforced in the adapter rather than left to the operator to remember.
 implying live availability. Flight re-pricing carries the full offer payload as its revalidation
 token, because that is the only input the pricing endpoint accepts.
 
-**OSRM** gives real distance and duration and no fares. Transfer prices come only from an
-operator-configured tariff (`GROUND_TRANSPORT_TARIFFS`), are flagged `priceIsEstimate`, and state
-the tariff as their basis. With no tariff configured, the leg is shown with distance and time and
-no price rather than a number nobody can justify.
+Hotel mapping states only what Amadeus states. `refundable` comes only from
+`policies.refundable.cancellationRefund` (`REFUNDABLE_UP_TO_DEADLINE` is true, `NON_REFUNDABLE` is false,
+anything else is unknown, and a rate whose refund deadline has passed is not refundable). Room capacity
+(`maxOccupancy`) stays unknown, because `guests.adults` is the number the rate was priced for. The
+search asks for guests **per room**, counts children as guests (child ages and rates are not
+requested, and the traveller is told), and refuses more than nine per room. The status of those enum
+values was written from Amadeus's reference and has not been confirmed against live sandbox
+responses.
 
-**Self-drive** models running cost from `SELF_DRIVE_PROFILE` and builds mandatory rest into long
-drives — an eight-hour estimate that assumes nobody stops is not a plan anyone can execute. Tolls
-are never guessed; the offer says they are excluded.
+**Re-pricing** (`revalidateFlight`, `revalidateHotel`) takes only the provider's own token, exactly as
+the search returned it, never an identifier from this system's records. It is not reachable while
+booking is off.
+
+**OSRM** gives real distance and duration and no fares. Transfer prices come only from an
+operator-configured tariff (`GROUND_TRANSPORT_TARIFFS`, INR only), are flagged `priceIsEstimate`, and
+state the tariff as their basis. With no tariff configured, the leg is shown with distance and time
+and no price, and is listed as not included in the total, rather than a number nobody can justify.
+
+**Self-drive** has a known fare of ₹0: nobody sells you a ticket for your own car. Fuel and wear are
+itemised separately, as estimates with their basis, only when `SELF_DRIVE_PROFILE` (which must be INR)
+makes them calculable; without it they are named as "not calculated", never as zero. Tolls and parking
+have no source and are always named as not calculated. Mandatory rest is built into long drives — an
+eight-hour estimate that assumes nobody stops is not a plan anyone can execute. Departure is read as
+local time at the origin and arrival is reported in the destination's zone, whatever zone the server
+runs in.
 
 **Google Places** exists mainly for opening hours. Without them the scheduler has to treat every
 activity as always-open, which is how itineraries end up sending people to a museum on its closing

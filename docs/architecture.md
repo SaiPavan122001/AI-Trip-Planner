@@ -91,9 +91,22 @@ Constraints are split into two kinds, and the split is the whole design.
 | `max_stops`, `required_checked_bags` | transport questions |
 | `latest_arrival_time`, `earliest_departure_time` | timing preferences |
 
+The two time windows apply to every leg, outbound and return, and are read in local time where each
+departure and arrival happens (`time-windows.ts`). "Arrive by 22:00" means by 22:00 on the day the leg
+leaves, so an overnight leg arriving at 06:00 does not meet it. The transport filter and the validator
+share that one definition. Accessibility needs are also hard: a hotel that does not publish that it
+meets a stated need is dropped with a recorded reason, and the validator blocks any plan that reaches
+it anyway. Silence from a provider is not treated as a yes.
+
 A plan that violates one is not a worse plan; it is not a plan. The only way past a hard constraint
 is an explicit, recorded waiver (`ConstraintSet.waivers`), granted by the traveller in response to a
-specific question. `grantWaiver` is the only function that can add one.
+specific question. `grantWaiver` is the only function that can add one; it is called only when the
+traveller answers yes to a consent question (see below), and a new total budget withdraws an earlier
+waiver of the old one.
+
+The budget figures the traveller actually states are the total and the daily allowance. The transport
+and accommodation allowances are *derived* from the total and travel style, are re-derived whenever the
+total changes, and are never fed back in as if the traveller had stated them.
 
 **Soft preferences** are weights, applied during scoring: the priority ranking, preferred cabin,
 carrier preferences, hotel category inferred from travel style, scenic routing, breakfast.
@@ -126,7 +139,7 @@ system assert that a place is safe.
 ## Where the AI sits
 
 The LLM has exactly one job: turning what a traveller typed into a structured `ModificationRequest`.
-It is a router.
+It is a router, and what it returns is **untrusted input**.
 
 ```
   "make it cheaper but keep the hotel"
@@ -138,10 +151,17 @@ It is a router.
   { intent: 'reduce_cost', pinnedComponents: ['hotel'] }
         │
         ▼
-  applyModification()  ── deterministic: decides what that means,
-        │                  which components to re-search, whether a
-        ▼                  hard constraint would be breached
-  generatePlans()      ── real provider searches
+  sanitizeModificationParameters()  ── every field checked against domain
+        │                              rules; invalid ones dropped and logged
+        ▼
+  applyModification()  ── deterministic: works out the whole change first:
+        │                  what is kept exactly, what is re-searched, what
+        │                  pinned parts must be released and why, and
+        │                  whether the traveller has to be asked
+        ▼
+  generatePlans()      ── real provider searches, for the unpinned parts only;
+        │                  kept parts are used as they were, with their
+        │                  original retrieval date
         │
         ▼
   validateItinerary()  ── deterministic; has the final word
@@ -154,6 +174,36 @@ method, because free text is how model output ends up displayed to a traveller a
 Everything the model is asked is a classification with a closed set of answers. Ambiguity resolves
 to `unknown`, which makes the system ask rather than act — a wrong guess would silently re-search
 and replace parts of a plan the traveller was happy with.
+
+What this does and does not protect against:
+
+- The traveller's message is JSON-escaped inside a delimited block and the prompt says it is data,
+  not instructions. That reduces prompt injection; it does not eliminate it. The real defence is that
+  a manipulated model can only name an intent and closed-set parameters, each validated on its own,
+  and the engine (not the model) decides what that means. Nothing the model says can set a price,
+  skip a hard constraint or reach the traveller as text.
+- The sentence shown to the traveller is written from the validated request. An earlier version
+  showed the model's own sentence, which let a crafted message make it say things such as "your
+  booking is confirmed".
+- A model that misbehaves, times out (`LLM_TIMEOUT_MS`, default 20 s) or returns something invalid
+  falls back to the keyword rules. That fallback is logged with its reason for operators, so a
+  silent, permanent fall back after a provider or model change would be noticed.
+
+Free text is still a risk when it later appears in prompts: the accommodation location preference
+is a bounded, single-line string today, and future agents must treat every stored string as data.
+
+### Changes that need consent
+
+A change that would break something the traveller set is worked out in full and stored on the trip
+as a pending question with both answers precomputed. Nothing changes until it is answered:
+
+- **New dates or group size**: yes re-plans transport and accommodation for the new trip, and
+  releases any pinned item that was tied to the old one, saying so up front; there is no "no" change.
+- **A comfort upgrade under a budget**: yes shows options above the budget (recorded as a waiver);
+  no keeps the budget firm.
+
+`POST /v1/trips/:id/modify/consent` answers it. A question lapses if the trip changes another way
+first, so accepting it later cannot silently undo that change.
 
 With no model configured, `interpretModificationByRules` handles the same job with keyword matching.
 Blunter, entirely predictable, and the response says which one answered. Planning itself is
@@ -220,6 +270,18 @@ A trip total sums dozens of components. Floating-point currency drifts, and in a
 becomes a user-visible discrepancy between the breakdown and the total. Arithmetic across currencies
 throws rather than applying an implicit rate.
 
+**INR is the only supported currency.** Wayfare serves India, and there is no exchange-rate source, so
+nothing is converted. Trips are created in INR; taxi tariffs and the vehicle profile must be INR or
+the service will not start; and provider results in any other currency are set aside at the boundary
+(`currency.ts`) with a note naming the provider, so a foreign price is never compared, totalled or
+allowed to skip a budget check. Supporting other currencies needs a real FX source first.
+
+**Unknown is not zero.** A cost nobody can price is listed in `cost.notIncluded` (tolls, parking, a
+transfer with no fare, entry to a place with no published price, meals with no allowance) and the
+total says it is incomplete. The one deliberate zero is driving your own car: the fare is a known
+₹0, because nobody sells you a ticket. Fuel and wear are shown separately, as estimates, only when a
+vehicle profile makes them calculable; comparisons use the fare plus every cost that can be priced.
+
 ---
 
 ## Services
@@ -231,16 +293,17 @@ throws rather than applying an implicit rate.
   Fastify (apps/api) ── helmet, CORS, rate limiting, request ids,
         │                idempotency keys, structured logging with redaction
         ├──► TripService     — the planning use cases
-        ├──► BookingService  — the state machine
+        ├──► BookingService  — the state machine (kept, not reachable: booking is off)
         ├──► TripRepository  — Prisma (PostgreSQL) or in-memory
         ├──► ProviderRegistry — the only thing that knows which adapters exist
         └──► TripLlm         — the model boundary
 ```
 
 `TripRepository` is an interface with two implementations. The in-memory one makes a fresh clone run
-with no database; the Prisma one re-validates every document it reads against the Zod schema, so a
-row written by an older version becomes a loud error rather than an undefined field somewhere deep
-in the scheduler.
+with no database. Both stores validate a session against the Zod schema before writing it, so a
+document that could not be read back is never stored; the Prisma one also re-validates every document
+it reads, so a row written by an older version becomes a loud error rather than an undefined field
+somewhere deep in the scheduler.
 
 Planning sessions are stored as a validated JSON document alongside the columns worth indexing.
 Bookings are fully normalised: every column is money or provenance.
@@ -249,10 +312,13 @@ Bookings are fully normalised: every column is money or provenance.
 
 ## What is deliberately not built
 
-- **Ticket issuance.** No connected adapter is authorised to create orders, so the confirm endpoint
-  fails with that reason rather than simulating success.
-- **Payments.** Card data never reaches the service. The state machine accepts an authorisation
-  reference from a PSP and nothing else.
+- **Booking, payment and ticketing.** All of it is off in this release; see [booking.md](booking.md).
+  The endpoints answer 501 and store nothing.
+- **Authentication and authorisation.** None. Anyone with a trip's link can read and change it, and
+  `X-User-Id` is an unauthenticated label. See [SECURITY.md](../SECURITY.md).
+- **Caching, queues and background work.** Planning runs inside one request. `REDIS_URL` is accepted
+  and Redis runs in the compose file, but nothing uses it yet.
+- **Adding or removing individual places to visit.** A request to do so says so and changes nothing.
 - **Multi-city and open-jaw routing.** The model supports the shape; the search orchestration
   assumes one outbound and one return leg.
 - **Seat maps and ancillary selection.** Fare classes are surfaced exactly as providers report them;

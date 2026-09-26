@@ -41,7 +41,17 @@ not as a scoring penalty. If you are adding something that only nudges, it belon
 structured output. Do not add a free-text completion method. Do not let a model produce a price, a
 schedule, a service number or an availability.
 
-**6. Deterministic validation has the last word.** Anything that decides whether an itinerary is
+**6. Treat model output as untrusted input.** Anything a model returns, including what a keyword
+fallback returns in its place, passes the same domain validation a form would (see
+`sanitizeModificationParameters`) before it touches a trip, and text shown to a traveller is written
+from validated data, never taken from a model. A new field a model may fill needs its own rule and a
+test that feeds it hostile values.
+
+**7. Unknown is not zero, and there is one currency.** A cost nobody can price goes in
+`cost.notIncluded`, not into the total as ₹0. Everything is INR; do not compare, add or convert
+amounts in another currency, and do not invent an exchange rate.
+
+**8. Deterministic validation has the last word.** Anything that decides whether an itinerary is
 physically possible goes in `validate.ts`, as arithmetic over instants and constraints.
 
 ## Code conventions
@@ -82,8 +92,9 @@ your agreement.
 
 - One concern per PR.
 - Say what a reviewer should check by hand, especially anything touching provider calls.
-- `npm run typecheck && npm test && npm run build` should pass before you open it. CI runs the same
-  plus a secret scan and a dependency audit.
+- `npm run lint && npm run typecheck && npm test && npm run build` should pass before you open it. CI
+  runs the same plus a secret scan and a dependency audit. Do not silence a lint rule or a type
+  error to make it pass; fix the cause.
 - Never commit a filled-in `.env`. CI fails the build if one is tracked.
 
 ## Reporting security issues

@@ -36,8 +36,20 @@ stated daily allowance are real estimates, labelled as estimates, with the basis
 separately from quoted prices.
 
 **The model routes; it does not source.** The LLM classifies what you typed when you ask for a
-change. It never produces a price, a schedule, a flight number or an availability, and every plan is
-validated afterwards by deterministic rules that cannot be argued with.
+change. It never produces a price, a schedule, a flight number or an availability, and what it returns
+is treated as untrusted: every value is checked against the same rules a form would apply, invalid
+ones are dropped, and the sentence shown to you is written from the validated request, never taken
+from the model. Every plan is validated afterwards by deterministic rules that cannot be argued
+with.
+
+**Pin what you like.** Say "make it cheaper but keep the hotel" and the hotel is carried over exactly,
+with the date its price was retrieved, while everything else is optimised again. When a change
+would break something you set (a comfort upgrade over your budget, new dates, a different group
+size), you are told what will change and asked before anything does.
+
+**Indian rupees only.** Wayfare serves travellers in India, so every budget and price is in INR.
+Prices a provider returns in another currency are set aside with a reason; nothing is converted at an
+invented rate.
 
 ---
 
@@ -74,7 +86,8 @@ zero-credential experience — see [Connecting providers](#connecting-providers)
 
 ```bash
 cp .env.example .env
-# set JWT_SECRET — compose refuses to start without it
+# set JWT_SECRET — compose refuses to start without it (it is reserved for
+# authentication, which is not implemented yet, so nothing reads it today)
 docker compose up --build
 ```
 
@@ -141,6 +154,7 @@ npm run dev            # API and web together
 npm run dev:api        # API only
 npm run dev:web        # web only
 npm test               # all workspace tests
+npm run lint           # ESLint, all workspaces
 npm run typecheck      # all workspaces
 npm run build          # full build in dependency order
 ```
@@ -161,17 +175,14 @@ npm run db:migrate     # apply migrations
 
 ## Booking
 
-The booking flow is implemented as an explicit state machine with idempotency keys and mandatory
-re-pricing before payment. Two rules are enforced in code and covered by tests:
+**Booking is not available in this release.** Wayfare plans, compares and adjusts trips; it cannot
+reserve, pay for or ticket anything. Every booking endpoint answers `501 booking_unavailable`, stores
+nothing, and does not collect traveller names or passport numbers.
 
-- A booking may only reach `confirmed` or `ticketed` through a provider response carrying a provider
-  reference. Nothing sets those states optimistically.
-- `awaiting_confirmation` cannot reach payment except through a fresh revalidation. A price quoted
-  twenty minutes ago is not a price anyone may be charged.
-
-No connected adapter currently issues tickets — Amadeus Self-Service requires a separate production
-agreement for order creation — so `POST /v1/bookings/:id/confirm` fails honestly with that reason
-rather than simulating a confirmation. Card data never touches the service.
+The state machine for booking is kept in the code, with the rule that a client can never send a
+payment or provider event, and idempotency that is atomic and per user. None of it is reachable over
+HTTP yet, and it needs a payment provider, a booking-capable provider, authentication and encrypted
+traveller data before it can be switched on.
 
 See [docs/booking.md](docs/booking.md).
 
