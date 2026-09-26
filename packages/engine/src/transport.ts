@@ -102,7 +102,7 @@ export async function searchTransport(
   deps: TransportSearchDeps,
   direction: 'outbound' | 'return',
 ): Promise<TransportSearchResult> {
-  const { registry, intent, classification, profile, constraints } = deps;
+  const { intent, classification, profile, constraints } = deps;
   const outbound = direction === 'outbound';
   const date = outbound ? intent.departureDate : intent.returnDate;
   if (!date) {

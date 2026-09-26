@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   verify:
-    name: Typecheck, test and build
+    name: Lint, typecheck, test and build
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -30,6 +30,10 @@ jobs:
       - name: Install
         run: npm ci
 
+      # Lint needs no compiled output, so it runs first and fails fast.
+      - name: Lint
+        run: npm run lint --workspaces --if-present
+
       - name: Generate Prisma client
         run: npx prisma generate --schema apps/api/prisma/schema.prisma
 
@@ -41,6 +45,12 @@ jobs:
           npm run build -w @trip/providers
           npm run build -w @trip/llm
           npm run build -w @trip/engine
+
+      # Explicit and separate from the build, so a type error is reported as a
+      # type error in every workspace, including the web app, whose production
+      # build would otherwise be the first thing to notice.
+      - name: Typecheck
+        run: npm run typecheck --workspaces --if-present
 
       - name: Test
         run: npm run test --workspaces --if-present

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { Question } from '@/lib/api';
 
 /**
@@ -320,8 +320,9 @@ function NumberInput({
   busy: boolean;
   onAnswer: (v: unknown) => void;
 }) {
+  // No reset effect is needed: the parent keys this control by question, so a
+  // new question mounts a fresh input with its own starting value.
   const [value, setValue] = useState(String(question.min ?? 0));
-  useEffect(() => setValue(String(question.min ?? 0)), [question.min]);
 
   return (
     <form

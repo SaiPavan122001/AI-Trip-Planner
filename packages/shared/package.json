@@ -16,7 +16,7 @@
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "lint": "echo \"(lint: configured via eslint in CI)\""
+    "lint": "eslint src"
   },
   "dependencies": {
     "zod": "^3.23.8"

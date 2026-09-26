@@ -21,6 +21,7 @@ import {
   type Place,
   type PlanningSession,
   type ProviderNote,
+  type TravelerProfile,
 } from '@trip/shared';
 import { ApiError } from '../errors.js';
 import type { TripRepository } from '../repository/types.js';
@@ -116,7 +117,7 @@ export class TripService {
     const session = await this.getTrip(id);
     const answer = Answer.parse(raw);
 
-    let profile = session.profile;
+    let profile: TravelerProfile;
     try {
       profile = applyAnswer(session.profile, answer);
     } catch (err) {

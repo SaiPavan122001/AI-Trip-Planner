@@ -62,9 +62,8 @@ export class ProviderRegistry {
         ['NOMINATIM_USER_AGENT'],
       );
 
-    let osrmRouting: OsrmRoutingProvider | null = null;
     if (env.osrm) {
-      osrmRouting = new OsrmRoutingProvider(env.osrm);
+      const osrmRouting = new OsrmRoutingProvider(env.osrm);
       this.routing.push(osrmRouting);
       this.groundTransport.push(new OsrmTransferProvider(osrmRouting, env.taxiTariffs));
     } else {
@@ -79,7 +78,6 @@ export class ProviderRegistry {
       // difference between a transfer that works and one that misses a flight.
       this.routing.unshift(googleRouting);
       this.activities.push(new GooglePlacesProvider(env.google));
-      if (!osrmRouting) osrmRouting = null;
     } else {
       this.disable(
         'google-maps',

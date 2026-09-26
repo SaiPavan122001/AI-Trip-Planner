@@ -43,7 +43,7 @@ export function applyModification(
   const nextProfile: TravelerProfile = structuredClone(profile);
   const nextConstraints: ConstraintSet = structuredClone(constraints);
   const pinned = new Set(request.pinnedComponents);
-  let summary = '';
+  let summary: string;
   let requiresConsent: ModificationOutcome['requiresConsent'] = null;
   let reSearch: Array<(typeof ALL_COMPONENTS)[number]> = [];
 
