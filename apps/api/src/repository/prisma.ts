@@ -5,7 +5,7 @@ import {
   TravelerDetails,
   totalTravelers,
 } from '@trip/shared';
-import type { TripRepository } from './types.js';
+import { storableSession, type TripRepository } from './types.js';
 
 /**
  * PostgreSQL-backed store.
@@ -25,10 +25,11 @@ export class PrismaRepository implements TripRepository {
   }
 
   async createSession(session: PlanningSession): Promise<PlanningSession> {
+    const stored = storableSession(session);
     await this.prisma.trip.create({
-      data: { ...this.toRow(session), id: session.id },
+      data: { ...this.toRow(stored), id: stored.id },
     });
-    return session;
+    return stored;
   }
 
   async getSession(id: string): Promise<PlanningSession | null> {
@@ -38,7 +39,7 @@ export class PrismaRepository implements TripRepository {
   }
 
   async updateSession(session: PlanningSession): Promise<PlanningSession> {
-    const updated = { ...session, updatedAt: new Date().toISOString() };
+    const updated = storableSession({ ...session, updatedAt: new Date().toISOString() });
     await this.prisma.trip.update({
       where: { id: session.id },
       data: this.toRow(updated),

@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
+  AnswerValidationError,
   applyAnswer,
+  type ValidatedAnswer,
   buildConstraints,
   classifyJourney,
   generatePlans,
@@ -115,15 +117,22 @@ export class TripService {
    */
   async answer(id: string, raw: unknown): Promise<PlanningSession> {
     const session = await this.getTrip(id);
-    const answer = Answer.parse(raw);
+    const parsed = Answer.parse(raw);
 
     let profile: TravelerProfile;
+    let answer: ValidatedAnswer;
     try {
-      profile = applyAnswer(session.profile, answer);
+      ({ profile, answer } = applyAnswer(
+        { intent: session.intent, classification: session.classification, profile: session.profile },
+        parsed,
+      ));
     } catch (err) {
-      throw ApiError.badRequest(
-        err instanceof Error ? err.message : 'That answer could not be applied.',
-      );
+      // Only a rejected answer is the caller's fault. Anything else is a bug
+      // here, and reporting it as a 400 would hide it.
+      if (err instanceof AnswerValidationError) {
+        throw ApiError.badRequest(err.message, { key: err.key });
+      }
+      throw err;
     }
 
     const budget = this.budgetFrom(session, answer);
@@ -364,24 +373,22 @@ export class TripService {
    * Everything already stated is preserved so answering one budget question
    * does not erase another.
    */
-  private budgetFrom(session: PlanningSession, answer: Answer): BudgetAnswers {
+  private budgetFrom(session: PlanningSession, answer: ValidatedAnswer): BudgetAnswers {
     const existing: BudgetAnswers = {
       total: session.constraints.budget.total,
       transport: session.constraints.budget.transport,
       accommodation: session.constraints.budget.accommodation,
       dailySpendPerPerson: session.constraints.budget.dailySpend,
     };
-    if (answer.skipped) return existing;
 
-    const value = answer.value;
-    const isMoney = (v: unknown): v is Money =>
-      typeof v === 'object' && v !== null && 'amount' in v && 'currency' in v;
-
-    if (answer.key === 'budget.total' && isMoney(value)) {
-      return { ...existing, total: value };
+    // The answer has already been validated against its question, so a
+    // money question's value is a positive amount in the trip's currency.
+    if (answer.key === 'budget.total' && !answer.skipped) {
+      return { ...existing, total: answer.value as Money };
     }
-    if (answer.key === 'budget.daily_spend' && isMoney(value)) {
-      return { ...existing, dailySpendPerPerson: value };
+    if (answer.key === 'budget.daily_spend') {
+      // Skipping withdraws an allowance given earlier, rather than keeping it.
+      return { ...existing, dailySpendPerPerson: answer.skipped ? null : (answer.value as Money) };
     }
     return existing;
   }

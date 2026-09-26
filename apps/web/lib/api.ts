@@ -152,19 +152,10 @@ export interface TripSession {
   decisionLog: Array<{ at: string; step: string; detail: string }>;
 }
 
-export interface Question {
-  key: string;
-  kind: 'single_choice' | 'multi_choice' | 'ranking' | 'money' | 'number' | 'boolean' | 'text' | 'time';
-  prompt: string;
-  helpText: string | null;
-  options: Array<{ value: string; label: string; description: string | null; implication: string | null }>;
-  currency: string | null;
-  min: number | null;
-  max: number | null;
-  required: boolean;
-  reason: string;
-  stage: string;
-}
+// The engine's own type, so the limits the UI enforces are exactly the ones
+// the server validates against.
+import type { Question } from '@trip/shared';
+export type { Question };
 
 export interface TransportOffer {
   id: string;

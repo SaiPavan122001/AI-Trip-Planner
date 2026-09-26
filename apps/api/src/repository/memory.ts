@@ -1,5 +1,5 @@
 import type { BookingRecord, PlanningSession, TravelerDetails } from '@trip/shared';
-import type { TripRepository } from './types.js';
+import { storableSession, type TripRepository } from './types.js';
 
 /**
  * In-memory store for local development and tests.
@@ -14,27 +14,33 @@ export class InMemoryRepository implements TripRepository {
   private readonly travelers = new Map<string, TravelerDetails[]>();
   private readonly idempotency = new Map<string, unknown | null>();
 
+  // Sessions are validated on write and copied in and out, so a caller that
+  // mutates an object after saving it cannot change what is stored, exactly
+  // as with a real database.
   async createSession(session: PlanningSession): Promise<PlanningSession> {
-    this.sessions.set(session.id, session);
-    return session;
+    const stored = storableSession(session);
+    this.sessions.set(stored.id, structuredClone(stored));
+    return structuredClone(stored);
   }
 
   async getSession(id: string): Promise<PlanningSession | null> {
-    return this.sessions.get(id) ?? null;
+    const stored = this.sessions.get(id);
+    return stored ? structuredClone(stored) : null;
   }
 
   async updateSession(session: PlanningSession): Promise<PlanningSession> {
     if (!this.sessions.has(session.id)) throw new Error(`Unknown session ${session.id}`);
-    const updated = { ...session, updatedAt: new Date().toISOString() };
-    this.sessions.set(session.id, updated);
-    return updated;
+    const stored = storableSession({ ...session, updatedAt: new Date().toISOString() });
+    this.sessions.set(stored.id, structuredClone(stored));
+    return structuredClone(stored);
   }
 
   async listSessions(ownerId: string | null, limit: number): Promise<PlanningSession[]> {
     return [...this.sessions.values()]
       .filter((s) => s.ownerId === ownerId)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-      .slice(0, limit);
+      .slice(0, limit)
+      .map((s) => structuredClone(s));
   }
 
   async deleteSession(id: string): Promise<void> {

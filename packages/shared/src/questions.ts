@@ -40,6 +40,15 @@ export const Question = z.object({
   min: z.number().nullable().default(null),
   max: z.number().nullable().default(null),
   currency: z.string().nullable().default(null),
+  /**
+   * For multi_choice and ranking: how many options must and may be chosen.
+   * The server enforces these; they are sent so the UI can enforce the same
+   * rule before the request is made.
+   */
+  minSelections: z.number().int().min(0).nullable().default(null),
+  maxSelections: z.number().int().min(1).nullable().default(null),
+  /** For text: the longest answer accepted, after trimming. */
+  maxLength: z.number().int().min(1).nullable().default(null),
   required: z.boolean().default(false),
   /** Why this is being asked, shown on request. Builds trust in the funnel. */
   reason: z.string(),
@@ -47,6 +56,8 @@ export const Question = z.object({
   stage: z.enum(['budget', 'style', 'priorities', 'accommodation', 'traveler_needs', 'transport']),
 });
 export type Question = z.infer<typeof Question>;
+/** A question before defaults are applied, as the engine declares it. */
+export type QuestionInput = z.input<typeof Question>;
 
 export const Answer = z.object({
   key: z.string(),

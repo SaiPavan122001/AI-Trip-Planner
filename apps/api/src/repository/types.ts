@@ -1,4 +1,25 @@
-import type { BookingRecord, PlanningSession, TravelerDetails } from '@trip/shared';
+import { PlanningSession, type BookingRecord, type TravelerDetails } from '@trip/shared';
+
+/**
+ * Validates a session against the schema before it is written. Both stores
+ * call this, so the in-memory store behaves like PostgreSQL and a document
+ * that could not be read back is never stored in the first place: one bad
+ * value must not make a traveller's trip permanently unreadable.
+ *
+ * Failing here is a bug in the service, not bad input, so it throws a plain
+ * Error (reported as a 500) naming only the offending paths, never values.
+ */
+export function storableSession(session: PlanningSession): PlanningSession {
+  const parsed = PlanningSession.safeParse(session);
+  if (!parsed.success) {
+    throw new Error(
+      `Refusing to store trip ${session.id}: it does not match the session schema at ${parsed.error.issues
+        .map((i) => i.path.join('.'))
+        .join(', ')}.`,
+    );
+  }
+  return parsed.data;
+}
 
 /**
  * Persistence boundary.
