@@ -1,6 +1,5 @@
 import {
   addMinutes,
-  divide,
   fail,
   isoWithOffset,
   localParts,
@@ -118,20 +117,42 @@ export class SelfDriveProvider implements BaseProvider {
     const breakMinutes = breaks * (profile?.breakMinutes ?? 30);
     const totalMinutes = durationMinutes + breakMinutes;
 
+    // Driving your own car has no fare: nobody sells you a ticket, so the
+    // transport cost is a known ₹0. What it does cost is shown separately,
+    // and only where it can be calculated. Fuel and wear come from the
+    // operator's configured vehicle profile, as labelled estimates; tolls and
+    // parking have no data source, so they are named as not calculated
+    // rather than counted as zero.
     const warnings: string[] = [];
-    let total = null as ReturnType<typeof money> | null;
+    const itemisedFees: TransportOffer['itemisedFees'] = [];
+    const unpricedCosts: string[] = [];
     if (profile) {
-      const energy = (distanceKm / 100) * profile.consumptionPer100Km * profile.energyPrice;
-      const wear = distanceKm * profile.perKmAllowance;
-      total = money(energy + wear, profile.currency);
-      warnings.push(
-        'Tolls, parking and fines are not included: no toll data source is configured for this route.',
-      );
+      const basis = `Estimated from the configured vehicle profile over ${Math.round(distanceKm)} km`;
+      const fuel = money((distanceKm / 100) * profile.consumptionPer100Km * profile.energyPrice, profile.currency);
+      itemisedFees.push({
+        label: 'Fuel',
+        amount: fuel,
+        included: false,
+        isEstimate: true,
+        basis: `${basis}: ${profile.consumptionPer100Km} per 100 km at ${profile.energyPrice} per unit`,
+      });
+      if (profile.perKmAllowance > 0) {
+        itemisedFees.push({
+          label: 'Wear and tear',
+          amount: money(distanceKm * profile.perKmAllowance, profile.currency),
+          included: false,
+          isEstimate: true,
+          basis: `${basis}: ${profile.perKmAllowance} per km`,
+        });
+      }
     } else {
+      unpricedCosts.push('Fuel', 'Wear and tear');
       warnings.push(
-        'No vehicle profile is configured (SELF_DRIVE_PROFILE), so this drive is shown with distance and time only, without a cost.',
+        'Fuel and wear are not calculated for this drive because no vehicle profile is configured.',
       );
     }
+    unpricedCosts.push('Tolls', 'Parking');
+    warnings.push('Tolls and parking are not calculated: no source for them is connected.');
 
     // Arithmetic on the instant, then each end written as local wall time in
     // its own zone with its offset, the same shape every other transport
@@ -173,11 +194,10 @@ export class SelfDriveProvider implements BaseProvider {
           vehicleType: 'own_vehicle',
         },
       ],
-      totalPrice: total ?? money(0, opts.currency),
-      pricePerTraveler: total
-        ? divide(total, Math.max(1, profile?.averageOccupancy ?? 1))
-        : money(0, opts.currency),
-      itemisedFees: [],
+      totalPrice: money(0, opts.currency),
+      pricePerTraveler: money(0, opts.currency),
+      itemisedFees,
+      unpricedCosts,
       fareClasses: [],
       selectedFareCode: null,
       totalDurationMinutes: totalMinutes,
@@ -193,9 +213,7 @@ export class SelfDriveProvider implements BaseProvider {
         retrievedAt: new Date().toISOString(),
         validUntil: null,
         searchId: null,
-        attribution: profile
-          ? `Cost modelled from the configured vehicle profile: ${profile.consumptionPer100Km}/100km at ${profile.energyPrice}/unit plus ${profile.perKmAllowance}/km wear`
-          : null,
+        attribution: null,
       },
     };
 

@@ -19,6 +19,7 @@ import { planActivities, type ActivityPlanResult } from './activities.js';
 import { classifyJourney } from './classify.js';
 import { computeCost, detectBudgetConflict, type BudgetConflict } from './cost.js';
 import { searchHotels, modelLocalTransport, type HotelSearchResult } from './hotels.js';
+import { knownTransportCost } from './pricing.js';
 import { buildItinerary } from './schedule.js';
 import { cheapestRoom, scoreTransportOffers } from './scoring.js';
 import { searchTransport, type TransportSearchResult } from './transport.js';
@@ -98,7 +99,7 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
       ? searchedModes
           .map(
             (m) =>
-              `${m.mode}: ${m.offers.length} option(s), cheapest ${m.cheapest ? formatMoney(m.cheapest.totalPrice) : 'n/a'}`,
+              `${m.mode}: ${m.offers.length} option(s), cheapest ${m.cheapest ? formatMoney(knownTransportCost(m.cheapest)) : 'n/a'}`,
           )
           .join('; ')
       : 'No transport options were returned by any connected provider.',
@@ -251,7 +252,7 @@ function pickTransport(
 
   switch (archetype) {
     case 'budget':
-      return [...all].sort((a, b) => compare(a.totalPrice, b.totalPrice))[0]!;
+      return [...all].sort((a, b) => compare(knownTransportCost(a), knownTransportCost(b)))[0]!;
     case 'comfort': {
       // Comfort means the fewest changes, then the shortest time, then
       // whichever cabin the fare actually is. Price breaks ties last.
@@ -260,7 +261,7 @@ function pickTransport(
         if (a.totalDurationMinutes !== b.totalDurationMinutes) {
           return a.totalDurationMinutes - b.totalDurationMinutes;
         }
-        return compare(b.totalPrice, a.totalPrice);
+        return compare(knownTransportCost(b), knownTransportCost(a));
       });
       return ranked[0]!;
     }
@@ -308,7 +309,7 @@ function pickHotel(
     // a cheaper room in the wrong place visibly more expensive overall.
     impliedDailyTransportCost:
       perKm && distanceKm !== null
-        ? modelLocalTransport(distanceKm, 1, perKm, intent.currency)
+        ? modelLocalTransport(distanceKm, 1, perKm)
         : null,
   };
 }
@@ -316,7 +317,7 @@ function pickHotel(
 function cheapestAcrossModes(search: TransportSearchResult): TransportOffer | null {
   const all = search.modes.map((m) => m.cheapest).filter((o): o is TransportOffer => o !== null);
   if (all.length === 0) return null;
-  return [...all].sort((a, b) => compare(a.totalPrice, b.totalPrice))[0]!;
+  return [...all].sort((a, b) => compare(knownTransportCost(a), knownTransportCost(b)))[0]!;
 }
 
 function buildRationale(
@@ -359,10 +360,10 @@ function buildTradeoffs(
   if (transport && quickest && quickest.id !== transport.id) {
     const extraHours =
       Math.round(((transport.totalDurationMinutes - quickest.totalDurationMinutes) / 60) * 10) / 10;
-    const extraCost = compare(quickest.totalPrice, transport.totalPrice);
+    const extraCost = compare(knownTransportCost(quickest), knownTransportCost(transport));
     if (extraHours > 0) {
       tradeoffs.push(
-        `About ${extraHours}h slower each way than the quickest option, which costs ${formatMoney(quickest.totalPrice)}${extraCost > 0 ? ' more' : ' less'}.`,
+        `About ${extraHours}h slower each way than the quickest option, which costs ${formatMoney(knownTransportCost(quickest))}${extraCost > 0 ? ' more' : ' less'}.`,
       );
     }
   }

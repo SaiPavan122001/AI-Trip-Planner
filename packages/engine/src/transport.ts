@@ -15,6 +15,7 @@ import {
   type TripIntent,
 } from '@trip/shared';
 import { keepSupportedTransport } from './currency.js';
+import { knownTransportCost } from './pricing.js';
 import { scoreTransportOffers, type ScoredCandidate } from './scoring.js';
 
 /**
@@ -364,14 +365,19 @@ export function applyHardConstraints(
       // A price that cannot be compared with the budget cannot be shown to
       // meet it. Skipping the check, as a currency mismatch used to, would
       // quietly relax a hard constraint.
-      if (offer.totalPrice.currency !== transportBudget.currency) {
+      const foreign = [offer.totalPrice, ...offer.itemisedFees.map((f) => f.amount)].find(
+        (m) => m.currency !== transportBudget.currency,
+      );
+      if (foreign) {
         dropped.push({
           offerId: offer.id,
-          reason: `Priced in ${offer.totalPrice.currency}, so it cannot be checked against your ${transportBudget.currency} budget.`,
+          reason: `Priced in ${foreign.currency}, so it cannot be checked against your ${transportBudget.currency} budget.`,
         });
         continue;
       }
-      if (compare(offer.totalPrice, transportBudget) > 0) {
+      // What the option is known to cost, including separately charged
+      // extras, is what has to fit the budget.
+      if (compare(knownTransportCost(offer), transportBudget) > 0) {
         dropped.push({
           offerId: offer.id,
           reason: 'Costs more than the transport budget on its own.',
@@ -413,7 +419,7 @@ export function applyHardConstraints(
 
 function pickCheapest(offers: TransportOffer[]): TransportOffer | null {
   if (offers.length === 0) return null;
-  return [...offers].sort((a, b) => compare(a.totalPrice, b.totalPrice))[0]!;
+  return [...offers].sort((a, b) => compare(knownTransportCost(a), knownTransportCost(b)))[0]!;
 }
 
 function pickFastest(offers: TransportOffer[]): TransportOffer | null {

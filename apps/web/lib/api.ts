@@ -164,8 +164,18 @@ export type { Question };
 export interface TransportOffer {
   id: string;
   mode: string;
+  /** The fare. ₹0 for your own car is a real, known amount. */
   totalPrice: Money;
   pricePerTraveler: Money;
+  itemisedFees: Array<{
+    label: string;
+    amount: Money;
+    included: boolean;
+    isEstimate: boolean;
+    basis: string | null;
+  }>;
+  /** Costs this option involves that nothing can price, e.g. "Tolls". */
+  unpricedCosts: string[];
   totalDurationMinutes: number;
   transfers: number;
   overnight: boolean;
@@ -247,6 +257,8 @@ export interface TripPlan {
     perPerson: Money;
     estimatedPortion: Money;
     remainingBudget: Money | null;
+    /** Costs no source could price; the total is complete only when empty. */
+    notIncluded: Array<{ label: string; reason: string }>;
   };
   issues: Array<{
     code: string;

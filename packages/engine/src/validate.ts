@@ -63,6 +63,7 @@ export function validateItinerary(input: ValidationInput): ValidationIssue[] {
   issues.push(...checkSequencing(items));
   issues.push(...checkDates(input));
   issues.push(...checkBudget(input));
+  issues.push(...checkCompleteness(input));
   issues.push(...checkHardConstraints(input));
   issues.push(...checkTravelerNeeds(input));
   issues.push(...checkDayLoad(items));
@@ -154,6 +155,29 @@ function checkDates(input: ValidationInput): ValidationIssue[] {
     }
   }
   return issues;
+}
+
+/**
+ * An unknown cost is not zero, so a total that leaves costs out has to say
+ * so. With a budget set, "within budget" cannot be confirmed until they are
+ * known, which makes it a warning rather than a footnote.
+ */
+function checkCompleteness(input: ValidationInput): ValidationIssue[] {
+  const missing = input.cost.notIncluded;
+  if (missing.length === 0) return [];
+  const labels = missing.map((m) => m.label.toLowerCase()).join(', ');
+  const budget = input.constraints.budget.total;
+  return [
+    {
+      code: 'total_incomplete',
+      severity: budget ? 'warning' : 'info',
+      message: budget
+        ? `The total of ${formatMoney(input.cost.total)} does not include ${labels}, so it may still rise above what is shown against your budget.`
+        : `The total of ${formatMoney(input.cost.total)} does not include ${labels}.`,
+      itemIds: [],
+      suggestions: [],
+    },
+  ];
 }
 
 function checkBudget(input: ValidationInput): ValidationIssue[] {

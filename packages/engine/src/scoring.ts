@@ -10,6 +10,7 @@ import {
   type TransportOffer,
   type TravelerProfile,
 } from '@trip/shared';
+import { knownTransportCost } from './pricing.js';
 
 /**
  * Scoring turns a ranked list of priorities into a number per candidate.
@@ -99,14 +100,14 @@ export function scoreTransportOffers(
     profile.priorities.length ? profile.priorities : (['cheapest', 'fastest'] as Priority[]),
   );
 
-  const prices = offers.map((o) => toMajor(o.totalPrice));
+  const prices = offers.map((o) => toMajor(knownTransportCost(o)));
   const durations = offers.map((o) => o.totalDurationMinutes);
   const transfers = offers.map((o) => o.transfers);
 
   return offers
     .map((offer) => {
       const dims: Record<string, number> = {
-        cheapest: normaliseLowerIsBetter(prices, toMajor(offer.totalPrice)),
+        cheapest: normaliseLowerIsBetter(prices, toMajor(knownTransportCost(offer))),
         fastest: normaliseLowerIsBetter(durations, offer.totalDurationMinutes),
         least_travel_time: normaliseLowerIsBetter(durations, offer.totalDurationMinutes),
         fewest_transfers: normaliseLowerIsBetter(transfers, offer.transfers),

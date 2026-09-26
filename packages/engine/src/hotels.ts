@@ -4,7 +4,6 @@ import {
   findHard,
   haversineKm,
   isOk,
-  money,
   multiply,
   nightsBetween,
   seatedTravelers,
@@ -147,7 +146,8 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
   for (const hotel of kept) {
     const km = haversineKm(hotel.coordinates, centre);
     distanceKm.set(hotel.id, Number(km.toFixed(2)));
-    transportCost.set(hotel.id, modelLocalTransport(km, nights, deps.localTransportPerKm, intent.currency));
+    const modelled = modelLocalTransport(km, nights, deps.localTransportPerKm);
+    if (modelled) transportCost.set(hotel.id, modelled);
   }
 
   const candidates = scoreHotels(kept, { profile, distanceKm, transportCost });
@@ -163,7 +163,7 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
         nights,
         distanceToActivitiesKm: distanceKm.get(best.id) ?? null,
         impliedDailyTransportCost: deps.localTransportPerKm
-          ? modelLocalTransport(distanceKm.get(best.id) ?? 0, 1, deps.localTransportPerKm, intent.currency)
+          ? modelLocalTransport(distanceKm.get(best.id) ?? 0, 1, deps.localTransportPerKm)
           : null,
       }
     : null;
@@ -207,9 +207,10 @@ export function modelLocalTransport(
   distanceKm: number,
   nights: number,
   perKm: Money | null,
-  currency: string,
-): Money {
-  if (!perKm) return money(0, currency);
+): Money | null {
+  // With no tariff there is no basis for a figure. Unknown is not ₹0: the
+  // hotel ranking then leaves local travel out for every property equally.
+  if (!perKm) return null;
   const dailyKm = distanceKm * 4;
   return multiply(perKm, dailyKm * Math.max(1, nights));
 }

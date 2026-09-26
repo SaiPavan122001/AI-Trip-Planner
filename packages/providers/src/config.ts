@@ -30,6 +30,8 @@ const VehicleProfileSchema = z.object({
   perKmAllowance: z.number().nonnegative().default(0),
   maxDrivingHoursBeforeBreak: z.number().positive().default(3),
   breakMinutes: z.number().nonnegative().default(30),
+  // Accepted so existing settings keep loading. No longer used: the fare for
+  // driving your own car is ₹0, so there is nothing to split per traveller.
   averageOccupancy: z.number().positive().default(2),
 });
 

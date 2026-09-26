@@ -39,6 +39,7 @@ function cost(total = 50_000): CostBreakdown {
     perPerson: money(total / 2, 'INR'),
     estimatedPortion: z,
     remainingBudget: null,
+    notIncluded: [],
   };
 }
 

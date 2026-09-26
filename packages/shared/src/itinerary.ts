@@ -66,6 +66,14 @@ export const CostBreakdown = z.object({
   perPerson: Money,
   /** Portion of `total` that is an estimate rather than a quoted provider price. */
   estimatedPortion: Money,
+  /**
+   * Costs the plan involves that `total` does not include, because no source
+   * can price them. The total is only complete when this is empty, and the
+   * UI says so; an unknown cost is never counted as zero.
+   */
+  notIncluded: z
+    .array(z.object({ label: z.string(), reason: z.string() }))
+    .default([]),
   /** Positive when under budget, negative when over. Null with no budget set. */
   remainingBudget: Money.nullable().default(null),
 });

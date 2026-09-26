@@ -145,9 +145,73 @@ describe('self-drive times', () => {
       origin: hyderabad,
       destination: warangal,
       date: '2026-11-10',
+      departLocalTime: '25:99x',
+      currency: 'INR',
+    });
+    expect(res.status).toBe('invalid_request');
+  });
+
+  it('still rejects a malformed time given in words', async () => {
+    const { provider } = routing(60);
+    const res = await new SelfDriveProvider(provider, null).estimate({
+      origin: hyderabad,
+      destination: warangal,
+      date: '2026-11-10',
       departLocalTime: '8am',
       currency: 'INR',
     });
     expect(res.status).toBe('invalid_request');
+  });
+});
+
+describe('self-drive cost', () => {
+  const profile = {
+    currency: 'INR',
+    consumptionPer100Km: 7.5,
+    energyPrice: 105,
+    perKmAllowance: 1.5,
+    maxDrivingHoursBeforeBreak: 3,
+    breakMinutes: 30,
+    averageOccupancy: 2,
+  };
+
+  const estimate = async (withProfile: boolean) => {
+    const { provider } = routing(120);
+    const res = await new SelfDriveProvider(provider, withProfile ? profile : null).estimate({
+      origin: hyderabad,
+      destination: warangal,
+      date: '2026-11-10',
+      departLocalTime: '08:00',
+      currency: 'INR',
+    });
+    if (res.status !== 'ok') throw new Error(res.message);
+    return res;
+  };
+
+  it('has a known fare of ₹0, because nobody sells a ticket for your own car', async () => {
+    const { data } = await estimate(false);
+    expect(data.totalPrice).toEqual({ amount: 0, currency: 'INR' });
+    expect(data.pricePerTraveler).toEqual({ amount: 0, currency: 'INR' });
+  });
+
+  it('names fuel, wear, tolls and parking as not calculated when there is no vehicle profile', async () => {
+    const { data, warnings } = await estimate(false);
+    expect(data.itemisedFees).toEqual([]);
+    expect(data.unpricedCosts).toEqual(['Fuel', 'Wear and tear', 'Tolls', 'Parking']);
+    expect(warnings.join(' ')).toMatch(/Fuel and wear are not calculated/);
+  });
+
+  it('shows fuel and wear separately, as labelled estimates, when they can be calculated', async () => {
+    const { data } = await estimate(true);
+
+    // 150 km at 7.5 per 100 km and ₹105 per litre is ₹1,181.25; wear at ₹1.50 per km is ₹225.
+    expect(data.totalPrice.amount).toBe(0);
+    expect(data.itemisedFees).toEqual([
+      expect.objectContaining({ label: 'Fuel', amount: { amount: 118125, currency: 'INR' }, included: false, isEstimate: true }),
+      expect.objectContaining({ label: 'Wear and tear', amount: { amount: 22500, currency: 'INR' }, included: false, isEstimate: true }),
+    ]);
+    expect(data.itemisedFees[0]!.basis).toMatch(/vehicle profile over 150 km/);
+    // Tolls and parking still have no source, whatever the profile says.
+    expect(data.unpricedCosts).toEqual(['Tolls', 'Parking']);
   });
 });

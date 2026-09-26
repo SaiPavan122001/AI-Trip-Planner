@@ -40,7 +40,7 @@ describe('the currency boundary', () => {
   it('catches a foreign amount hidden in a fee, not only in the total', () => {
     const sneaky = transportOffer({
       id: 'mixed',
-      itemisedFees: [{ label: 'Service fee', amount: money(5, 'USD'), included: false }],
+      itemisedFees: [{ label: 'Service fee', amount: money(5, 'USD'), included: false, isEstimate: false, basis: null }],
     });
     expect(keepSupportedTransport([sneaky]).kept).toEqual([]);
   });

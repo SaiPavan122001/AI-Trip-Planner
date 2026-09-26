@@ -470,7 +470,15 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
       pricePerTraveler: money(Number(o.price.grandTotal ?? o.price.total) / paying, currency),
       itemisedFees: (o.price.fees ?? [])
         .filter((f) => Number(f.amount) > 0)
-        .map((f) => ({ label: humaniseFee(f.type), amount: money(Number(f.amount), currency), included: true })),
+        .map((f) => ({
+          label: humaniseFee(f.type),
+          amount: money(Number(f.amount), currency),
+          // Already inside the quoted grand total, and quoted, not modelled.
+          included: true,
+          isEstimate: false,
+          basis: null,
+        })),
+      unpricedCosts: [],
       fareClasses,
       selectedFareCode: fareClasses[0]?.code ?? null,
       totalDurationMinutes: o.itineraries.reduce(

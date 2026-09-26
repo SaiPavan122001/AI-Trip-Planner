@@ -277,6 +277,7 @@ function toTransportOffer(
     totalPrice: money(cheapest.priceMajor, s.currency),
     pricePerTraveler: money(cheapest.priceMajor, s.currency),
     itemisedFees: [],
+    unpricedCosts: [],
     // Classes are passed through exactly as the operator names them. There is
     // no normalisation into invented "first/second class" tiers, because a
     // 3A berth and a semi-sleeper seat are not points on one shared scale.

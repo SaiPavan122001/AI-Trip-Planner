@@ -81,9 +81,23 @@ export function BudgetPanel({
         </p>
       ) : null}
 
+      {cost.notIncluded.length > 0 ? (
+        <div className="mt-3 rounded-xl bg-sand-100 px-4 py-3 text-xs leading-relaxed text-ink-soft">
+          <p className="font-semibold text-ink">Not included in this total</p>
+          <ul className="mt-1 space-y-1">
+            {cost.notIncluded.map((item) => (
+              <li key={item.label}>
+                <span className="font-medium">{item.label}</span> — {item.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       {cost.remainingBudget && !conflict ? (
         <p className="mt-4 rounded-xl bg-teal-500/[0.08] px-4 py-3 text-sm text-teal-700">
-          {formatMoney(cost.remainingBudget)} left against the budget you set.
+          {formatMoney(cost.remainingBudget)} left against the budget you set
+          {cost.notIncluded.length > 0 ? ', before the costs listed above as not included.' : '.'}
         </p>
       ) : null}
 

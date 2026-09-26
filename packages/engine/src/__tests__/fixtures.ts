@@ -113,6 +113,7 @@ export function transportOffer(overrides: Partial<TransportOffer> = {}): Transpo
     totalPrice: money(9600, 'INR'),
     pricePerTraveler: money(4800, 'INR'),
     itemisedFees: [],
+    unpricedCosts: [],
     fareClasses: [
       {
         code: 'Y',

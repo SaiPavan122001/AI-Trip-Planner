@@ -161,7 +161,7 @@ describe('validating a plan against accessibility needs', () => {
   const z = zero('INR');
   const cost: CostBreakdown = {
     transport: z, transportFees: z, accommodation: z, localTransport: z, activities: z, meals: z, other: z,
-    total: money(10_000, 'INR'), perPerson: money(5_000, 'INR'), estimatedPortion: z, remainingBudget: null,
+    total: money(10_000, 'INR'), perPerson: money(5_000, 'INR'), estimatedPortion: z, remainingBudget: null, notIncluded: [],
   };
   const activity: ItineraryItem = {
     id: 'a1', kind: 'activity', title: 'Museum', description: null,

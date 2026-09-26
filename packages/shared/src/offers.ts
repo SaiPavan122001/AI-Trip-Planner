@@ -61,13 +61,38 @@ export const TransportOffer = z.object({
   id: z.string(),
   mode: TransportMode,
   segments: z.array(TransportSegment).min(1),
-  /** Total including the fare for all travellers in the search. */
+  /**
+   * The fare for all travellers in the search. A known amount: ₹0 for driving
+   * your own car is a real fare of nothing, not a missing price. Separately
+   * charged costs are in `itemisedFees`; costs nobody can price are named in
+   * `unpricedCosts`.
+   */
   totalPrice: Money,
   pricePerTraveler: Money,
-  /** Fees the provider itemises: taxes, baggage, seat selection, card fees. */
+  /**
+   * Costs itemised separately from the fare: taxes, baggage, seat selection,
+   * card fees, or the running cost of a drive. `included` means the amount is
+   * already inside `totalPrice`; otherwise it is paid on top. `isEstimate`
+   * marks a figure modelled from configuration rather than quoted, and
+   * `basis` says what it was modelled from.
+   */
   itemisedFees: z
-    .array(z.object({ label: z.string(), amount: Money, included: z.boolean() }))
+    .array(
+      z.object({
+        label: z.string(),
+        amount: Money,
+        included: z.boolean(),
+        isEstimate: z.boolean().default(false),
+        basis: z.string().nullable().default(null),
+      }),
+    )
     .default([]),
+  /**
+   * Costs this option involves that no connected source can price, named for
+   * the traveller, e.g. "Tolls". They are never counted as zero: they are
+   * shown as "not calculated" and listed as not included in the total.
+   */
+  unpricedCosts: z.array(z.string()).default([]),
   fareClasses: z.array(FareClass).default([]),
   selectedFareCode: z.string().nullable().default(null),
   totalDurationMinutes: z.number().int(),

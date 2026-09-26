@@ -90,6 +90,12 @@ export function PlanCards({
                 </p>
               ) : null}
 
+              {plan.cost.notIncluded.length > 0 ? (
+                <p className="mt-2 text-xs text-ink-faint">
+                  Not included: {plan.cost.notIncluded.map((n) => n.label.toLowerCase()).join(', ')}.
+                </p>
+              ) : null}
+
               {plan.tradeoffs.length > 0 ? (
                 <ul className="mt-4 space-y-1.5 text-xs text-ink-soft">
                   {plan.tradeoffs.map((t) => (

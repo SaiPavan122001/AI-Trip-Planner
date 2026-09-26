@@ -157,7 +157,7 @@ export class OsrmTransferProvider implements GroundTransportProvider {
     const price = tariff ? estimateFare(tariff, distanceKm, durationMinutes, req.at) : null;
     if (!tariff) {
       warnings.push(
-        `No taxi tariff configured for ${req.currency}, so this transfer is costed at zero and flagged for the traveller. Set GROUND_TRANSPORT_TARIFFS to include it.`,
+        'No taxi fare is available for this transfer, so it is shown with its distance and time and listed as not included in the total.',
       );
     }
 

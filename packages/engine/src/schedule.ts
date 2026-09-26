@@ -689,8 +689,10 @@ function transportItem(
     endUtc: arriveUtc,
     timezone: first.origin.timezone ?? fromTz,
     locationName: first.origin.name,
+    // The fare itself. For your own car it is an exact ₹0; its estimated
+    // running costs are separate fees, counted in the cost breakdown.
     cost: offer.totalPrice,
-    costIsEstimate: offer.mode === 'self_drive',
+    costIsEstimate: false,
     offerRef: { kind: 'transport', offerId: offer.id },
     notes,
   };

@@ -146,6 +146,7 @@ function OfferLine({
         <span className="text-xs font-medium uppercase tracking-wide text-ink-faint">{label}</span>
         <span className="text-sm font-semibold tabular-nums">{formatMoney(offer.totalPrice)}</span>
       </div>
+      <ExtraCosts offer={offer} />
       <div className="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-ink-soft">
         <span className="tabular-nums">{formatDuration(offer.totalDurationMinutes)}</span>
         <span aria-hidden>·</span>
@@ -185,5 +186,31 @@ function OfferLine({
         </p>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * What the option costs beyond its fare. Estimated extras (fuel for a drive)
+ * carry the estimate colour and their basis; costs nothing can price (tolls,
+ * parking) are named as not calculated, never shown as ₹0.
+ */
+function ExtraCosts({ offer }: { offer: TransportOffer }) {
+  const extras = offer.itemisedFees.filter((f) => !f.included);
+  if (extras.length === 0 && offer.unpricedCosts.length === 0) return null;
+  return (
+    <ul className="mt-1 space-y-0.5 text-[11px] text-ink-soft">
+      {extras.map((fee) => (
+        <li key={fee.label} title={fee.basis ?? undefined}>
+          + {fee.isEstimate ? <span className="estimate-chip">{formatMoney(fee.amount)}</span> : formatMoney(fee.amount)}{' '}
+          {fee.label.toLowerCase()}
+          {fee.isEstimate ? ' (estimated)' : ''}
+        </li>
+      ))}
+      {offer.unpricedCosts.length > 0 ? (
+        <li className="text-ink-faint">
+          {offer.unpricedCosts.join(', ')}: not calculated
+        </li>
+      ) : null}
+    </ul>
   );
 }
