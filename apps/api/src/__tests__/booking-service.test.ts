@@ -122,3 +122,72 @@ describe('server-side re-pricing', () => {
     expect(result.booking.confirmedPrice).toBeNull();
   });
 });
+
+describe('re-pricing names the provider offer, never an internal id', () => {
+  const hotelOffer = (refundable = true) => ({
+    id: 'amadeus-hotel:TESTHTL1',
+    name: 'Test Hotel',
+    propertyType: null,
+    category: 4,
+    guestRating: null,
+    guestRatingCount: null,
+    coordinates: { lat: 12.97, lon: 77.59 },
+    address: null,
+    neighbourhood: null,
+    amenities: [],
+    checkInTime: null,
+    checkOutTime: null,
+    images: [],
+    rooms: [
+      {
+        id: 'OFFER-ABC-1', description: 'Room', roomType: null, beds: null, maxOccupancy: null, boardType: null,
+        breakfastIncluded: null, refundable, cancellationDeadline: null, cancellationPolicy: null,
+        totalPrice: { amount: 960000, currency: 'INR' }, pricePerNight: { amount: 240000, currency: 'INR' },
+        taxesIncluded: null, revalidationToken: 'OFFER-ABC-1',
+      },
+    ],
+    provenance: {
+      provider: 'amadeus', providerLabel: 'Amadeus', retrievedAt: '2026-01-01T00:00:00.000Z',
+      validUntil: null, searchId: null, attribution: null,
+    },
+  });
+
+  function serviceWithHotelProvider() {
+    const received: unknown[][] = [];
+    const registry = {
+      flights: [],
+      hotels: [
+        {
+          descriptor: { id: 'amadeus' },
+          revalidateHotel: async (...args: unknown[]) => {
+            received.push(args);
+            return { status: 'ok', data: hotelOffer(), provenance: hotelOffer().provenance, warnings: [] };
+          },
+        },
+      ],
+    } as unknown as ProviderRegistry;
+    return { service: new BookingService({ registry, repository }), received };
+  }
+
+  it('passes the provider’s own token to a hotel provider, and nothing else', async () => {
+    const { service: svc, received } = serviceWithHotelProvider();
+    const hotelBooking = await svc.create(
+      {
+        tripId: booking.tripId,
+        component: 'hotel',
+        offerId: 'amadeus-hotel:TESTHTL1',
+        provider: 'amadeus',
+        quotedPrice: { amount: 960000, currency: 'INR' },
+        idempotencyKey: 'test-hotel-0001',
+      },
+      sessionFixture(),
+    );
+
+    const result = await svc.revalidate(hotelBooking.id, 'OFFER-ABC-1');
+
+    // Exactly one argument: the provider's token. Not the booking's UUID.
+    expect(received).toEqual([['OFFER-ABC-1']]);
+    expect(received.flat()).not.toContain(hotelBooking.id);
+    expect(result.booking.state).toBe('revalidated');
+  });
+});

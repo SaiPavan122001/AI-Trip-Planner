@@ -81,11 +81,14 @@ export interface FlightSearchRequest {
 
 export interface FlightProvider extends BaseProvider {
   searchFlights(req: FlightSearchRequest): Promise<ProviderResult<TransportOffer[]>>;
-  /** Re-price a specific offer immediately before booking. */
-  revalidateFlight(
-    offerId: string,
-    token: string,
-  ): Promise<ProviderResult<TransportOffer>>;
+  /**
+   * Re-price a specific offer immediately before booking. Takes only the
+   * provider's own revalidation token, exactly as the search returned it.
+   * Nothing from this system's own records, such as a booking id, may be
+   * passed here: a provider cannot interpret it, and mixing the two up is
+   * how a request ends up naming an offer that does not exist.
+   */
+  revalidateFlight(token: string): Promise<ProviderResult<TransportOffer>>;
 }
 
 export interface HotelSearchRequest {
@@ -107,7 +110,8 @@ export interface HotelSearchRequest {
 
 export interface HotelProvider extends BaseProvider {
   searchHotels(req: HotelSearchRequest): Promise<ProviderResult<HotelOffer[]>>;
-  revalidateHotel(offerId: string, token: string): Promise<ProviderResult<HotelOffer>>;
+  /** As `revalidateFlight`: the provider's own token, and nothing internal. */
+  revalidateHotel(token: string): Promise<ProviderResult<HotelOffer>>;
 }
 
 export interface SurfaceSearchRequest {

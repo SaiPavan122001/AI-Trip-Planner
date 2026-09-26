@@ -181,7 +181,7 @@ export class BookingService {
         };
       }
 
-      const res = await provider.revalidateFlight(booking.id, revalidationToken);
+      const res = await provider.revalidateFlight(revalidationToken);
       if (!isOk(res)) {
         const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', { note: res.message });
         return { booking: updated, message: res.message };
@@ -217,7 +217,7 @@ export class BookingService {
         });
         return { booking: updated, message: 'This rate cannot be re-priced.' };
       }
-      const res = await provider.revalidateHotel(booking.id, revalidationToken);
+      const res = await provider.revalidateHotel(revalidationToken);
       if (!isOk(res)) {
         const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', { note: res.message });
         return { booking: updated, message: res.message };

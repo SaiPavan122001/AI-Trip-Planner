@@ -226,7 +226,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
    * `price_changed` failure so the booking machine can ask the traveller
    * before charging a different amount.
    */
-  async revalidateFlight(offerId: string, token: string): Promise<ProviderResult<TransportOffer>> {
+  async revalidateFlight(token: string): Promise<ProviderResult<TransportOffer>> {
     if (!this.isConfigured()) return this.notConfigured();
     let payload: AmadeusFlightOffer;
     try {
@@ -254,7 +254,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
         );
       }
       const party = inferParty(payload);
-      return ok(this.toTransportOffer(priced, {}, party), this.provenance(offerId));
+      return ok(this.toTransportOffer(priced, {}, party), this.provenance(payload.id));
     } catch (err) {
       return toProviderFailure(err, this.descriptor.id, this.descriptor.label);
     }
@@ -316,6 +316,19 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
     if (!this.isConfigured()) return this.notConfigured();
     const centre = req.near ?? req.destination.coordinates;
 
+    // Amadeus takes guests per room, not for the whole booking. Sending the
+    // whole party for each of several rooms asked for far more people than
+    // the traveller has, and priced (or hid) rooms accordingly.
+    const perRoom = guestsPerRoom(req.party, req.rooms);
+    if (perRoom > MAX_GUESTS_PER_ROOM) {
+      return fail(
+        'invalid_request',
+        this.descriptor.id,
+        this.descriptor.label,
+        `${perRoom} guests per room is more than a room search allows (${MAX_GUESTS_PER_ROOM}). Add rooms to search for this group.`,
+      );
+    }
+
     try {
       const list = await this.get<{ data: AmadeusHotel[] }>(
         '/v1/reference-data/locations/hotels/by-geocode',
@@ -343,7 +356,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
         '/v3/shopping/hotel-offers',
         {
           hotelIds: hotelIds.join(','),
-          adults: Math.max(1, req.party.adults),
+          adults: perRoom,
           checkInDate: req.checkIn,
           checkOutDate: req.checkOut,
           roomQuantity: req.rooms,
@@ -371,16 +384,32 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
       const warnings = (offersRes.warnings ?? [])
         .map((w) => w.detail)
         .filter((d): d is string => Boolean(d));
+      if (req.party.children > 0) {
+        // The search has no children or ages, so children are counted as
+        // guests. Child rates and free-child policies are not requested.
+        warnings.push(
+          'Children are counted as guests when searching rooms; child ages and child rates are not requested, so prices may differ at the property.',
+        );
+      }
       return ok(hotels, this.provenance(`${req.checkIn}-${req.checkOut}`), warnings);
     } catch (err) {
       return toProviderFailure(err, this.descriptor.id, this.descriptor.label);
     }
   }
 
-  async revalidateHotel(offerId: string): Promise<ProviderResult<HotelOffer>> {
+  /**
+   * For Amadeus the hotel token is the offer id from the search. It is
+   * encoded before it goes into the path, because it can arrive from a
+   * client and must not be able to address a different endpoint.
+   */
+  async revalidateHotel(token: string): Promise<ProviderResult<HotelOffer>> {
     if (!this.isConfigured()) return this.notConfigured();
+    const offerId = token;
     try {
-      const res = await this.get<{ data: AmadeusHotelOffer }>(`/v3/shopping/hotel-offers/${offerId}`, {});
+      const res = await this.get<{ data: AmadeusHotelOffer }>(
+        `/v3/shopping/hotel-offers/${encodeURIComponent(offerId)}`,
+        {},
+      );
       const hotel = this.toHotelOffer(res.data, undefined, null);
       if (!hotel) {
         return fail(
@@ -525,10 +554,14 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           offer.room?.typeEstimated?.beds !== undefined
             ? `${offer.room.typeEstimated.beds} ${offer.room.typeEstimated.bedType ?? 'bed'}`
             : null,
-        maxOccupancy: offer.guests?.adults ?? null,
+        // `guests.adults` is how many guests this rate was priced for, which
+        // is what was asked, not how many the room sleeps. Amadeus does not
+        // state room capacity, so it stays unknown rather than borrowing a
+        // number that looks like one.
+        maxOccupancy: null,
         boardType: offer.boardType ?? null,
         breakfastIncluded: offer.boardType ? /BREAKFAST/i.test(offer.boardType) : null,
-        refundable: cancellation ? cancellation.amount === undefined || Number(cancellation.amount) === 0 : null,
+        refundable: mapRefundable(offer.policies),
         cancellationDeadline: cancellation?.deadline ?? null,
         cancellationPolicy: cancellation?.description?.text ?? null,
         totalPrice: total,
@@ -625,6 +658,35 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
 }
 
 // -------------------------------------------------------------- helpers
+
+/** Most guests per room the Amadeus hotel search accepts. */
+const MAX_GUESTS_PER_ROOM = 9;
+
+/**
+ * Guests to price each room for: everyone who takes a bed (infants on a lap
+ * do not), spread over the rooms, rounded up so nobody is left out.
+ */
+export function guestsPerRoom(party: { adults: number; children: number }, rooms: number): number {
+  return Math.max(1, Math.ceil((party.adults + party.children) / Math.max(1, rooms)));
+}
+
+/**
+ * Whether a rate can be cancelled for a refund, only as far as the provider
+ * says so. Amadeus states this in `policies.refundable.cancellationRefund`;
+ * anything else, including a policy with no amount on it, is unknown. A rate
+ * whose refund deadline has already passed is no longer refundable.
+ */
+export function mapRefundable(
+  policies: AmadeusHotelOffer['offers'][number]['policies'],
+  now: Date = new Date(),
+): boolean | null {
+  const stated = policies?.refundable?.cancellationRefund;
+  if (stated === 'NON_REFUNDABLE') return false;
+  if (stated !== 'REFUNDABLE_UP_TO_DEADLINE') return null;
+  const deadline = policies?.cancellations?.[0]?.deadline;
+  if (deadline && Date.parse(deadline) < now.getTime()) return false;
+  return true;
+}
 
 function pickIata(place: { iataCityCode?: string; airports: Array<{ iataCode: string }> }): string | null {
   return place.iataCityCode ?? place.airports[0]?.iataCode ?? null;
