@@ -173,6 +173,12 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
     }
   }
 
+  // One scoring pass over every outbound option, shared by all plans, so a
+  // plan's score says how its journey compares with the alternatives.
+  const outboundScores = scoreTransportOffers(
+    outbound.modes.flatMap((m) => m.offers.map((o) => o.candidate)),
+    profile,
+  );
   const plans: TripPlan[] = [];
   const seen = new Set<string>();
 
@@ -221,8 +227,12 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
       hotel,
     });
 
+    // Scored against every outbound option found, not on its own: the score
+    // normalises each dimension between the best and worst candidate, and
+    // with a single candidate every dimension came out as 1, so every plan
+    // looked equally good on price, speed and changes.
     const scored = outboundOffer
-      ? scoreTransportOffers([outboundOffer], profile)[0]
+      ? outboundScores.find((s) => s.candidate.id === outboundOffer.id)
       : undefined;
 
     plans.push({
@@ -249,6 +259,8 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
       generatedAt: new Date().toISOString(),
     });
   }
+
+  markMostExpensive(plans);
 
   // Ranked by how well each plan matches the traveller's own priorities, so
   // the order of the alternatives is itself an answer rather than a default.
@@ -428,10 +440,20 @@ function buildTradeoffs(
   if (archetype === 'budget' && hotel && hotel.hotel.category !== null) {
     tradeoffs.push(`Accommodation is ${hotel.hotel.category}-star.`);
   }
-  if (archetype === 'comfort') {
-    tradeoffs.push('This is the most expensive of the alternatives.');
-  }
   return tradeoffs;
+}
+
+/**
+ * Adds "most expensive" to the one plan it is true of, once every plan's
+ * total is known. It used to be attached to the comfort plan
+ * unconditionally, which was false whenever comfort was not the dearest.
+ */
+function markMostExpensive(plans: TripPlan[]): void {
+  if (plans.length < 2) return;
+  const totals = plans.map((p) => p.cost.total.amount);
+  const highest = Math.max(...totals);
+  if (totals.filter((t) => t === highest).length !== 1) return;
+  plans[totals.indexOf(highest)]!.tradeoffs.push('This is the most expensive of the alternatives.');
 }
 
 /**
