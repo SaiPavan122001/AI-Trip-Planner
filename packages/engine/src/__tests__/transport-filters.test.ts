@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { money, type ConstraintSet } from '@trip/shared';
 import { applyHardConstraints } from '../transport.js';
-import { profile, transportOffer } from './fixtures.js';
+import { profile, transportOffer, INDIA_LEG } from './fixtures.js';
 
 const constraints = (overrides: Partial<ConstraintSet> = {}): ConstraintSet => ({
   hard: [],
@@ -29,6 +29,7 @@ describe('hard constraints on transport', () => {
       ],
       constraints(),
       avoiding,
+      INDIA_LEG,
     );
 
     expect(kept.map((o) => o.id)).toEqual(['day']);
@@ -45,6 +46,7 @@ describe('hard constraints on transport', () => {
       ],
       constraints({ hard: [{ kind: 'max_stops', value: 0 }] }),
       profile(),
+      INDIA_LEG,
     );
 
     expect(kept.map((o) => o.id)).toEqual(['direct']);
@@ -67,6 +69,7 @@ describe('hard constraints on transport', () => {
         },
       }),
       profile(),
+      INDIA_LEG,
     );
 
     expect(kept.map((o) => o.id)).toEqual(['affordable']);
@@ -87,6 +90,7 @@ describe('hard constraints on transport', () => {
       [unstated],
       constraints({ hard: [{ kind: 'required_checked_bags', value: 2 }] }),
       profile(),
+      INDIA_LEG,
     );
 
     expect(kept.map((o) => o.id)).toEqual(['unstated']);
@@ -99,6 +103,7 @@ describe('hard constraints on transport', () => {
       [oneBag],
       constraints({ hard: [{ kind: 'required_checked_bags', value: 2 }] }),
       profile(),
+      INDIA_LEG,
     );
 
     expect(kept).toEqual([]);
@@ -116,6 +121,7 @@ describe('hard constraints on transport', () => {
       ],
       constraints(),
       flexible,
+      INDIA_LEG,
     );
 
     expect(kept.map((o) => o.id)).toEqual(['flex']);

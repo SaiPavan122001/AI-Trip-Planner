@@ -7,6 +7,13 @@ export const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD');
 export type IsoDate = z.infer<typeof IsoDate>;
 
 /**
+ * A local time of day, "HH:MM" on the 24-hour clock. Compared as text, so the
+ * shape is strict: "9:00" or "25:00" would compare wrongly and are refused.
+ */
+export const LocalTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'HH:MM, 24-hour clock');
+export type LocalTime = z.infer<typeof LocalTime>;
+
+/**
  * Step 1 of the funnel. Deliberately minimal: nothing else may be asked before
  * these five facts exist, because every later question depends on them.
  */

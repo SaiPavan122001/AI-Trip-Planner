@@ -17,6 +17,7 @@ import {
 } from '@trip/shared';
 import { describeNeeds, unconfirmedHotelNeeds } from './accessibility.js';
 import { localParts, minutesBetween } from './time.js';
+import { timeWindowViolations } from './time-windows.js';
 
 /**
  * Deterministic validation.
@@ -212,6 +213,25 @@ function checkBudget(input: ValidationInput): ValidationIssue[] {
 function checkHardConstraints(input: ValidationInput): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const { constraints, outbound, inbound, hotel, intent } = input;
+
+  // Time windows, with the same definition the transport filter uses, read in
+  // local time where each departure and arrival happens.
+  const legs: Array<[TransportOffer | null, string, string, string]> = [
+    [outbound, intent.origin.timezone, intent.destination.timezone, 'outbound'],
+    [inbound, intent.destination.timezone, intent.origin.timezone, 'return'],
+  ];
+  for (const [offer, departure, arrival, leg] of legs) {
+    if (!offer) continue;
+    for (const v of timeWindowViolations(offer, constraints, { departure, arrival })) {
+      issues.push({
+        code: v.kind === 'earliest_departure_time' ? 'departs_too_early' : 'arrives_too_late',
+        severity: 'blocker',
+        message: `The ${leg} journey does not fit your time window. ${v.reason}`,
+        itemIds: [],
+        suggestions: ['Choose a different departure, or change the time window.'],
+      });
+    }
+  }
 
   const maxStops = findHard(constraints, 'max_stops')?.value;
   for (const offer of [outbound, inbound]) {

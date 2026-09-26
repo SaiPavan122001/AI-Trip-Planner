@@ -16,6 +16,7 @@ import {
 } from '@trip/shared';
 import { keepSupportedTransport } from './currency.js';
 import { knownTransportCost } from './pricing.js';
+import { timeWindowViolations, type LegZones } from './time-windows.js';
 import { scoreTransportOffers, type ScoredCandidate } from './scoring.js';
 
 /**
@@ -158,7 +159,10 @@ export async function searchTransport(
     // Currency first: nothing below may compare a rupee price with another.
     const supported = keepSupportedTransport(result.offers.map((o) => o.candidate));
     notes.push(...supported.notes);
-    const { kept, dropped } = applyHardConstraints(supported.kept, constraints, profile);
+    const { kept, dropped } = applyHardConstraints(supported.kept, constraints, profile, {
+      departure: from.timezone,
+      arrival: to.timezone,
+    });
     filtered.push(...dropped);
     const scored = scoreTransportOffers(kept, profile);
     const enriched: ModeResult = {
@@ -345,6 +349,8 @@ export function applyHardConstraints(
   offers: TransportOffer[],
   constraints: ConstraintSet,
   profile: TravelerProfile,
+  /** Where the leg starts and ends, so time windows are read in local time. */
+  zones: LegZones,
 ): { kept: TransportOffer[]; dropped: Array<{ offerId: string; reason: string }> } {
   const kept: TransportOffer[] = [];
   const dropped: Array<{ offerId: string; reason: string }> = [];
@@ -411,6 +417,11 @@ export function applyHardConstraints(
         });
         continue;
       }
+    }
+    const timing = timeWindowViolations(offer, constraints, zones);
+    if (timing.length > 0) {
+      dropped.push({ offerId: offer.id, reason: timing.map((t) => t.reason).join(' ') });
+      continue;
     }
     kept.push(offer);
   }

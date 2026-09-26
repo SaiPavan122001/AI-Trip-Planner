@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LocalTime } from './trip.js';
 
 export const TravelStyle = z.enum(['budget', 'standard', 'premium', 'luxury']);
 export type TravelStyle = z.infer<typeof TravelStyle>;
@@ -101,16 +102,8 @@ export const TransportPreferences = z.object({
   maxStops: z.number().int().min(0).max(3).nullable().default(null),
   avoidOvernightTravel: z.boolean().default(false),
   avoidRedEyeArrival: z.boolean().default(false),
-  earliestDepartureLocal: z
-    .string()
-    .regex(/^\d{2}:\d{2}$/)
-    .nullable()
-    .default(null),
-  latestArrivalLocal: z
-    .string()
-    .regex(/^\d{2}:\d{2}$/)
-    .nullable()
-    .default(null),
+  earliestDepartureLocal: LocalTime.nullable().default(null),
+  latestArrivalLocal: LocalTime.nullable().default(null),
   checkedBagsPerTraveler: z.number().int().min(0).max(5).default(0),
   cabinBagsPerTraveler: z.number().int().min(0).max(3).default(1),
   /** Modes the traveller ruled out explicitly, for example "no buses". */

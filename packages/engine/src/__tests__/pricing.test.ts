@@ -12,7 +12,7 @@ import { knownTransportCost } from '../pricing.js';
 import { applyHardConstraints, searchTransport } from '../transport.js';
 import { validateItinerary } from '../validate.js';
 import { classifyJourney } from '../classify.js';
-import { buildConstraintsOnly, intent, profile, transportOffer } from './fixtures.js';
+import { buildConstraintsOnly, intent, profile, transportOffer, INDIA_LEG } from './fixtures.js';
 
 /**
  * Pricing rules for the India product:
@@ -103,7 +103,7 @@ describe('comparing self-drive with other transport', () => {
       ...buildConstraintsOnly(p),
       budget: { total: null, transport: money(1300, 'INR'), accommodation: null, dailySpend: null, activities: null },
     };
-    const { kept, dropped } = applyHardConstraints([drive(true), drive(false)], constraints, p);
+    const { kept, dropped } = applyHardConstraints([drive(true), drive(false)], constraints, p, INDIA_LEG);
     expect(kept.map((o) => o.id)).toEqual(['drive-bare']);
     expect(dropped[0]!.offerId).toBe('drive-profile');
   });

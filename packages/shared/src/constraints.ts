@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Money } from './money.js';
-import { IsoDate } from './trip.js';
+import { IsoDate, LocalTime } from './trip.js';
 import { AccessibilityNeed, CabinClass, Priority } from './traveler.js';
 
 /**
@@ -42,8 +42,11 @@ export const HardConstraint = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('required_accessibility'), value: z.array(AccessibilityNeed) }),
   z.object({ kind: z.literal('required_free_cancellation'), value: z.literal(true) }),
   z.object({ kind: z.literal('excluded_transport_mode'), value: z.string() }),
-  z.object({ kind: z.literal('latest_arrival_time'), value: z.string() }),
-  z.object({ kind: z.literal('earliest_departure_time'), value: z.string() }),
+  // Local wall-clock times, HH:MM, compared in the zone where each departure
+  // or arrival happens. Validated here too, not only on the profile, because
+  // these are compared as strings and anything else would compare wrongly.
+  z.object({ kind: z.literal('latest_arrival_time'), value: LocalTime }),
+  z.object({ kind: z.literal('earliest_departure_time'), value: LocalTime }),
   z.object({ kind: z.literal('max_stops'), value: z.number().int().min(0) }),
   z.object({ kind: z.literal('required_checked_bags'), value: z.number().int().min(0) }),
 ]);

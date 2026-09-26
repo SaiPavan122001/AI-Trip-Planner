@@ -9,7 +9,7 @@ import {
 } from '@trip/shared';
 import { keepSupportedHotels, keepSupportedTransport, supportedPriceOrUnknown } from '../currency.js';
 import { applyHardConstraints, searchTransport } from '../transport.js';
-import { buildConstraintsOnly, hotel, intent, profile, transportOffer } from './fixtures.js';
+import { buildConstraintsOnly, hotel, intent, profile, transportOffer, INDIA_LEG } from './fixtures.js';
 
 /**
  * INR is the only supported currency. Anything else must never be compared
@@ -82,7 +82,7 @@ describe('budgets are never skipped because of currency', () => {
       ...buildConstraintsOnly(p),
       budget: { total: null, transport: money(5000, 'INR'), accommodation: null, dailySpend: null, activities: null },
     };
-    const { kept, dropped } = applyHardConstraints([inEuros()], constraints, p);
+    const { kept, dropped } = applyHardConstraints([inEuros()], constraints, p, INDIA_LEG);
 
     expect(kept).toEqual([]);
     expect(dropped[0]!.reason).toMatch(/cannot be checked against your INR budget/);

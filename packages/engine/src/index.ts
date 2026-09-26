@@ -8,6 +8,7 @@ export * from './transport.js';
 export * from './hotels.js';
 export * from './activities.js';
 export * from './time.js';
+export * from './time-windows.js';
 export * from './schedule.js';
 export * from './cost.js';
 export * from './validate.js';

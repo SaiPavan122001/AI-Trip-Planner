@@ -202,3 +202,6 @@ export function buildConstraintsOnly(p: TravelerProfile, tripIntent: TripIntent 
     dailySpendPerPerson: null,
   });
 }
+
+/** A leg that starts and ends in India, for the transport time-window checks. */
+export const INDIA_LEG = { departure: 'Asia/Kolkata', arrival: 'Asia/Kolkata' } as const;
