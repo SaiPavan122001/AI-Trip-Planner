@@ -21,6 +21,12 @@ export interface AnthropicConfig {
   apiKey: string;
   model: string;
   maxOutputTokens: number;
+  /**
+   * Per-attempt ceiling. The SDK's default is ten minutes with two retries,
+   * which would let one modification request hang for half an hour; a
+   * traveller waiting on a reply is better served by the rule-based fallback.
+   */
+  timeoutMs: number;
 }
 
 export class AnthropicLlmProvider implements LlmProvider {
@@ -31,7 +37,9 @@ export class AnthropicLlmProvider implements LlmProvider {
 
   constructor(private readonly config: AnthropicConfig) {
     this.model = config.model;
-    this.client = config.apiKey ? new Anthropic({ apiKey: config.apiKey }) : null;
+    this.client = config.apiKey
+      ? new Anthropic({ apiKey: config.apiKey, timeout: config.timeoutMs, maxRetries: 1 })
+      : null;
   }
 
   isConfigured(): boolean {

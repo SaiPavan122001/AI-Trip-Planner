@@ -137,6 +137,16 @@ export function registerTripRoutes(app: FastifyInstance, ctx: AppContext): void 
         .object({ utterance: z.string().min(1).max(500) })
         .parse(req.body);
       const outcome = await service.modify(id, utterance);
+      // Logged for operators, never returned: a silent fall back to keyword
+      // rules, or a model proposing values that fail validation, is exactly
+      // what should be noticed, and neither is the traveller's concern.
+      const { llmFallbackReason, rejectedParameters } = outcome.diagnostics;
+      if (llmFallbackReason) {
+        req.log.warn({ tripId: id, reason: llmFallbackReason }, 'Modification handled by rules: model unavailable');
+      }
+      if (rejectedParameters.length > 0) {
+        req.log.warn({ tripId: id, rejectedParameters }, 'Modification parameters failed validation and were dropped');
+      }
       return reply.send({
         trip: outcome.session,
         interpretation: outcome.interpretation,

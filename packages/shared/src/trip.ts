@@ -3,7 +3,16 @@ import { Place } from './geo.js';
 import { SUPPORTED_CURRENCY } from './money.js';
 
 /** ISO date, no time component: the traveller thinks in dates, not instants. */
-export const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD');
+export const IsoDate = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD')
+  // The shape alone accepts "2026-02-30" and "2026-13-45". A real calendar
+  // date survives a round trip through the calendar unchanged.
+  .refine((d) => {
+    const [y, m, day] = d.split('-').map(Number);
+    const t = new Date(Date.UTC(y!, m! - 1, day!));
+    return t.getUTCFullYear() === y && t.getUTCMonth() === m! - 1 && t.getUTCDate() === day;
+  }, 'not a real calendar date');
 export type IsoDate = z.infer<typeof IsoDate>;
 
 /**

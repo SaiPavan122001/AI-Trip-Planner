@@ -18,6 +18,8 @@ export interface OpenAiCompatibleConfig {
   apiKey: string | null;
   model: string;
   maxOutputTokens: number;
+  /** Hard ceiling on one request, so a slow endpoint cannot hang a traveller's request. */
+  timeoutMs: number;
   label: string;
 }
 
@@ -69,7 +71,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
             { role: 'user', content: req.input },
           ],
         }),
-        signal: AbortSignal.timeout(30_000),
+        signal: AbortSignal.timeout(this.config.timeoutMs),
       });
     } catch (err) {
       throw new LlmUnavailableError(this.id, `${this.label} could not be reached.`, err);

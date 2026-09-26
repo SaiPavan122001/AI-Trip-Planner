@@ -202,11 +202,14 @@ export class TripService {
     requiresConsent: { constraint: string; question: string } | null;
     understoodBy: string;
     result: PlanGenerationResult | null;
+    /** For operators only: why the model was not used, and what it proposed that failed validation. */
+    diagnostics: { llmFallbackReason: string | null; rejectedParameters: string[] };
   }> {
     const session = await this.getTrip(id);
     const selected = session.plans.find((p) => p.id === session.selectedPlanId) ?? session.plans[0];
 
-    const { request, interpretation, fromFallback } = await this.deps.llm.interpretModification(
+    const { request, interpretation, fromFallback, fallbackReason, rejectedParameters } =
+      await this.deps.llm.interpretModification(
       utterance,
       {
         hasHotel: Boolean(selected?.hotels.length),
@@ -227,6 +230,7 @@ export class TripService {
         requiresConsent: outcome.requiresConsent,
         understoodBy: fromFallback ? 'rules' : this.deps.llm.label,
         result: null,
+        diagnostics: { llmFallbackReason: fallbackReason, rejectedParameters },
       };
     }
 
@@ -246,6 +250,7 @@ export class TripService {
         requiresConsent: outcome.requiresConsent,
         understoodBy: fromFallback ? 'rules' : this.deps.llm.label,
         result: null,
+        diagnostics: { llmFallbackReason: fallbackReason, rejectedParameters },
       };
     }
 
@@ -285,6 +290,7 @@ export class TripService {
       requiresConsent: null,
       understoodBy: fromFallback ? 'rules' : this.deps.llm.label,
       result,
+      diagnostics: { llmFallbackReason: fallbackReason, rejectedParameters },
     };
   }
 

@@ -1,7 +1,7 @@
 import {
+  ModificationRequest,
   multiply,
   type ConstraintSet,
-  type ModificationRequest,
   type TravelerProfile,
   type TripIntent,
 } from '@trip/shared';
@@ -35,11 +35,16 @@ export interface ModificationOutcome {
 const ALL_COMPONENTS = ['outbound', 'return', 'hotel', 'transfers', 'activities'] as const;
 
 export function applyModification(
-  request: ModificationRequest,
+  proposed: ModificationRequest,
   intent: TripIntent,
   profile: TravelerProfile,
   constraints: ConstraintSet,
 ): ModificationOutcome {
+  // The request usually comes from a language model. It has been validated
+  // where it was produced, and is validated again here, at the boundary of
+  // the code that changes the trip, so this function never depends on every
+  // caller having remembered.
+  const request = ModificationRequest.parse(proposed);
   const nextProfile: TravelerProfile = structuredClone(profile);
   const nextConstraints: ConstraintSet = structuredClone(constraints);
   const pinned = new Set(request.pinnedComponents);
@@ -76,7 +81,7 @@ export function applyModification(
       break;
     }
     case 'change_transport_mode': {
-      const mode = String(request.parameters['mode'] ?? '');
+      const mode = request.parameters.mode;
       if (!mode) {
         summary = 'No transport mode was identified in that request.';
         break;
@@ -92,8 +97,8 @@ export function applyModification(
       break;
     }
     case 'change_hotel_tier': {
-      const target = Number(request.parameters['category']);
-      if (Number.isFinite(target)) {
+      const target = request.parameters.category;
+      if (target !== undefined) {
         nextProfile.accommodation.minCategory = Math.max(0, Math.min(5, target));
         summary = `Only properties rated ${nextProfile.accommodation.minCategory} or above will be considered.`;
       } else {
@@ -109,12 +114,12 @@ export function applyModification(
       break;
     }
     case 'shift_departure_time': {
-      const earliest = request.parameters['earliestDeparture'];
-      const latest = request.parameters['latestArrival'];
-      if (typeof earliest === 'string') nextProfile.transport.earliestDepartureLocal = earliest;
-      if (typeof latest === 'string') nextProfile.transport.latestArrivalLocal = latest;
+      const earliest = request.parameters.earliestDeparture;
+      const latest = request.parameters.latestArrival;
+      if (earliest) nextProfile.transport.earliestDepartureLocal = earliest;
+      if (latest) nextProfile.transport.latestArrivalLocal = latest;
       reSearch = ['outbound', 'transfers'];
-      summary = `Departure window updated${typeof earliest === 'string' ? ` to depart no earlier than ${earliest}` : ''}.`;
+      summary = `Departure window updated${earliest ? ` to depart no earlier than ${earliest}` : ''}.`;
       break;
     }
     case 'change_party_size': {
@@ -141,9 +146,9 @@ export function applyModification(
       break;
     }
     case 'reprioritise': {
-      const order = request.parameters['priorities'];
-      if (Array.isArray(order) && order.length > 0) {
-        nextProfile.priorities = order as TravelerProfile['priorities'];
+      const order = request.parameters.priorities;
+      if (order && order.length > 0) {
+        nextProfile.priorities = order;
         summary = `Priorities are now: ${order.join(' before ')}.`;
         reSearch = ['outbound', 'return', 'hotel'];
       } else {
@@ -152,9 +157,9 @@ export function applyModification(
       break;
     }
     case 'replace_component': {
-      const component = String(request.parameters['component'] ?? '');
-      if ((ALL_COMPONENTS as readonly string[]).includes(component)) {
-        reSearch = [component as (typeof ALL_COMPONENTS)[number]];
+      const component = request.parameters.component;
+      if (component) {
+        reSearch = [component];
         summary = `Only the ${component} will be searched again; everything else is kept exactly as it is.`;
       } else {
         summary = 'It was not clear which part of the plan should be replaced.';

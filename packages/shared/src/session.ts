@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ConstraintSet } from './constraints.js';
-import { JourneyClassification, TripIntent } from './trip.js';
-import { TravelerProfile } from './traveler.js';
+import { IsoDate, JourneyClassification, LocalTime, TransportMode, TripIntent } from './trip.js';
+import { Priority, TravelerProfile } from './traveler.js';
 import { TripPlan } from './itinerary.js';
 import { QuestionnaireState } from './questions.js';
 
@@ -75,20 +75,74 @@ export const ModificationIntent = z.enum([
 ]);
 export type ModificationIntent = z.infer<typeof ModificationIntent>;
 
+export const TripComponent = z.enum(['outbound', 'return', 'hotel', 'transfers', 'activities']);
+export type TripComponent = z.infer<typeof TripComponent>;
+
+/**
+ * The parameters a modification may carry, each with the same domain rules a
+ * person typing into the form would face. They usually come from a language
+ * model, so they are untrusted: every field is checked on its own (see
+ * `sanitizeModificationParameters`) and an invalid one is dropped, never
+ * stored. Whether a value makes sense for this particular trip (a date in the
+ * past, more rooms than people) is checked later by the engine.
+ */
+export const ModificationParameters = z
+  .object({
+    mode: TransportMode.optional(),
+    category: z.number().int().min(0).max(5).optional(),
+    earliestDeparture: LocalTime.optional(),
+    latestArrival: LocalTime.optional(),
+    priorities: z
+      .array(Priority)
+      .min(1)
+      .max(4)
+      .refine((p) => new Set(p).size === p.length, 'each priority once')
+      .optional(),
+    component: TripComponent.optional(),
+    activityName: z.string().trim().min(1).max(120).optional(),
+    departureDate: IsoDate.optional(),
+    returnDate: IsoDate.optional(),
+    adults: z.number().int().min(1).max(20).optional(),
+    children: z.number().int().min(0).max(20).optional(),
+    infants: z.number().int().min(0).max(10).optional(),
+  })
+  .strict();
+export type ModificationParameters = z.infer<typeof ModificationParameters>;
+
+/**
+ * Checks each proposed parameter independently. A valid one is kept; an
+ * invalid or unknown one is dropped and named in `rejected`, so a single bad
+ * value cannot take the whole request with it, and cannot reach the trip.
+ */
+export function sanitizeModificationParameters(raw: Record<string, unknown>): {
+  parameters: ModificationParameters;
+  rejected: string[];
+} {
+  const shape = ModificationParameters.shape;
+  const parameters: Record<string, unknown> = {};
+  const rejected: string[] = [];
+  for (const [key, value] of Object.entries(raw)) {
+    if (value === null || value === undefined) continue;
+    const field = shape[key as keyof typeof shape];
+    const parsed = field ? field.safeParse(value) : null;
+    if (parsed?.success && parsed.data !== undefined) parameters[key] = parsed.data;
+    else rejected.push(key);
+  }
+  return { parameters: parameters as ModificationParameters, rejected };
+}
+
 export const ModificationRequest = z.object({
   /** What the traveller typed, kept verbatim for the audit trail. */
   utterance: z.string(),
   intent: ModificationIntent,
-  /** Structured parameters the AI extracted; validated before use. */
-  parameters: z.record(z.string(), z.unknown()).default({}),
+  /** Validated parameters; see `ModificationParameters`. */
+  parameters: ModificationParameters.default({}),
   /** Components that must be re-searched as a result. */
   affectedComponents: z
     .array(z.enum(['outbound', 'return', 'hotel', 'transfers', 'activities', 'all']))
     .default([]),
   /** Components explicitly pinned by the traveller ("keep the same hotel"). */
-  pinnedComponents: z
-    .array(z.enum(['outbound', 'return', 'hotel', 'transfers', 'activities']))
-    .default([]),
+  pinnedComponents: z.array(TripComponent).default([]),
   /** Set when the change would breach a hard constraint and needs consent. */
   requiresWaiver: z.array(z.string()).default([]),
 });
