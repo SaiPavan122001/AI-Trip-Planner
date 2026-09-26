@@ -45,6 +45,22 @@ describe('anonymous sessions', () => {
     expect(await repository.findAuthSession(token, new Date())).toBeNull();
   });
 
+  it('leaves nothing behind when a first request is refused', async () => {
+    const { bare, repository } = await withMailer();
+    const res = await bare.inject({
+      method: 'POST',
+      url: '/v1/trips',
+      payload: { ...newTripBody, originQuery: 'Nowhereville' },
+    });
+
+    expect(res.statusCode).toBe(400);
+    // The browser is told to hold no session, and the person made for the request is gone:
+    // had one been left, housekeeping would find them once their session lapsed.
+    expect(String(res.headers['set-cookie'])).toMatch(/^tp_session=;/);
+    const later = await repository.sweepExpired(new Date(Date.now() + 40 * 24 * 3_600_000));
+    expect(later.abandonedUsers).toBe(0);
+  });
+
   it('does not create anyone just for looking', async () => {
     const { bare } = await withMailer();
     const me = await bare.inject({ method: 'GET', url: '/v1/me' });

@@ -131,11 +131,11 @@ export function ModifyBar({
             </ul>
           ) : null}
 
-          {lastResult?.status === 'applied' ? (
+          {lastResult?.status === 'applied' || lastResult?.status === 'replanning' ? (
             <p className="mt-1.5 text-[11px] text-ink-faint">
               {lastResult.understoodBy ? `Understood by ${lastResult.understoodBy} · ` : ''}
               {lastResult.reSearched.length > 0
-                ? `searched again: ${lastResult.reSearched.map(label).join(', ')}`
+                ? `${lastResult.status === 'replanning' ? 'searching again' : 'searched again'}: ${lastResult.reSearched.map(label).join(', ')}`
                 : 'nothing was searched again'}
               {lastResult.kept.length > 0 ? ` · kept: ${lastResult.kept.map(label).join(', ')}` : ''}
             </p>

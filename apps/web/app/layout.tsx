@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { AccountMenu } from '@/components/AccountMenu';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -33,6 +34,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <Link href="/sources" className="hover:text-ink">
                   Data sources
                 </Link>
+                <AccountMenu />
               </nav>
             </div>
           </header>

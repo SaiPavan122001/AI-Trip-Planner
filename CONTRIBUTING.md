@@ -66,13 +66,19 @@ physically possible goes in `validate.ts`, as arithmetic over instants and const
 
 ## Tests
 
-Run `npm test`. New behaviour needs a test; the ones worth writing here assert a *guarantee* rather
-than an implementation:
+Run `npm test`; it needs nothing installed or running. `npm run test:integration` runs the store
+contract and the request path against a real PostgreSQL (started for you, no Docker), and `npm run
+smoke` drives the built API and worker end to end. Anything that touches storage belongs in the store
+contract (`apps/api/src/__tests__/support/store-contract.ts`), which runs against both the in-memory
+store and PostgreSQL; a schema change needs a new, additive migration and must keep them passing. New
+behaviour needs a test; the ones worth writing here assert a *guarantee* rather than an implementation:
 
 - that a confirmed booking is unreachable without a provider reference
 - that a skipped question leaves no preference behind
 - that an excluded mode carries a reason
 - that a DST boundary does not shift an itinerary
+- that a trip is not reachable by anyone but its owner
+- that a search for a trip that changed meanwhile is discarded, not shown
 
 `packages/engine/src/__tests__/fixtures.ts` has real places with real coordinates and timezones. Use
 them rather than inventing convenient geography.
@@ -93,7 +99,7 @@ your agreement.
 - One concern per PR.
 - Say what a reviewer should check by hand, especially anything touching provider calls.
 - `npm run lint && npm run typecheck && npm test && npm run build` should pass before you open it. CI
-  runs the same plus a secret scan and a dependency audit. Do not silence a lint rule or a type
+  runs the same plus the PostgreSQL integration tests and smoke run, a secret scan and a dependency audit. Do not silence a lint rule or a type
   error to make it pass; fix the cause.
 - Never commit a filled-in `.env`. CI fails the build if one is tracked.
 

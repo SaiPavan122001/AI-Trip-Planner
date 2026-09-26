@@ -42,6 +42,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
         ...(init.headers ?? {}),
       },
       cache: 'no-store',
+      // The session lives in a cookie the browser keeps; without this it is
+      // neither sent to the API nor stored from its answer.
+      credentials: 'include',
     });
   } catch {
     throw new ApiClientError(0, {
@@ -91,7 +94,12 @@ export const api = {
       body: JSON.stringify(input),
     }),
 
-  getTrip: (id: string) => request<{ trip: TripSession }>(`/v1/trips/${id}`),
+  /** The trip, and its latest background search (which may have finished, failed or still be going). */
+  getTrip: (id: string) => request<{ trip: TripSession; run: PlanningRun | null }>(`/v1/trips/${id}`),
+
+  listTrips: () => request<{ trips: TripSession[] }>('/v1/trips'),
+
+  deleteTrip: (id: string) => request<void>(`/v1/trips/${id}`, { method: 'DELETE' }),
 
   answer: (id: string, key: string, value: unknown, skipped = false) =>
     request<{ trip: TripSession }>(`/v1/trips/${id}/answers`, {
@@ -99,8 +107,21 @@ export const api = {
       body: JSON.stringify({ key, value, skipped }),
     }),
 
-  plan: (id: string) =>
-    request<PlanResponse>(`/v1/trips/${id}/plan`, { method: 'POST' }),
+  /** Starts the search in the background; returns the run to watch. */
+  plan: (id: string) => request<PlanStarted>(`/v1/trips/${id}/plan`, { method: 'POST' }),
+
+  getRun: (id: string, runId: string) =>
+    request<{ run: PlanningRun }>(`/v1/trips/${id}/runs/${runId}`),
+
+  cancelRun: (id: string, runId: string) =>
+    request<{ run: PlanningRun }>(`/v1/trips/${id}/runs/${runId}/cancel`, { method: 'POST' }),
+
+  /** Replaces the set of parts of the selected plan to keep. */
+  setPins: (id: string, pins: string[]) =>
+    request<{ trip: TripSession; refused: Array<{ component: string; reason: string }> }>(
+      `/v1/trips/${id}/pins`,
+      { method: 'PUT', body: JSON.stringify({ pins }) },
+    ),
 
   selectPlan: (id: string, planId: string) =>
     request<{ trip: TripSession }>(`/v1/trips/${id}/select`, {
@@ -121,6 +142,30 @@ export const api = {
     }),
 
   providers: () => request<ProvidersResponse>('/v1/providers'),
+
+  // ------------------------------------------------------------- account
+
+  me: () => request<Me>('/v1/me'),
+
+  requestSignInLink: (email: string) =>
+    request<{ message: string; devLink?: string }>('/v1/auth/magic-link', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+
+  verifySignInLink: (token: string) =>
+    request<{ user: MeUser; tripsMoved: number }>('/v1/auth/verify', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    }),
+
+  signOut: () => request<void>('/v1/auth/logout', { method: 'POST' }),
+
+  deleteAccount: () =>
+    request<void>('/v1/me', { method: 'DELETE', body: JSON.stringify({ confirm: 'delete my account' }) }),
+
+  /** Where the browser can fetch the person's data as a file. */
+  exportUrl: `${BASE_URL}/v1/me/export`,
 };
 
 // ----------------------------------------------------------------- shapes
@@ -132,9 +177,47 @@ export interface Money {
   currency: string;
 }
 
+export interface MeUser {
+  id: string;
+  email: string | null;
+  isAnonymous: boolean;
+}
+
+export interface Me {
+  user: MeUser | null;
+  tripCount: number;
+  /** False where the operator has not set up email, so sign-in cannot be offered. */
+  emailSignIn: boolean;
+}
+
+export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'superseded';
+
+/** A background search. */
+export interface PlanningRun {
+  id: string;
+  tripId: string;
+  kind: 'plan' | 'replan';
+  status: RunStatus;
+  progress: { step: string; label: string; percent: number } | null;
+  error: { code: string; message: string } | null;
+  cancelRequested: boolean;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export const isActiveRun = (run: PlanningRun | null | undefined): boolean =>
+  run?.status === 'queued' || run?.status === 'running';
+
 export interface TripSession {
   id: string;
   stage: string;
+  /** Bumped on every save. */
+  version: number;
+  /** Parts of the selected plan the traveller asked to keep. */
+  pins: string[];
+  /** What the latest search found, kept so the comparison survives a reload. */
+  lastSearch: SearchSummary | null;
   /** A change waiting for the traveller's answer; survives a page reload. */
   pendingModification: {
     id: string;
@@ -164,6 +247,8 @@ export interface TripSession {
     completeness: number;
     canPlan: boolean;
   } | null;
+  /** What the traveller said about money. `firm` is true only for "do not exceed". */
+  constraints: { budget: { total: Money | null; firm: boolean } };
   plans: TripPlan[];
   selectedPlanId: string | null;
   providerNotes: Array<{ provider: string; providerLabel: string; status: string; message: string }>;
@@ -258,6 +343,8 @@ export interface TripPlan {
     distanceToActivitiesKm: number | null;
     impliedDailyTransportCost: Money | null;
   }>;
+  /** The places chosen for the days; only their number is shown here. */
+  activities: unknown[];
   days: Array<{ date: string; timezone: string; items: ItineraryItem[]; daySubtotal: Money }>;
   cost: {
     transport: Money;
@@ -302,21 +389,29 @@ export interface BudgetAdjustment {
   affects: string;
 }
 
-export interface PlanResponse {
+export interface BudgetConflict {
+  overBy: Money;
+  budget: Money;
+  total: Money;
+  adjustments: BudgetAdjustment[];
+}
+
+export interface SearchSummary {
+  builtAt: string;
+  outbound: { date: string; modes: ModeSummary[]; filteredByYourRequirements: Array<{ offerId: string; reason: string }> };
+  inbound: { date: string; modes: ModeSummary[] } | null;
+  hotelsConsidered: number;
+  hotelsFiltered: Array<{ hotelId: string; reason: string }>;
+  budgetConflict: BudgetConflict | null;
+}
+
+export interface PlanStarted {
+  run: PlanningRun;
+  /** True when the trip was already being searched for exactly this. */
+  reused: boolean;
+  /** Pins that no longer fit the trip and were let go, each with the reason. */
+  pinsReleased: Array<{ component: string; reason: string }>;
   trip: TripSession;
-  plans: TripPlan[];
-  comparison: {
-    outbound: { date: string; modes: ModeSummary[]; filteredByYourRequirements: Array<{ offerId: string; reason: string }> };
-    inbound: { date: string; modes: ModeSummary[] } | null;
-  };
-  hotels: { considered: number; filtered: Array<{ hotelId: string; reason: string }> };
-  budgetConflict: {
-    overBy: Money;
-    budget: Money;
-    total: Money;
-    adjustments: BudgetAdjustment[];
-  } | null;
-  providerNotes: TripSession['providerNotes'];
 }
 
 export interface ModifyResponse {
@@ -324,10 +419,11 @@ export interface ModifyResponse {
   /**
    * no_change: nothing changed; `interpretation` says why.
    * needs_consent: nothing changes until `consent` is answered.
-   * applied: saved, and plans rebuilt where needed.
+   * replanning: saved, and new plans are being built; see `run`.
+   * applied: saved, and no new search was needed.
    * saved: saved; plans will use it when next built.
    */
-  status: 'no_change' | 'needs_consent' | 'applied' | 'saved';
+  status: 'no_change' | 'needs_consent' | 'replanning' | 'applied' | 'saved';
   interpretation: string;
   /** Absent on the answer to a consent question. */
   understoodBy?: string;
@@ -335,8 +431,8 @@ export interface ModifyResponse {
   kept: string[];
   released: Array<{ component: string; reason: string }>;
   consent: { id: string; question: string; acceptLabel: string; declineLabel: string } | null;
+  run: PlanningRun | null;
   plans: TripPlan[];
-  budgetConflict: PlanResponse['budgetConflict'];
 }
 
 export interface ProvidersResponse {

@@ -537,8 +537,19 @@ export class PrismaRepository implements Store {
   }
 
   async sweepExpired(now: Date): Promise<SweepResult> {
-    const [authSessions, loginChallenges, idempotencyKeys, runs] = await Promise.all([
-      this.prisma.authSession.deleteMany({ where: { expiresAt: { lte: now } } }),
+    // Sessions first, so the users they were keeping alive can be judged after.
+    const authSessions = await this.prisma.authSession.deleteMany({ where: { expiresAt: { lte: now } } });
+    const abandoned = await this.prisma.user.deleteMany({
+      // Not for the first hour: a person is created a moment before their
+      // first session, and must not be swept in between.
+      where: {
+        email: null,
+        createdAt: { lt: new Date(now.getTime() - 60 * 60_000) },
+        sessions: { none: {} },
+        trips: { none: {} },
+      },
+    });
+    const [loginChallenges, idempotencyKeys, runs] = await Promise.all([
       this.prisma.loginChallenge.deleteMany({
         where: { expiresAt: { lte: new Date(now.getTime() - CHALLENGE_RETENTION_MS) } },
       }),
@@ -551,6 +562,7 @@ export class PrismaRepository implements Store {
       }),
     ]);
     return {
+      abandonedUsers: abandoned.count,
       authSessions: authSessions.count,
       loginChallenges: loginChallenges.count,
       idempotencyKeys: idempotencyKeys.count,

@@ -82,7 +82,7 @@ Constraints are split into two kinds, and the split is the whole design.
 
 | Kind | Source |
 |---|---|
-| `max_total_budget`, `max_transport_budget`, `max_accommodation_budget` | stated budget |
+| `max_total_budget`, `max_transport_budget`, `max_accommodation_budget` | a **firm** budget only ("do not exceed") |
 | `fixed_departure_date`, `fixed_return_date` | trip intent |
 | `traveler_count`, `required_rooms` | trip intent, room question |
 | `required_accessibility` | accessibility question |
@@ -103,6 +103,14 @@ is an explicit, recorded waiver (`ConstraintSet.waivers`), granted by the travel
 specific question. `grantWaiver` is the only function that can add one; it is called only when the
 traveller answers yes to a consent question (see below), and a new total budget withdraws an earlier
 waiver of the old one.
+
+**A budget is a guide unless it is firm.** `BudgetEnvelope.firm` is false by default: the total and the
+derived allowances then only steer ranking. A plan over a guide is shown with an `over_budget_guide`
+warning and its score scaled down by how far over it runs (`budgetOvershootFactor`, floored so a plan
+that is worth it can still win), and nothing is filtered. When the traveller says "do not exceed",
+the same figures become the hard constraints above: unaffordable parts are filtered with a reason and
+a plan over the total carries a `budget_exceeded` blocker. Whole plans are ranked on the journey and
+the stay together (`combinePlanScore`), so hotel suitability counts as much as the flight.
 
 The budget figures the traveller actually states are the total and the daily allowance. The transport
 and accommodation allowances are *derived* from the total and travel style, are re-derived whenever the
@@ -199,8 +207,9 @@ as a pending question with both answers precomputed. Nothing changes until it is
 
 - **New dates or group size**: yes re-plans transport and accommodation for the new trip, and
   releases any pinned item that was tied to the old one, saying so up front; there is no "no" change.
-- **A comfort upgrade under a budget**: yes shows options above the budget (recorded as a waiver);
-  no keeps the budget firm.
+- **A comfort upgrade under a firm budget**: yes shows options above the budget (recorded as a
+  waiver); no keeps the budget firm. With a budget that is only a guide no question is needed, because
+  over-budget plans are already shown.
 
 `POST /v1/trips/:id/modify/consent` answers it. A question lapses if the trip changes another way
 first, so accepting it later cannot silently undo that change.
@@ -308,16 +317,47 @@ somewhere deep in the scheduler.
 Planning sessions are stored as a validated JSON document alongside the columns worth indexing.
 Bookings are fully normalised: every column is money or provenance.
 
+The store is really three interfaces joined as `Store`: trips (with optimistic locking), the search
+queue, and people with their sign-in state. The same contract test suite runs against both the in-memory
+store and PostgreSQL, so "the in-memory store behaves like the database" is checked rather than assumed.
+The migrations are additive, and are applied to an empty database in CI.
+
+### Identity
+
+Every trip has an owner. A first-time planner gets an anonymous user (a row with no email) and a
+session cookie; signing in by emailed link attaches an email to that row, or moves the trips to the
+account that already has the email. Only a keyed hash of a cookie or link token is stored. A trip
+that is not yours is "not found", like one that does not exist. `Mailer` is an interface (console for
+development, a webhook for production, or off), so no mail vendor is built in.
+
+### Background planning
+
+`POST /plan` records a *run* and returns; a worker does the search. The run queue is a table
+(`planning_runs`) taken with `FOR UPDATE SKIP LOCKED`, so any number of workers, in the API process
+or separate ones, can share it and none takes the same run twice. A worker holds a lease and renews it
+while it works; a lapsed lease means a dead worker, and the run is taken up again (bounded attempts).
+A partial unique index allows one active run per trip.
+
+Three rules keep it correct. A run is created for a fingerprint of everything the search depends on
+(intent, profile, constraints, pins), and its plans are saved only if the trip still has that
+fingerprint, otherwise the run is `superseded` and the plans discarded. The save itself is a
+version-checked write, redone against the newer trip if it lost a race. And an `AbortSignal` runs from
+the run through the engine into every provider call, so a cancelled or timed-out search stops asking
+providers rather than merely being ignored.
+
+Pins are stored on the trip. Before a search uses one it is checked against the trip (dates, group);
+one that no longer fits is released with a reason and reported to the traveller.
+
 ---
 
 ## What is deliberately not built
 
 - **Booking, payment and ticketing.** All of it is off in this release; see [booking.md](booking.md).
   The endpoints answer 501 and store nothing.
-- **Authentication and authorisation.** None. Anyone with a trip's link can read and change it, and
-  `X-User-Id` is an unauthenticated label. See [SECURITY.md](../SECURITY.md).
-- **Caching, queues and background work.** Planning runs inside one request. `REDIS_URL` is accepted
-  and Redis runs in the compose file, but nothing uses it yet.
+- **Passwords, second factors and social sign-in.** Sign-in is an emailed link only. See
+  [SECURITY.md](../SECURITY.md).
+- **Caching.** Provider responses are not cached. `REDIS_URL` is accepted and Redis runs in the compose
+  file, but nothing uses it: the queue lives in PostgreSQL, and progress is polled rather than pushed.
 - **Adding or removing individual places to visit.** A request to do so says so and changes nothing.
 - **Multi-city and open-jaw routing.** The model supports the shape; the search orchestration
   assumes one outbound and one return leg.

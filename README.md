@@ -24,9 +24,14 @@ along with the reason — so "no trains" is an answer, not an omission.
 business traveller is never asked about cots. Nobody is asked about rail classes on a route with no
 rail.
 
-**Hard constraints are filters, not suggestions.** Budget, dates, room count, accessibility needs
-and "no overnight travel" remove options before anything is ranked, and every removal is recorded
-with its reason. Nothing is quietly relaxed to make a plan fit a number.
+**Hard constraints are filters, not suggestions.** Dates, room count, accessibility needs and "no
+overnight travel" remove options before anything is ranked, and every removal is recorded with its
+reason. Nothing is quietly relaxed to make a plan fit a number.
+
+**A budget is a guide, unless you say "do not exceed".** By default a plan over budget is still
+shown, flagged and ranked lower, so you can see what a nicer stay costs. Say "do not exceed ₹80,000"
+and it becomes a hard limit: what cannot fit is filtered, with the reason. Plans are ranked on the
+journey and the stay together, so a hotel that suits you counts as much as a good flight.
 
 **Total cost, not sticker price.** A room ₹1,000 cheaper that adds ₹2,500 a day in taxis is priced
 with the taxis. Accommodation is chosen on what the whole stay costs.
@@ -42,10 +47,20 @@ ones are dropped, and the sentence shown to you is written from the validated re
 from the model. Every plan is validated afterwards by deterministic rules that cannot be argued
 with.
 
-**Pin what you like.** Say "make it cheaper but keep the hotel" and the hotel is carried over exactly,
-with the date its price was retrieved, while everything else is optimised again. When a change
-would break something you set (a comfort upgrade over your budget, new dates, a different group
-size), you are told what will change and asked before anything does.
+**Pin what you like.** Tick the hotel, or say "make it cheaper but keep the hotel", and it is carried
+over exactly while everything else is optimised again. Pins persist. When new dates or a different
+group make a pinned part impossible to keep, you are told which part and why, not left believing it
+was kept. Changes that would break something you set (new dates, a different group size, a comfort
+upgrade over a firm budget) are explained and asked about before anything happens.
+
+**Searches run in the background.** Searching many providers takes a while, so it never holds a
+request open: you get a progress view you can leave and come back to, cancel, or reload without losing
+anything. If a worker dies mid-search another picks it up, and results for a trip you changed
+meanwhile are thrown away rather than shown against the wrong trip.
+
+**Your trips are yours.** Planning needs no sign-up: you get a private session, and nobody else can open
+your trips. Sign in with an emailed link (no password) to keep them across devices, and download or
+delete everything from your account.
 
 **Indian rupees only.** Wayfare serves travellers in India, so every budget and price is in INR.
 Prices a provider returns in another currency are set aside with a reason; nothing is converted at an
@@ -86,12 +101,13 @@ zero-credential experience — see [Connecting providers](#connecting-providers)
 
 ```bash
 cp .env.example .env
-# set JWT_SECRET — compose refuses to start without it (it is reserved for
-# authentication, which is not implemented yet, so nothing reads it today)
+# set SESSION_SECRET (at least 32 characters) — compose refuses to start without it
 docker compose up --build
 ```
 
-Brings up PostgreSQL, Redis, the API and the web app, running migrations first.
+Brings up PostgreSQL, Redis, the API, a separate search worker and the web app, running migrations
+first. Sign-in by email needs `MAIL_WEBHOOK_URL`; without it the app says so and you keep planning
+without signing in. Docker is not required for development: see below.
 
 ---
 
@@ -153,7 +169,10 @@ the engine imports a vendor SDK; nothing in the UI decides what to ask next.
 npm run dev            # API and web together
 npm run dev:api        # API only
 npm run dev:web        # web only
-npm test               # all workspace tests
+npm run dev:worker     # a search worker on its own (see RUN_WORKER in .env.example)
+npm test               # all workspace tests (needs nothing installed or running)
+npm run test:integration   # the store contract and request path against a real PostgreSQL
+npm run smoke          # the built API + worker end to end on a throwaway PostgreSQL
 npm run lint           # ESLint, all workspaces
 npm run typecheck      # all workspaces
 npm run build          # full build in dependency order
@@ -171,6 +190,13 @@ npm run db:generate    # Prisma client
 npm run db:migrate     # apply migrations
 ```
 
+Docker is optional. `npm run test:integration` and `npm run smoke` start a private PostgreSQL 16 from the
+`embedded-postgres` dev dependency, apply the migrations to it, and remove it afterwards. To use a
+database you run yourself, set `TEST_DATABASE_URL` to a disposable one whose name contains "test": the
+integration tests empty its tables.
+
+Migrations are additive and never edited once released; add a new one for each schema change.
+
 ---
 
 ## Booking
@@ -181,8 +207,8 @@ nothing, and does not collect traveller names or passport numbers.
 
 The state machine for booking is kept in the code, with the rule that a client can never send a
 payment or provider event, and idempotency that is atomic and per user. None of it is reachable over
-HTTP yet, and it needs a payment provider, a booking-capable provider, authentication and encrypted
-traveller data before it can be switched on.
+HTTP yet, and it needs a payment provider, a booking-capable provider and encrypted traveller data
+before it can be switched on. Accounts and ownership now exist, which it builds on.
 
 See [docs/booking.md](docs/booking.md).
 

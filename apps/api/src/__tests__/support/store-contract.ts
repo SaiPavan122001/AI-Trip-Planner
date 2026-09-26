@@ -460,8 +460,12 @@ export function describeStoreContract(name: string, open: () => Promise<StoreHar
         await store.claimIdempotencyKey({ principal: null, scope: 's', key: 'k', requestHash: 'h' });
         await store.completeIdempotencyKey({ principal: null, scope: 's', key: 'k' }, { ok: true });
 
+        const idle = await store.createUser({ email: null });
         const swept = await store.sweepExpired(new Date());
         expect(swept.authSessions).toBe(1);
+        // A person just created is left alone, even with nothing yet: their first session is a moment away.
+        expect(swept.abandonedUsers).toBe(0);
+        expect(await store.getUser(idle.id)).not.toBeNull();
         expect(swept.loginChallenges).toBe(1);
         expect(await store.findAuthSession('new', new Date())).not.toBeNull();
 
@@ -469,6 +473,9 @@ export function describeStoreContract(name: string, open: () => Promise<StoreHar
         const later = await store.sweepExpired(hours(24 * 30));
         expect(later.authSessions).toBe(1);
         expect(later.idempotencyKeys).toBe(1);
+        // Later, people who never signed in and have no session or trip are left over from visits that came to nothing.
+        expect(later.abandonedUsers).toBe(2);
+        expect(await store.getUser(idle.id)).toBeNull();
       });
     });
   });

@@ -66,17 +66,40 @@ a fixed message when the database is down; the underlying error is logged, not r
 
 **Transport hardening**: helmet, an explicit CORS allowlist (`CORS_ORIGINS`), a 1 MB body limit,
 per-request timeouts on every outbound call, bounded retries with jittered backoff, and per-provider
-request pacing. The API stops waiting for a planning request after `PLANNING_TIMEOUT_MS`, but that
-does **not** cancel the work already in flight (see below).
+request pacing. A search runs in the background and is bounded by `PLANNING_TIMEOUT_MS`; when it times
+out or is cancelled, the provider calls it has in flight are aborted and it never retries them.
+
+**Identity and sessions**: a trip belongs to the person who made it, and someone else's trip is
+reported as "not found", exactly as one that does not exist, so ids cannot be probed. Everyone who plans
+gets a private session in an `HttpOnly`, `SameSite=Lax` cookie (`Secure` in production); the cookie is 256
+random bits and only an HMAC of it, keyed with `SESSION_SECRET`, is stored, so a copy of the database
+cannot be used to sign in. Signing in is by an emailed single-use link with a short life; the token is
+exchanged by POST (so a mail scanner's prefetch cannot use it up), is consumed atomically (two requests
+cannot both use it), and every sign-in issues a fresh session. The link is never returned by the API
+(except as a development convenience with `MAILER=console`, which production refuses). A request that
+changes something and names an `Origin` outside `CORS_ORIGINS` is refused. `GET /v1/me/export` and
+`DELETE /v1/me` let a person take or erase their data; deletion removes their trips, runs, audit events and
+sessions together.
+
+**Cost controls**: each search calls paid provider APIs, so a person may start a limited number a day
+(lower until they sign in), a trip can have at most one active search, the expensive routes have their
+own tight rate limits, and the rate limiter keys on the person where there is one and on the client
+address otherwise. `TRUST_PROXY` is off by default: `X-Forwarded-For` is only believed if the operator
+says which proxies to trust.
+
+**Data handling**: a provider's revalidation token (the key to re-pricing an offer) is stored with the
+trip but blanked in every response except the owner's own export. Every store write is checked for the
+version that was read (optimistic locking), so two changes cannot silently overwrite each other, and a
+search's plans are only saved if the trip still has the inputs the search started with.
 
 **Booking safeguards, kept for when booking returns**: the state machine, the rule that a client can
 never send a payment or provider event, atomic per-user idempotency, and a state check so a transition
 applies at most once. They are tested, and unreachable over HTTP today.
 
-**Production refusals**: the service will not start in production without `JWT_SECRET` (minimum 32
-characters) or without `DATABASE_URL`. Starting with the in-memory store in production would lose every
-trip on deploy. `JWT_SECRET` is **required but not yet used**: it is reserved for the authentication
-that does not exist, and setting it protects nothing today.
+**Production refusals**: the service will not start in production without `SESSION_SECRET` (minimum 32
+characters; `JWT_SECRET` is read as its old name) or without `DATABASE_URL`, and refuses `MAILER=console`.
+Starting with the in-memory store in production would lose every trip on deploy, and a secret that is
+public in the source would protect nothing.
 
 **Containers** run as an unprivileged user and contain only production dependencies and compiled
 output.
@@ -87,22 +110,26 @@ output.
 
 These are real. Treat them as prerequisites before running this for other people.
 
-- **There is no authentication or authorisation.** A trip's id is a random UUID and is the only thing
-  protecting it: anyone who has the link can read, change and delete the trip. `X-User-Id` is a label
-  the client chooses and is trusted as given, so `GET /v1/trips` with no header lists **every anonymous
-  trip**. Put an authenticating gateway in front, or wait for the identity phase.
-- **The rate limit can be bypassed.** It is keyed by the client-supplied `X-User-Id` header (or IP),
-  and the server trusts `X-Forwarded-For` from anyone (`trustProxy: true`). Planning fans out to paid
-  provider APIs, so an attacker can run up the operator's bill. Configure the trusted proxy
-  deliberately once the deployment topology is known.
+- **Anonymous sessions are cheap to make.** Anyone can get a fresh session, and each has its own daily
+  search allowance, so clearing cookies restarts the count. What bounds it is the per-address limit on
+  creating a first trip (30 an hour) and the general per-address rate limit, both of which are only as
+  good as `TRUST_PROXY`. An operator worried about their provider bill should also set provider-side
+  quotas; there is no per-address daily cap on searches.
+- **Rate-limit counters live in each API process.** With several API instances each counts separately,
+  so the effective limit is the configured one times the number of instances. The daily search
+  allowance is in the database and is exact.
+- **Sign-in is an emailed link only.** There is no second factor, no session list or "sign out
+  everywhere" endpoint (the store supports it), and no account recovery beyond a new link to the same
+  address. Whoever controls the mailbox controls the account.
+- **A trip with no owner is unreachable.** Rows created before accounts existed have no owner and cannot
+  be opened by anyone; they are not migrated to anyone.
 - **`/v1/providers/health` is public and calls billed APIs**, including a real Google Places request.
+  It is limited to 5 a minute per caller, which bounds the cost but does not stop it.
   `/v1/providers` reveals which providers are missing and the names of the environment variables that
   would enable them. Restrict both.
-- **Planning is not cancellable.** After `PLANNING_TIMEOUT_MS` the client gets an error, but the search
-  keeps running and spending provider quota, and may still save its result afterwards. There is no
-  queue, cache or per-user cost cap.
-- **Trips are read-modify-written without locking**, so two concurrent changes to the same trip can
-  overwrite each other.
+- **A search that is cancelled or times out stops calling providers it has not reached yet and aborts
+  the calls in flight, but a provider may already have counted a request it received.** A worker that
+  is killed outright leaves its search to lapse (30 seconds by default) before another takes it up.
 - **Provider responses from Amadeus and Google are not validated against a schema**, unlike rail and
   bus.
 - **Free text is stored and shown back.** It is bounded and single-line, and rendered as text (not
@@ -111,15 +138,18 @@ These are real. Treat them as prerequisites before running this for other people
 - **Traveller documents are not encrypted by the application**, and nothing stores them in this
   release. The schema carries `encrypted` and `nonce` columns and the repository is shaped for it, but
   the implementation stores the serialised record. Implement encryption before booking is enabled.
-- **`audit_events` is never written**, and `users` is never used. There is no record of who viewed or
-  changed a trip, and no retention job: trips are kept until deleted, and expired idempotency claims
-  are never swept from the table.
+- **The audit trail is thin.** Trip creation, consent answers, pin changes and search start/finish are
+  recorded, and sign-ins are; reads are not. Trips are kept until deleted. Housekeeping (in each worker,
+  every ten minutes) removes expired sessions, sign-in links, idempotency claims, finished runs older than
+  a week and abandoned anonymous accounts.
 - **Compose publishes PostgreSQL and Redis on the host** with a default password. It is a local
   development convenience; do not use it as a deployment.
 - **Redis is not used** by the application. It runs in compose and `REDIS_URL` is accepted, for a caching
   and queueing phase that has not happened.
-- **Concurrency and idempotency were tested against an in-memory store and a fake client**, not a live
-  PostgreSQL. No Postgres integration test has been run.
+- **The PostgreSQL tests use a throwaway local server, not a managed one.** The store contract, the
+  migrations and the request path run against real PostgreSQL 16 (embedded, or the CI service), which is
+  what found that the original init migration could not apply. Behaviour under a managed provider's
+  connection pooler, replicas or a different collation has not been tested.
 
 ---
 

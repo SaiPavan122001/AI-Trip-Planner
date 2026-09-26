@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { TripComponent } from '@trip/shared';
-import { startAnonymousSession } from '../auth/plugin.js';
+import { clearSessionCookie, startAnonymousSession } from '../auth/plugin.js';
 import type { AuthService, Principal } from '../auth/service.js';
 import type { AppContext } from '../context.js';
 import { ApiError, sendError } from '../errors.js';
@@ -32,18 +32,34 @@ export function registerTripRoutes(app: FastifyInstance, ctx: AppContext, auth: 
 
   const idParam = (req: FastifyRequest) => z.object({ id: z.string().uuid() }).parse(req.params).id;
 
-  app.post('/v1/trips', async (req, reply) => {
-    try {
-      // Anonymous planning is deliberately allowed: making someone sign up
-      // before they can see whether a trip is even feasible is hostile. They
-      // get a private session instead, and can sign in later to keep it.
-      const principal = req.principal ?? (await startAnonymousSession(req, reply, ctx, auth));
-      const session = await service.createTrip(req.body, principal);
-      return reply.status(201).send({ trip: publicView(session) });
-    } catch (err) {
-      return sendError(reply, err);
-    }
-  });
+  app.post(
+    '/v1/trips',
+    // Someone with no session is counted by address, which bounds how many
+    // throwaway sessions (each with its own daily searches) one address can make.
+    { config: { rateLimit: { max: 30, timeWindow: '1 hour' } } },
+    async (req, reply) => {
+      try {
+        // Anonymous planning is deliberately allowed: making someone sign up
+        // before they can see whether a trip is even feasible is hostile. They
+        // get a private session instead, and can sign in later to keep it.
+        const returning = req.principal;
+        const principal = returning ?? (await startAnonymousSession(req, reply, ctx, auth));
+        try {
+          const session = await service.createTrip(req.body, principal);
+          return reply.status(201).send({ trip: publicView(session) });
+        } catch (err) {
+          // A visitor whose first request was refused has made nothing worth keeping.
+          if (!returning) {
+            await ctx.repository.deleteUserAndData(principal.userId);
+            clearSessionCookie(reply, ctx);
+          }
+          throw err;
+        }
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
 
   app.get('/v1/trips/:id', async (req, reply) => {
     try {

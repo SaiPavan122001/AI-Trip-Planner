@@ -192,6 +192,8 @@ export interface IdentityRepository {
 }
 
 export interface SweepResult {
+  /** People who never signed in, whose sessions have all expired, and who made nothing. */
+  abandonedUsers: number;
   authSessions: number;
   loginChallenges: number;
   idempotencyKeys: number;

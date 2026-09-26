@@ -1,22 +1,30 @@
 'use client';
 
-import { formatMoney, type PlanResponse, type TripPlan } from '@/lib/api';
+import { formatMoney, type BudgetConflict, type TripPlan } from '@/lib/api';
 
 /**
  * The budget tracker, and the conflict resolver that goes with it.
  *
- * When a plan goes over budget, nothing is changed automatically. The traveller
- * is shown the gap and a list of adjustments with what each one actually
- * costs them, because silently downgrading a hotel to hit a number is the
- * behaviour that makes travel sites untrustworthy.
+ * A budget is a guide unless the traveller said "do not exceed". Over a guide,
+ * a plan is still shown (ranked lower) and the traveller can make the budget
+ * firm with one click. Over a firm budget, plans that break it are not
+ * offered at all.
+ *
+ * Either way nothing is changed automatically. The traveller is shown the gap
+ * and a list of adjustments with what each one actually costs them, because
+ * silently downgrading a hotel to hit a number is the behaviour that makes
+ * travel sites untrustworthy.
  */
 export function BudgetPanel({
   plan,
   conflict,
+  firm,
   onApply,
 }: {
   plan: TripPlan;
-  conflict: PlanResponse['budgetConflict'];
+  conflict: BudgetConflict | null;
+  /** True when the traveller said "do not exceed". */
+  firm: boolean;
   onApply: (utterance: string) => void;
 }) {
   const { cost } = plan;
@@ -96,7 +104,7 @@ export function BudgetPanel({
 
       {cost.remainingBudget && !conflict ? (
         <p className="mt-4 rounded-xl bg-teal-500/[0.08] px-4 py-3 text-sm text-teal-700">
-          {formatMoney(cost.remainingBudget)} left against the budget you set
+          {formatMoney(cost.remainingBudget)} left against your {firm ? 'firm budget' : 'budget guide'}
           {cost.notIncluded.length > 0 ? ', before the costs listed above as not included.' : '.'}
         </p>
       ) : null}
@@ -104,12 +112,23 @@ export function BudgetPanel({
       {conflict ? (
         <div className="mt-4 rounded-xl bg-clay/10 p-4">
           <h3 className="text-sm font-semibold text-clay">
-            {formatMoney(conflict.overBy)} over your budget
+            {formatMoney(conflict.overBy)} over your {firm ? 'firm budget' : 'budget guide'}
           </h3>
           <p className="mt-1 text-xs text-clay/90">
-            {formatMoney(conflict.total)} against a budget of {formatMoney(conflict.budget)}.
-            Nothing has been changed — these are the options.
+            {formatMoney(conflict.total)} against {formatMoney(conflict.budget)}.{' '}
+            {firm
+              ? 'Nothing has been changed — these are the options.'
+              : 'Your budget is a guide, so this plan is still shown, ranked below plans that fit. Nothing has been changed — these are the options.'}
           </p>
+          {firm ? null : (
+            <button
+              type="button"
+              className="mt-2 text-xs font-medium text-teal-600 underline underline-offset-2"
+              onClick={() => onApply('Treat my budget as a hard limit')}
+            >
+              Make {formatMoney(conflict.budget)} a firm limit instead
+            </button>
+          )}
           <ul className="mt-3 space-y-2">
             {conflict.adjustments.map((adjustment) => (
               <li key={adjustment.id} className="rounded-lg bg-white/70 p-3">

@@ -60,6 +60,67 @@ jobs:
           npm run build -w @trip/api
           npm run build -w @trip/web
 
+  # The store contract, and the whole request path, against a real PostgreSQL:
+  # the migrations are applied to an empty database, so a migration that cannot
+  # apply fails here rather than on a deploy. Both stores (in-memory and
+  # PostgreSQL) run the same contract, which is what keeps "the in-memory store
+  # behaves like the database" true.
+  integration:
+    name: PostgreSQL integration and smoke run
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: trip
+          POSTGRES_PASSWORD: trip
+          POSTGRES_DB: trip_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trip -d trip_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Must name a disposable database: the tests empty its tables.
+      TEST_DATABASE_URL: postgresql://trip:trip@localhost:5432/trip_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema apps/api/prisma/schema.prisma
+
+      - name: Build packages
+        run: |
+          npm run build -w @trip/shared
+          npm run build -w @trip/providers
+          npm run build -w @trip/llm
+          npm run build -w @trip/engine
+
+      - name: Integration tests
+        run: npm run test:integration -w @trip/api
+
+      # The built API and worker against a throwaway database, driven over HTTP
+      # the way the web app drives it.
+      - name: Smoke run
+        run: |
+          npm run build -w @trip/api
+          npm run smoke -w @trip/api
+          # Again with the worker as its own process, the shape to expect in production.
+          npm run smoke -w @trip/api -- --split
+
   secrets:
     name: No committed credentials
     runs-on: ubuntu-latest

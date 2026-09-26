@@ -463,7 +463,7 @@ export class InMemoryRepository implements Store {
 
   async sweepExpired(now: Date): Promise<SweepResult> {
     const t = now.getTime();
-    const result: SweepResult = { authSessions: 0, loginChallenges: 0, idempotencyKeys: 0, runs: 0 };
+    const result: SweepResult = { abandonedUsers: 0, authSessions: 0, loginChallenges: 0, idempotencyKeys: 0, runs: 0 };
     for (const [id, s] of this.authSessions) {
       if (Date.parse(s.expiresAt) <= t) {
         this.authSessions.delete(id);
@@ -486,6 +486,15 @@ export class InMemoryRepository implements Store {
       if (!isActive(r) && r.finishedAt !== null && Date.parse(r.finishedAt) + RUN_RETENTION_MS <= t) {
         this.runs.delete(id);
         result.runs += 1;
+      }
+    }
+    for (const user of [...this.users.values()]) {
+      const hasSession = [...this.authSessions.values()].some((s) => s.userId === user.id);
+      const hasTrip = [...this.sessions.values()].some((s) => s.ownerId === user.id);
+      const settled = Date.parse(user.createdAt) < t - 60 * 60_000;
+      if (user.email === null && settled && !hasSession && !hasTrip) {
+        this.users.delete(user.id);
+        result.abandonedUsers += 1;
       }
     }
     return result;

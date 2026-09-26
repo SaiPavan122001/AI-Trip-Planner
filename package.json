@@ -16,7 +16,10 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "db:migrate": "npm run prisma:migrate -w @trip/api",
-    "db:generate": "npm run prisma:generate -w @trip/api"
+    "db:generate": "npm run prisma:generate -w @trip/api",
+    "dev:worker": "npm run dev:worker -w @trip/api",
+    "test:integration": "npm run test:integration -w @trip/api",
+    "smoke": "npm run smoke -w @trip/api"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

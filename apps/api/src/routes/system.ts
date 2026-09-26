@@ -54,21 +54,26 @@ export function registerSystemRoutes(app: FastifyInstance, ctx: AppContext): voi
   });
 
   /** Live probe of every connected provider. Slow by nature; not for the hot path. */
-  app.get('/v1/providers/health', async (_req, reply) => {
-    try {
-      const report = await ctx.registry.healthReport();
-      const anyDown = report.some((r) => r.result.status !== 'ok');
-      return reply.status(anyDown ? 207 : 200).send({
-        providers: report.map((r) => ({
-          id: r.id,
-          label: r.label,
-          kinds: r.kinds,
-          status: r.result.status,
-          detail: r.result.status === 'ok' ? `${r.result.data.latencyMs}ms` : r.result.message,
-        })),
-      });
-    } catch (err) {
-      return sendError(reply, err);
-    }
-  });
+  app.get(
+    '/v1/providers/health',
+    // Some probes make a real, billed request, so this is deliberately tight.
+    { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } },
+    async (_req, reply) => {
+      try {
+        const report = await ctx.registry.healthReport();
+        const anyDown = report.some((r) => r.result.status !== 'ok');
+        return reply.status(anyDown ? 207 : 200).send({
+          providers: report.map((r) => ({
+            id: r.id,
+            label: r.label,
+            kinds: r.kinds,
+            status: r.result.status,
+            detail: r.result.status === 'ok' ? `${r.result.data.latencyMs}ms` : r.result.message,
+          })),
+        });
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
 }
