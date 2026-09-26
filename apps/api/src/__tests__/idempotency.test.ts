@@ -44,7 +44,11 @@ function fakePrisma() {
       },
       deleteMany: async ({ where }: { where: Parameters<typeof matches>[1] }) => {
         let count = 0;
-        for (const [k, row] of claims) if (matches(row, where)) (claims.delete(k), (count += 1));
+        for (const [k, row] of claims) {
+          if (!matches(row, where)) continue;
+          claims.delete(k);
+          count += 1;
+        }
         return { count };
       },
     },
