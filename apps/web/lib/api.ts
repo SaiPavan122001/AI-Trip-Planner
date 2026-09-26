@@ -274,7 +274,14 @@ export interface TripSession {
   constraints: { budget: { total: Money | null; firm: boolean } };
   plans: TripPlan[];
   selectedPlanId: string | null;
-  providerNotes: Array<{ provider: string; providerLabel: string; status: string; message: string }>;
+  providerNotes: Array<{
+    provider: string;
+    providerLabel: string;
+    /** What the note is about (flights, hotels, ...). Absent on notes saved before it existed. */
+    capability?: string;
+    status: string;
+    message: string;
+  }>;
   decisionLog: Array<{ at: string; step: string; detail: string }>;
 }
 
@@ -390,8 +397,30 @@ export interface TripPlan {
     suggestions: string[];
   }>;
   tradeoffs: string[];
+  /** The decisions behind the plan and what was passed over. */
+  choices: PlanChoice[];
   priorityScore: number;
   scoreBreakdown: Record<string, number>;
+}
+
+export interface PlanChoice {
+  topic: 'outbound' | 'return' | 'stay' | 'room' | 'budget';
+  chosen: string;
+  why: string;
+  alternatives: Array<{ label: string; note: string }>;
+}
+
+export interface FeasibilityFinding {
+  code: string;
+  severity: 'blocker' | 'warning' | 'info';
+  message: string;
+  suggestions: string[];
+}
+
+/** Whether the trip can be done as asked, and what stands in the way when it cannot. */
+export interface FeasibilityReport {
+  status: 'feasible' | 'partial' | 'infeasible';
+  findings: FeasibilityFinding[];
 }
 
 export interface ModeSummary {
@@ -426,6 +455,7 @@ export interface SearchSummary {
   hotelsConsidered: number;
   hotelsFiltered: Array<{ hotelId: string; reason: string }>;
   budgetConflict: BudgetConflict | null;
+  feasibility: FeasibilityReport | null;
 }
 
 export interface AgentTraceEntry {

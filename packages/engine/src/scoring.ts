@@ -164,6 +164,12 @@ export interface HotelScoringContext {
   distanceKm: Map<string, number>;
   /** Modelled local transport cost for the whole stay, by hotel id. */
   transportCost: Map<string, Money>;
+  /**
+   * The rating a travel style points at, used when the traveller gave no
+   * minimum. A stated minimum always wins, and neither is a filter here: this
+   * only decides how much a property's rating counts in its score.
+   */
+  targetCategory?: number | null;
 }
 
 /**
@@ -188,7 +194,7 @@ export function scoreHotels(
 
   const costs = hotels.map(effectiveCost);
   const distances = hotels.map((h) => ctx.distanceKm.get(h.id) ?? 0);
-  const wantedCategory = ctx.profile.accommodation.minCategory;
+  const wantedCategory = ctx.profile.accommodation.minCategory ?? ctx.targetCategory ?? null;
 
   return hotels
     .map((hotel) => {

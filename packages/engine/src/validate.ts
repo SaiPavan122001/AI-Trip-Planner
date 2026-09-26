@@ -18,7 +18,7 @@ import {
 } from '@trip/shared';
 import { describeNeeds, unconfirmedHotelNeeds } from './accessibility.js';
 import { localParts, minutesBetween } from './time.js';
-import { timeWindowViolations } from './time-windows.js';
+import { smallHoursArrival, timeWindowViolations } from './time-windows.js';
 
 /**
  * Deterministic validation.
@@ -66,6 +66,7 @@ export function validateItinerary(input: ValidationInput): ValidationIssue[] {
   // legitimately contain meals and anything else; it is not a commitment to be
   // somewhere, so it cannot overlap them. Ordering is checked among the rest.
   issues.push(...checkSequencing(items.filter((i) => i.kind !== 'rest')));
+  issues.push(...checkCheckOut(input, items));
   issues.push(...checkDates(input));
   issues.push(...checkBudget(input));
   issues.push(...checkCompleteness(input));
@@ -115,6 +116,30 @@ function checkSequencing(items: ItineraryItem[]): ValidationIssue[] {
     }
   }
   return issues;
+}
+
+/**
+ * Checking out has to happen before the journey home leaves. A fixed check-out
+ * time that ignored an early departure used to put it hours after the
+ * traveller had gone, which is not an overlap and so was never caught.
+ */
+function checkCheckOut(input: ValidationInput, items: ItineraryItem[]): ValidationIssue[] {
+  const checkOut = items.find((i) => i.kind === 'check_out');
+  // The journey home is the last journey of the trip. (Offer ids are only unique
+  // within one search, so an outward and a return offer can share one.)
+  const homeward = input.inbound ? items.filter((i) => i.kind === 'transport').at(-1) : undefined;
+  if (!checkOut || !homeward) return [];
+  const late = minutesBetween(homeward.startUtc, checkOut.endUtc);
+  if (late <= 0) return [];
+  return [
+    {
+      code: 'check_out_after_departure',
+      severity: 'blocker',
+      message: `Check-out is planned to finish ${late} minutes after the journey home has left.`,
+      itemIds: [checkOut.id, homeward.id],
+      suggestions: ['Check out earlier, or choose a later journey home.'],
+    },
+  ];
 }
 
 function checkDates(input: ValidationInput): ValidationIssue[] {
@@ -248,6 +273,25 @@ function checkHardConstraints(input: ValidationInput): ValidationIssue[] {
         itemIds: [],
         suggestions: ['Choose a different departure, or change the time window.'],
       });
+    }
+  }
+
+  // The same definition of a late arrival the transport filter uses.
+  if (input.profile.transport.avoidRedEyeArrival) {
+    for (const [offer, arrival, leg] of [
+      [outbound, intent.destination.timezone, 'outbound'],
+      [inbound, intent.origin.timezone, 'return'],
+    ] as const) {
+      const at = offer ? smallHoursArrival(offer, { departure: arrival, arrival }) : null;
+      if (at) {
+        issues.push({
+          code: 'arrives_in_small_hours',
+          severity: 'blocker',
+          message: `The ${leg} journey arrives at ${at} local time, in the small hours, and you asked to avoid late arrivals.`,
+          itemIds: [],
+          suggestions: ['Choose an earlier journey, or drop the late-arrival requirement.'],
+        });
+      }
     }
   }
 
@@ -385,22 +429,31 @@ function checkTravelerNeeds(input: ValidationInput): ValidationIssue[] {
   }
 
   // A late arrival with nobody expecting you is the classic planning failure.
-  const lastTransport = [...input.items].reverse().find((i) => i.kind === 'transport');
-  if (lastTransport) {
-    const arrival = localParts(lastTransport.endUtc, input.intent.destination.timezone);
-    if (arrival.hour >= 23 || arrival.hour < 5) {
-      issues.push({
-        code: 'late_night_arrival',
-        severity: 'warning',
-        message: `You arrive at ${arrival.time} local time. Late arrivals mean fewer transfer options and a reception desk that may be unstaffed.`,
-        itemIds: [lastTransport.id],
-        suggestions: [
-          'Arrange the transfer in advance.',
-          'Tell the property you are arriving late so the room is held.',
-          'Ask for an earlier departure.',
-        ],
-      });
-    }
+  // It is the arrival at the destination that matters most (the journey home
+  // ends at your own door), but both are checked, each in the zone it lands in.
+  const { intent, outbound, inbound, items } = input;
+  for (const [offer, zone, leg] of [
+    [outbound, intent.destination.timezone, 'outbound'],
+    [inbound, intent.origin.timezone, 'return'],
+  ] as const) {
+    const at = offer ? smallHoursArrival(offer, { departure: zone, arrival: zone }) : null;
+    if (!offer || !at) continue;
+    const journeys = items.filter((i) => i.kind === 'transport');
+    const item = leg === 'outbound' ? journeys[0] : journeys.at(-1);
+    issues.push({
+      code: leg === 'outbound' ? 'late_night_arrival' : 'late_night_return',
+      severity: 'warning',
+      message:
+        leg === 'outbound'
+          ? `You arrive at ${at} local time. Late arrivals mean fewer transfer options and a reception desk that may be unstaffed.`
+          : `Your journey home arrives at ${at} local time, when onward transport may not be running.`,
+      itemIds: item ? [item.id] : [],
+      suggestions: [
+        'Arrange the transfer in advance.',
+        ...(leg === 'outbound' ? ['Tell the property you are arriving late so the room is held.'] : []),
+        'Ask for an earlier departure.',
+      ],
+    });
   }
   return issues;
 }

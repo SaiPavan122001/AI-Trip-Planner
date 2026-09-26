@@ -2,6 +2,7 @@
 
 import { use, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { CAPABILITY_LABEL, statusLabel } from '@trip/shared/provider-status';
 import {
   ApiClientError,
   api,
@@ -14,6 +15,7 @@ import {
 } from '@/lib/api';
 import { useRunWatcher } from '@/lib/useRunWatcher';
 import { BudgetPanel } from '@/components/BudgetPanel';
+import { FeasibilityPanel } from '@/components/FeasibilityPanel';
 import { ItineraryTimeline } from '@/components/ItineraryTimeline';
 import { ModifyBar } from '@/components/ModifyBar';
 import { AgentTrace, NarrativeCard } from '@/components/NarrativeCard';
@@ -296,6 +298,8 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
             </section>
           ) : null}
 
+          {search ? <FeasibilityPanel report={search.feasibility} hasPlans={plans.length > 0} /> : null}
+
           {search && plans.length > 0 ? (
             <TransportComparison
               modes={search.outbound.modes}
@@ -523,6 +527,12 @@ function Tag({ children, tone = 'neutral' }: { children: React.ReactNode; tone?:
   );
 }
 
+/** What the note is about, then who said it: two capabilities from one vendor read as two notes. */
+function noteHeading(note: TripSession['providerNotes'][number]): string {
+  const about = note.capability ? CAPABILITY_LABEL[note.capability as keyof typeof CAPABILITY_LABEL] : undefined;
+  return about && about !== note.providerLabel ? `${about} (${note.providerLabel})` : note.providerLabel;
+}
+
 function ProviderNotes({ trip }: { trip: TripSession }) {
   if (trip.providerNotes.length === 0) return null;
   return (
@@ -533,9 +543,9 @@ function ProviderNotes({ trip }: { trip: TripSession }) {
       </p>
       <ul className="mt-4 space-y-3">
         {trip.providerNotes.map((note, i) => (
-          <li key={`${note.provider}-${i}`} className="border-l-2 border-sand-300 pl-3">
+          <li key={`${note.provider}-${note.capability ?? ''}-${i}`} className="border-l-2 border-sand-300 pl-3">
             <p className="text-xs uppercase tracking-wide text-ink-faint">
-              {note.providerLabel} · {note.status.replace(/_/g, ' ')}
+              {noteHeading(note)} · {statusLabel(note.status)}
             </p>
             <p className="mt-0.5 text-sm text-ink-soft">{note.message}</p>
           </li>

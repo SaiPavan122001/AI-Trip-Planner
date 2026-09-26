@@ -1,0 +1,110 @@
+{
+  "meta": { "count": 2 },
+  "data": [
+    {
+      "type": "flight-offer",
+      "id": "1",
+      "source": "GDS",
+      "numberOfBookableSeats": 7,
+      "itineraries": [
+        {
+          "duration": "PT1H15M",
+          "segments": [
+            {
+              "departure": { "iataCode": "HYD", "terminal": "1", "at": "2030-11-10T08:00:00" },
+              "arrival": { "iataCode": "BLR", "terminal": "2", "at": "2030-11-10T09:15:00" },
+              "carrierCode": "6E",
+              "number": "123",
+              "aircraft": { "code": "320" },
+              "duration": "PT1H15M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": {
+        "currency": "INR",
+        "total": "9600.00",
+        "base": "8100.00",
+        "grandTotal": "9600.00",
+        "fees": [{ "amount": "0.00", "type": "SUPPLIER" }]
+      },
+      "pricingOptions": { "refundableFare": false },
+      "validatingAirlineCodes": ["6E"],
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "price": { "currency": "INR", "total": "4800.00" },
+          "fareDetailsBySegment": [
+            {
+              "segmentId": "1",
+              "cabin": "ECONOMY",
+              "class": "Y",
+              "includedCheckedBags": { "quantity": 1 }
+            }
+          ]
+        },
+        {
+          "travelerId": "2",
+          "fareOption": "STANDARD",
+          "travelerType": "ADULT",
+          "price": { "currency": "INR", "total": "4800.00" },
+          "fareDetailsBySegment": [
+            {
+              "segmentId": "1",
+              "cabin": "ECONOMY",
+              "class": "Y",
+              "includedCheckedBags": { "quantity": 1 }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "flight-offer",
+      "id": "2",
+      "source": "GDS",
+      "numberOfBookableSeats": 3,
+      "itineraries": [
+        {
+          "duration": "PT4H5M",
+          "segments": [
+            {
+              "departure": { "iataCode": "HYD", "at": "2030-11-10T06:30:00" },
+              "arrival": { "iataCode": "MAA", "at": "2030-11-10T07:50:00" },
+              "carrierCode": "AI",
+              "number": "544",
+              "duration": "PT1H20M",
+              "numberOfStops": 0
+            },
+            {
+              "departure": { "iataCode": "MAA", "at": "2030-11-10T09:00:00" },
+              "arrival": { "iataCode": "BLR", "at": "2030-11-10T10:35:00" },
+              "carrierCode": "AI",
+              "number": "509",
+              "duration": "PT1H35M",
+              "numberOfStops": 0
+            }
+          ]
+        }
+      ],
+      "price": { "currency": "INR", "total": "7400.00", "grandTotal": "7400.00" },
+      "pricingOptions": { "refundableFare": true },
+      "travelerPricings": [
+        {
+          "travelerId": "1",
+          "price": { "currency": "INR", "total": "3700.00" },
+          "fareDetailsBySegment": [
+            { "segmentId": "1", "cabin": "ECONOMY", "class": "K" },
+            { "segmentId": "2", "cabin": "ECONOMY", "class": "K" }
+          ]
+        }
+      ]
+    }
+  ],
+  "dictionaries": {
+    "carriers": { "6E": "INDIGO", "AI": "AIR INDIA" }
+  }
+}

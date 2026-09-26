@@ -1,6 +1,7 @@
 import {
   formatMoney,
   type ConstraintSet,
+  type FeasibilityReport,
   type ProviderNote,
   type RequirementsState,
   type TransportOffer,
@@ -51,6 +52,8 @@ export interface SearchFacts {
   guidance: string[];
   /** Why parts of the search came back empty. */
   notes: string[];
+  /** What stands in the way of doing the trip as asked (blockers and warnings), from the planner's own checks. */
+  feasibility: string[];
 }
 
 export interface FactsInput {
@@ -62,6 +65,7 @@ export interface FactsInput {
   pinsReleased: Array<{ component: string; reason: string }>;
   guidanceApplied: string[];
   providerNotes: ProviderNote[];
+  feasibility?: FeasibilityReport | null;
 }
 
 /** Longest provider-supplied name repeated in an explanation. */
@@ -126,6 +130,10 @@ export function buildFacts(input: FactsInput): SearchFacts {
     unsatisfiedPreferences: recommendedPlan ? unsatisfied(recommendedPlan, input.requirements) : [],
     guidance: input.guidanceApplied,
     notes: [...new Set(input.providerNotes.map((n) => safeText(n.message, WITHHELD, 300)))].slice(0, 8),
+    feasibility: (input.feasibility?.findings ?? [])
+      .filter((f) => f.severity !== 'info')
+      .map((f) => safeText(f.message, WITHHELD, 400))
+      .slice(0, 5),
   };
 }
 

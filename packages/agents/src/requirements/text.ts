@@ -98,48 +98,8 @@ export function findDateSpans(text: string, today: string): Array<{ iso: string;
     .map((f) => ({ iso: f.iso, text: f.text }));
 }
 
-const UNITS: Record<string, number> = {
-  k: 1_000,
-  thousand: 1_000,
-  lakh: 100_000,
-  lakhs: 100_000,
-  lac: 100_000,
-  lacs: 100_000,
-  crore: 10_000_000,
-  crores: 10_000_000,
-  cr: 10_000_000,
-};
-
-/**
- * An amount in rupees the text states: "₹80,000", "Rs 80000", "80k", "1.5
- * lakh", "INR 2,50,000". Null when it states none. The first amount found is
- * the one returned.
- */
-export function parseRupees(text: string): number | null {
-  const t = text.toLowerCase();
-  const NUM = '(\\d[\\d,]*(?:\\.\\d+)?)';
-  const UNIT = '(k|thousand|lakhs?|lacs?|crores?|cr)';
-  // In order of how sure the words make it that a number is money: a rupee
-  // marker, then a rupee word after it, then a unit ("80k"), and only last a
-  // bare number that sits right after a money word ("budget 80000"). A number
-  // that is a date, a head-count or a day is never picked up by accident.
-  const attempts: Array<[RegExp, number, number | null]> = [
-    [new RegExp(`(?:₹|\\brs\\.?|\\binr)\\s*${NUM}(?:\\s*${UNIT}\\b)?`), 1, 2],
-    [new RegExp(`\\b${NUM}\\s*(?:rupees?|rs\\b|inr\\b)`), 1, null],
-    [new RegExp(`\\b${NUM}\\s*${UNIT}\\b`), 1, 2],
-    [new RegExp(`\\b(?:budget|spend|spending|cost|costs|under|below|within|exceed|limit|maximum|max|at most|no more than)\\b[^0-9.,;!?]{0,20}${NUM}(?:\\s*${UNIT}\\b)?`), 1, 2],
-  ];
-  for (const [re, numGroup, unitGroup] of attempts) {
-    const m = t.match(re);
-    if (!m) continue;
-    const base = Number(m[numGroup]!.replace(/,/g, ''));
-    if (!Number.isFinite(base)) continue;
-    const unit = unitGroup === null ? undefined : m[unitGroup];
-    const amount = Math.round(base * (unit ? UNITS[unit]! : 1));
-    if (amount > 0) return amount;
-  }
-  return null;
-}
+// One reader for amounts, shared with the change-request fallback in @trip/llm.
+export { parseRupees } from '@trip/shared';
 
 const NUMBER_WORDS: Record<string, number> = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,

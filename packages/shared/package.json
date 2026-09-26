@@ -13,6 +13,10 @@
     "./currency": {
       "types": "./dist/currency.d.ts",
       "default": "./dist/currency.js"
+    },
+    "./provider-status": {
+      "types": "./dist/provider-status.d.ts",
+      "default": "./dist/provider-status.js"
     }
   },
   "scripts": {

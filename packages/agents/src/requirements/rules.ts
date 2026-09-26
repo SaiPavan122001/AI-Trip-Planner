@@ -70,7 +70,8 @@ export function draftFromRules(message: string, today: string): RequirementsDraf
   for (const clause of message.split(/[.;!?\n]/)) {
     const amount = parseRupees(clause);
     if (amount === null) continue;
-    if (!/(?:₹|rs\.?|inr|budget|spend|under|within|below|exceed|limit|maximum|max|at most|no more)/i.test(clause)) continue;
+    // Whole words: "tours" ends in "rs" and "understand" starts with "under".
+    if (!/(?:₹|\brs\b|\binr\b|\bbudget\b|\bspend|\bunder\b|\bwithin\b|\bbelow\b|\bexceed|\blimit\b|\bmaximum\b|\bmax\b|\bat most\b|\bno more\b)/i.test(clause)) continue;
     draft.budgetRupees = amount;
     if (FIRM_CUE.test(clause)) {
       draft.budgetFirm = true;

@@ -181,6 +181,13 @@ export function validatePlan(plan: TripPlan, input: ValidationInput): Validation
     }
   }
 
+  // ---- leaving the hotel --------------------------------------------------------------------
+  const checkOut = ordered.find((i) => i.kind === 'check_out');
+  const homeward = plan.returnTransport ? ordered.filter((i) => i.kind === 'transport').at(-1) : undefined;
+  if (checkOut && homeward && Date.parse(checkOut.endUtc) > Date.parse(homeward.startUtc)) {
+    add(blocker('check_out_after_departure', 'Check-out is planned to finish after the journey home has left.', [checkOut.id, homeward.id]));
+  }
+
   // ---- hard constraints -----------------------------------------------------------------
   const excluded = new Set(
     constraints.hard.filter((h) => h.kind === 'excluded_transport_mode').map((h) => String(h.value)),

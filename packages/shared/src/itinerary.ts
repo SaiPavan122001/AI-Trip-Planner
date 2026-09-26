@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { Money } from './money.js';
 import { ActivityOffer, HotelOffer, HotelRoomOffer, TransferOffer, TransportOffer } from './offers.js';
+import { ProviderCapability } from './provider-result.js';
 import { IsoDate } from './trip.js';
 
 /**
@@ -107,6 +108,40 @@ export const SelectedHotel = z.object({
 });
 export type SelectedHotel = z.infer<typeof SelectedHotel>;
 
+/**
+ * One decision the planner took while putting a plan together, and why: what
+ * it chose, the reason in plain words, and what it passed over. Built in code
+ * from the offers and rules that were actually applied, so the explanation
+ * cannot say more than the search found.
+ */
+export const PlanChoice = z.object({
+  topic: z.enum(['outbound', 'return', 'stay', 'room', 'budget']),
+  chosen: z.string(),
+  why: z.string(),
+  alternatives: z.array(z.object({ label: z.string(), note: z.string() })).default([]),
+});
+export type PlanChoice = z.infer<typeof PlanChoice>;
+
+/**
+ * What the search found out about whether the trip can be done as asked.
+ * A finding never changes a plan; it says what cannot be satisfied and why, so
+ * the traveller can decide what to relax.
+ */
+export const FeasibilityFinding = z.object({
+  code: z.string(),
+  severity: z.enum(['blocker', 'warning', 'info']),
+  message: z.string(),
+  suggestions: z.array(z.string()).default([]),
+});
+export type FeasibilityFinding = z.infer<typeof FeasibilityFinding>;
+
+export const FeasibilityReport = z.object({
+  /** feasible: nothing stands in the way. partial: plans exist but something could not be met or searched. infeasible: no plan could be built. */
+  status: z.enum(['feasible', 'partial', 'infeasible']),
+  findings: z.array(FeasibilityFinding).default([]),
+});
+export type FeasibilityReport = z.infer<typeof FeasibilityReport>;
+
 export const PlanArchetype = z.enum(['budget', 'balanced', 'comfort', 'custom']);
 export type PlanArchetype = z.infer<typeof PlanArchetype>;
 
@@ -130,9 +165,18 @@ export const TripPlan = z.object({
   /** Per-priority scores, so the UI can explain why a plan ranks where it does. */
   scoreBreakdown: z.record(z.string(), z.number()).default({}),
   tradeoffs: z.array(z.string()).default([]),
+  /** The decisions behind this plan and what was passed over, for the traveller to check. */
+  choices: z.array(PlanChoice).default([]),
   /** Provider failures that shaped this plan, surfaced rather than hidden. */
   providerNotes: z
-    .array(z.object({ provider: z.string(), status: z.string(), message: z.string() }))
+    .array(
+      z.object({
+        provider: z.string(),
+        capability: ProviderCapability.optional(),
+        status: z.string(),
+        message: z.string(),
+      }),
+    )
     .default([]),
   generatedAt: z.string().datetime(),
 });

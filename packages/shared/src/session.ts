@@ -3,9 +3,10 @@ import { ConstraintSet } from './constraints.js';
 import { Money } from './money.js';
 import { IsoDate, JourneyClassification, LocalTime, TransportMode, TripIntent } from './trip.js';
 import { Priority, TravelerProfile } from './traveler.js';
-import { TripPlan } from './itinerary.js';
+import { FeasibilityReport, TripPlan } from './itinerary.js';
 import { QuestionnaireState } from './questions.js';
 import { AgentTraceEntry, PlanNarrative } from './guidance.js';
+import { ProviderCapability } from './provider-result.js';
 import { RequirementsState } from './requirements.js';
 
 /**
@@ -28,6 +29,11 @@ export type PlanningStage = z.infer<typeof PlanningStage>;
 export const ProviderNote = z.object({
   provider: z.string(),
   providerLabel: z.string(),
+  /**
+   * What the note is about (flights, hotels, ...). Two capabilities served by
+   * one vendor stay two notes. Absent on notes saved before this existed.
+   */
+  capability: ProviderCapability.optional(),
   status: z.string(),
   message: z.string(),
   occurredAt: z.string().datetime(),
@@ -188,6 +194,8 @@ export const SearchSummary = z.object({
   hotelsConsidered: z.number().int().min(0),
   hotelsFiltered: z.array(z.unknown()).default([]),
   budgetConflict: z.unknown().nullable().default(null),
+  /** Whether the trip can be done as asked, and what stands in the way when it cannot. */
+  feasibility: FeasibilityReport.nullable().default(null),
 });
 export type SearchSummary = z.infer<typeof SearchSummary>;
 

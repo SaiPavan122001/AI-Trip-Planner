@@ -216,16 +216,42 @@ describe('when a search goes wrong', () => {
     expect(failed.error.message).toMatch(/too long/);
   });
 
-  it('fails a crash with a plain message and keeps the detail out of the response', async () => {
+  it('carries on when one provider crashes: the search succeeds and says that source failed', async () => {
     const { app, ctx } = await withTravel({}, async () => {
       throw new Error('connect ECONNREFUSED 10.0.0.5:5432 secret-internal-detail');
     });
     const started = (await plan(app)).json().run as { id: string };
     await ctx.worker.drain();
 
+    const finished = await run(app, started.id);
+    expect(finished.json().run).toMatchObject({ status: 'succeeded' });
+    const saved = (await trip(app)).json().trip;
+    // The journey could not be searched, so the plans have the stay and the trip says why there is no flight.
+    expect(saved.providerNotes).toEqual(
+      expect.arrayContaining([expect.objectContaining({ capability: 'flights', status: 'unavailable' })]),
+    );
+    expect(JSON.stringify(saved)).not.toMatch(/ECONNREFUSED|secret-internal-detail|10.0.0.5/);
+    expect(saved.lastSearch.feasibility.findings.map((f: { code: string }) => f.code)).toContain('outward_providers_failed');
+  });
+
+  it('fails a crash in the search itself with a plain message and keeps the detail out of the response', async () => {
+    const { app, ctx, repository } = await withTravel();
+    const original = repository.updateSession.bind(repository);
+    let crashed = false;
+    repository.updateSession = async (session) => {
+      // Saving the plans is what the run does last; a database fault there is not a provider's.
+      if (!crashed && session.plans.length > 0) {
+        crashed = true;
+        throw new Error('connect ECONNREFUSED 10.0.0.5:5432 secret-internal-detail');
+      }
+      return original(session);
+    };
+    const started = (await plan(app)).json().run as { id: string };
+    await ctx.worker.drain();
+
     const failed = await run(app, started.id);
     expect(failed.json().run).toMatchObject({ status: 'failed', error: { code: 'planning_failed' } });
-    expect(failed.body).not.toMatch(/ECONNREFUSED|secret-internal-detail|10\.0\.0\.5/);
+    expect(failed.body).not.toMatch(/ECONNREFUSED|secret-internal-detail|10.0.0.5/);
     expect(failed.json().run.error.message).toMatch(/Nothing was booked/);
     // The trip is still there and can be searched again.
     expect((await plan(app)).statusCode).toBe(202);

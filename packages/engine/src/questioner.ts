@@ -46,6 +46,8 @@ interface QuestionDef {
 const MAX_ROOMS = 10;
 /** Longest free-text location preference accepted, after trimming. */
 const LOCATION_MAX_LENGTH = 120;
+/** Longest free-text "anything else" accepted, after trimming. */
+const OTHER_REQUIREMENTS_MAX_LENGTH = 300;
 
 const nights = (ctx: QuestionContext) =>
   nightsBetween(ctx.intent.departureDate, ctx.intent.returnDate);
@@ -148,6 +150,41 @@ const DEFS: QuestionDef[] = [
       required: true,
       reason:
         'Travel style sets sensible defaults for dozens of smaller choices so you are not asked about each one.',
+      stage: 'style',
+    }),
+  },
+  {
+    key: 'safety.preferences',
+    when: () => true,
+    requiredForPlanning: false,
+    build: () => ({
+      key: 'safety.preferences',
+      kind: 'multi_choice',
+      prompt: 'Is there anything about safety that should shape the plan?',
+      helpText:
+        'Choose any that apply, or continue with none. These change how the trip is put together; the planner does not rate destinations, and says so where it has nothing to go on.',
+      options: [
+        {
+          value: 'safety_first',
+          label: 'Put safety first when options are close',
+          description: 'Safety is weighed ahead of everything else you rank.',
+          implication:
+            'Favours fewer changes, arriving in daylight and better-reviewed places to stay where reviews are published.',
+        },
+        {
+          value: 'no_late_arrival',
+          label: 'Avoid arriving late at night or in the small hours',
+          description: 'Nothing that arrives between 11pm and 5am.',
+          implication: 'Rules out those options, and the planner tells you which were left out.',
+        },
+      ],
+      minSelections: 0,
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason:
+        'Late arrivals and long connections are the usual reasons a plan feels unsafe, and they can be checked; anything else about safety cannot, so it is not guessed at.',
       stage: 'style',
     }),
   },
@@ -529,6 +566,26 @@ const DEFS: QuestionDef[] = [
       stage: 'budget',
     }),
   },
+  {
+    key: 'other.requirements',
+    when: () => true,
+    requiredForPlanning: false,
+    build: () => ({
+      key: 'other.requirements',
+      kind: 'text',
+      prompt: 'Is there anything else the plan should take into account?',
+      helpText:
+        'Anything not covered above. It is shown on every plan so you can confirm it; the planner cannot check free text against its results and will not claim it has been met.',
+      maxLength: OTHER_REQUIREMENTS_MAX_LENGTH,
+      options: [],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason: 'Some requests do not fit a question. Keeping them visible beats dropping them silently.',
+      stage: 'traveler_needs',
+    }),
+  },
 ];
 
 const MODE_LABELS: Record<string, string> = {
@@ -786,6 +843,15 @@ export function applyAnswer(
       break;
     case 'traveler.children_needs':
       next.special.assistanceNotes = answer.skipped ? blank.special.assistanceNotes : (v as string[]);
+      break;
+    case 'safety.preferences': {
+      const chosen = answer.skipped ? [] : (v as string[]);
+      next.special.safetyFirst = chosen.includes('safety_first');
+      next.transport.avoidRedEyeArrival = chosen.includes('no_late_arrival');
+      break;
+    }
+    case 'other.requirements':
+      next.special.otherRequirements = answer.skipped || v === null ? [] : [String(v)];
       break;
     case 'traveler.dietary':
       next.special.dietary = answer.skipped

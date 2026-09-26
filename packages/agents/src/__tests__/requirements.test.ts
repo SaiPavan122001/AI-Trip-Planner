@@ -324,3 +324,31 @@ describe('from requirements to a trip and to answers', () => {
     expect(mapped.unmapped[0]!.reason).toMatch(/Nothing this journey allows is left/);
   });
 });
+
+describe('regression: a date or a head count is not a budget, and "confirm" is not "firm"', () => {
+  it('does not read 12 December as twelve rupees', async () => {
+    const { data } = await ok('Budget trip from Pune to Goa on 12 December for 2 people');
+    expect(data.trip.departureDate).toBe('2030-12-12');
+    expect(data.budget.total).toBeNull();
+  });
+
+  it('does not read a head count or a stay as a limit', async () => {
+    const people = (await ok('from Pune to Goa on 12 December, at most 4 people')).data;
+    expect(people.budget.total).toBeNull();
+    const nights = (await ok('from Pune to Goa on 12 December, max 3 nights')).data;
+    expect(nights.budget.total).toBeNull();
+  });
+
+  it('still reads a real amount next to a date', async () => {
+    const { data } = await ok('a budget trip from Pune to Goa on 12 December, budget ₹60,000');
+    expect(data.budget.total).toEqual({ amount: 6_000_000, currency: 'INR' });
+  });
+
+  it('does not treat "confirm" as saying the budget is firm', async () => {
+    const { data } = await ok('from Pune to Goa on 12 December for 2 people, budget around ₹60,000. Please confirm the plan with me first.');
+    expect(data.budget.total).toEqual({ amount: 6_000_000, currency: 'INR' });
+    expect(data.budget.firm).toBe(false);
+    const unstated = (await ok('from Pune to Goa on 12 December for 2 people, budget ₹60,000. Please confirm before you search.')).data;
+    expect(unstated.budget.firm).toBeNull();
+  });
+});

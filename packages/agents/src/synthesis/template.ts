@@ -36,12 +36,14 @@ export function summaryText(facts: SearchFacts): string {
   const recommended = facts.plans.find((p) => p.planId === facts.recommendedPlanId);
   if (facts.plans.length === 0) {
     lines.push(`No plan could be built for ${facts.trip}.`);
-    if (facts.notes.length > 0) lines.push(facts.notes.join(' '));
+    if (facts.feasibility.length > 0) lines.push(facts.feasibility.join(' '));
+    else if (facts.notes.length > 0) lines.push(facts.notes.join(' '));
   } else if (!recommended) {
     lines.push(`For ${facts.trip}, none of the plans found can be carried out as they stand. Each one says why.`);
   } else {
     lines.push(`For ${facts.trip}, ${recommended.label} is the plan that best fits what you asked for, at ${recommended.total} in total.`);
     lines.push(recommended.budget);
+    if (facts.feasibility.length > 0) lines.push(`Worth knowing: ${facts.feasibility.slice(0, 2).join(' ')}`);
   }
   if (facts.pinsReleased.length > 0) {
     lines.push(`Some things you asked to keep could not be kept: ${facts.pinsReleased.join(' ')}`);

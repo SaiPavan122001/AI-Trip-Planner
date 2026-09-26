@@ -1,0 +1,9 @@
+{
+  "routes": [
+    {
+      "distanceMeters": 9800,
+      "duration": "1620s",
+      "polyline": { "encodedPolyline": "fixturepolyline" }
+    }
+  ]
+}

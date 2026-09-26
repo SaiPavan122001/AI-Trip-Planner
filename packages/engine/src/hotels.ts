@@ -3,9 +3,10 @@ import {
   compare,
   findHard,
   haversineKm,
-  isOk,
   multiply,
   nightsBetween,
+  noteFromFailure,
+  plannerNote,
   seatedTravelers,
   toMajor,
   type ActivityOffer,
@@ -21,7 +22,9 @@ import {
 import { describeNeeds, unconfirmedHotelNeeds } from './accessibility.js';
 import { budgetCeiling } from './constraints.js';
 import { keepSupportedHotels } from './currency.js';
-import { cheapestRoom, scoreHotels, type ScoredCandidate } from './scoring.js';
+import { sweepProviders } from './provider-calls.js';
+import { chooseRoom, styleTargets, withEffectivePriorities } from './optimize.js';
+import { scoreHotels, type ScoredCandidate } from './scoring.js';
 
 /**
  * Accommodation search and selection.
@@ -77,19 +80,8 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
     return { ...emptyResult(), notes: [] };
   }
   if (registry.hotels.length === 0) {
-    const missing = registry.missingCapabilityNote('Hotels', ['amadeus']);
-    return {
-      ...emptyResult(),
-      notes: [
-        {
-          provider: missing.provider,
-          providerLabel: missing.providerLabel,
-          status: missing.status,
-          message: missing.message,
-          occurredAt: missing.occurredAt,
-        },
-      ],
-    };
+    const missing = registry.missingCapabilityNote('hotels', ['amadeus']);
+    return { ...emptyResult(), notes: [noteFromFailure(missing, 'hotels')] };
   }
 
   const centre = activityCentroid(activities, intent.destination.coordinates);
@@ -98,14 +90,13 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
     ? Math.round(toMajor(accommodationBudget) / nights)
     : null;
 
-  const notes: ProviderNote[] = [];
-  const offers: HotelOffer[] = [];
-
-  for (const provider of registry.hotels) {
-    const res = await provider.searchHotels({
+  // Narrowed here, because a callback would not keep the check made above.
+  const checkOut = intent.returnDate;
+  const sweep = await sweepProviders(registry, registry.hotels, 'hotels', 'searchHotels', (provider) =>
+    provider.searchHotels({
       destination: intent.destination,
       checkIn: intent.departureDate,
-      checkOut: intent.returnDate,
+      checkOut,
       rooms: profile.accommodation.rooms,
       party: intent.travelers,
       minCategory: profile.accommodation.minCategory,
@@ -117,28 +108,10 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
       radiusKm: profile.accommodation.maxDistanceToActivitiesKm ?? 15,
       limit: 30,
       ...(deps.signal ? { signal: deps.signal } : {}),
-    });
-    if (isOk(res)) {
-      offers.push(...res.data);
-      for (const warning of res.warnings) {
-        notes.push({
-          provider: res.provenance.provider,
-          providerLabel: res.provenance.providerLabel,
-          status: 'ok',
-          message: warning,
-          occurredAt: res.provenance.retrievedAt,
-        });
-      }
-    } else {
-      notes.push({
-        provider: res.provider,
-        providerLabel: res.providerLabel,
-        status: res.status,
-        message: res.message,
-        occurredAt: res.occurredAt,
-      });
-    }
-  }
+    }),
+  );
+  const offers: HotelOffer[] = sweep.data;
+  const notes: ProviderNote[] = [...sweep.notes];
 
   // Currency first: nothing below may compare a rupee rate with another.
   const supported = keepSupportedHotels(offers);
@@ -154,13 +127,26 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
     if (modelled) transportCost.set(hotel.id, modelled);
   }
 
-  const candidates = scoreHotels(kept, { profile, distanceKm, transportCost });
+  // Scored on what the traveller ranked, or on what their travel style implies
+  // when they ranked nothing, so a luxury trip is not scored on price alone.
+  const candidates = scoreHotels(kept, {
+    profile: withEffectivePriorities(profile),
+    distanceKm,
+    transportCost,
+    targetCategory: styleTargets(profile).targetCategory,
+  });
   const best = candidates[0]?.candidate ?? null;
 
   const selected: SelectedHotel | null = best
     ? {
         hotel: best,
-        room: cheapestRoom(best),
+        room: chooseRoom(best, {
+          archetype: 'balanced',
+          profile,
+          constraints,
+          rooms: profile.accommodation.rooms,
+          guests: seatedTravelers(intent.travelers),
+        }).room,
         rooms: profile.accommodation.rooms,
         checkIn: intent.departureDate,
         checkOut: intent.returnDate,
@@ -176,15 +162,15 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
     const found = `${offers.length} propert${offers.length === 1 ? 'y was' : 'ies were'} found but none met your requirements; the reason for each is listed.`;
     const accessibilityNeeds = findHard(constraints, 'required_accessibility')?.value ?? [];
     const byAccessibility = filtered.some((f) => f.reason.startsWith('Does not publish that it offers'));
-    notes.push({
-      provider: 'engine',
-      providerLabel: 'Planner',
-      status: 'no_availability',
-      message: byAccessibility
-        ? `${found} Hotel providers rarely publish accessibility details, so properties that do not state ${describeNeeds(accessibilityNeeds)} were not included. Contacting properties directly is the most reliable way to confirm.`
-        : `${found} Relaxing one of them, such as the star rating or cancellation policy, would open more options.`,
-      occurredAt: new Date().toISOString(),
-    });
+    notes.push(
+      plannerNote(
+        byAccessibility
+          ? `${found} Hotel providers rarely publish accessibility details, so properties that do not state ${describeNeeds(accessibilityNeeds)} were not included. Contacting properties directly is the most reliable way to confirm.`
+          : `${found} Relaxing one of them, such as the star rating or cancellation policy, would open more options.`,
+        'no_availability',
+        'hotels',
+      ),
+    );
   }
 
   return { candidates, selected, notes, filtered, distanceKm, localTransportCost: transportCost };
@@ -271,7 +257,21 @@ function filterHotels(
       continue;
     }
 
-    const cheapest = [...usableRooms].sort((a, b) => compare(a.totalPrice, b.totalPrice))[0]!;
+    // Occupancy is a hard requirement: four people do not go into one double
+    // just because the rate is attractive. It is checked room by room, so a
+    // property whose cheapest room is too small is still kept for the larger
+    // room it also has, and only dropped when none of its rooms will do.
+    const sleepsParty = usableRooms.filter((r) => r.maxOccupancy === null || r.maxOccupancy * rooms >= guests);
+    if (sleepsParty.length === 0) {
+      const largest = Math.max(...usableRooms.map((r) => r.maxOccupancy ?? 0));
+      filtered.push({
+        hotelId: hotel.id,
+        reason: `Rooms here sleep ${largest} at most, which is not enough for ${guests} guest(s) in ${rooms} room(s).`,
+      });
+      continue;
+    }
+
+    const cheapest = [...sleepsParty].sort((a, b) => compare(a.totalPrice, b.totalPrice))[0]!;
     if (accommodationBudget) {
       // A rate that cannot be compared with the budget cannot be shown to
       // meet it; skipping the check would quietly relax a hard constraint.
@@ -282,27 +282,17 @@ function filterHotels(
         });
         continue;
       }
-      if (compare(cheapest.totalPrice, accommodationBudget) > 0) {
+      // Every room booked is paid for, so it is the whole booking that has to fit.
+      if (compare(multiply(cheapest.totalPrice, rooms), accommodationBudget) > 0) {
         filtered.push({
           hotelId: hotel.id,
-          reason: `Cheapest rate for ${nights} night(s) is more than your firm budget on its own.`,
+          reason: `Cheapest rate for ${nights} night(s)${rooms > 1 ? ` in ${rooms} rooms` : ''} is more than your firm budget on its own.`,
         });
         continue;
       }
     }
 
-    // Occupancy is a hard requirement: four people do not go into one double
-    // just because the rate is attractive.
-    const occupancyOk = cheapest.maxOccupancy === null || cheapest.maxOccupancy * rooms >= guests;
-    if (!occupancyOk) {
-      filtered.push({
-        hotelId: hotel.id,
-        reason: `Rooms here sleep ${cheapest.maxOccupancy}, which is not enough for ${guests} guest(s) in ${rooms} room(s).`,
-      });
-      continue;
-    }
-
-    kept.push({ ...hotel, rooms: usableRooms });
+    kept.push({ ...hotel, rooms: sleepsParty });
   }
   return { kept, filtered };
 }

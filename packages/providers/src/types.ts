@@ -161,7 +161,10 @@ export interface RoutingProvider extends BaseProvider {
 export interface TransferSearchRequest {
   from: { name: string; coordinates: Coordinates };
   to: { name: string; coordinates: Coordinates };
+  /** When the transfer starts, as an instant. */
   at: string;
+  /** IANA zone where it happens, so a night tariff is applied by the local clock, not the server's. */
+  timezone: string;
   party: PartySize;
   luggagePieces: number;
   accessibleRequired: boolean;

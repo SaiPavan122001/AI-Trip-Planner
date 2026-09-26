@@ -57,6 +57,23 @@ Wayfare is built around that coupling.
                  Alternative plans (budget / balanced / comfort)
 ```
 
+The last two boxes are more than a sort. **Choosing** what goes into each plan is the deterministic
+optimiser (`optimize.ts`): three readings of "best" (cheapest known cost; fewest changes and shortest
+time; the best fit for what the traveller ranked, or for their travel style when they ranked nothing),
+each over the same real options. It is **not** "pick the cheapest": Budget is one reading of three, the
+travel style moves the balanced pick (a luxury trip is not scored on price alone), a room is chosen for
+what was asked (breakfast, room type, sleeping the whole party) before it is chosen for price, and a
+**firm total budget is kept whenever a combination fits it** by taking the most preferred combination
+of journey, return and stay whose known cost fits, and reporting the closest (marked as breaking the
+limit) when none does. Every plan carries `choices`: what it chose, why, and what it passed over, built
+in code from the offers and rules actually applied.
+
+**Feasibility** (`feasibility.ts`) reads what the search found and says whether the trip can be done as
+asked, changing nothing: which requirement ruled out every journey (with the reasons), that a source
+failed and options may be hidden, that a stay could not be searched (not connected) versus found none,
+that even the cheapest journey and stay found cost more than the budget (in numbers, with what to
+raise), rooms that may not sleep the group. It is on `lastSearch.feasibility` and in the explanation.
+
 Three orderings in that diagram are deliberate and load-bearing:
 
 **Classification precedes questioning.** "Would you consider a train?" is a nonsense question for
@@ -263,6 +280,15 @@ what the traveller wrote
 **Where untrusted text goes.** The traveller's message reaches the Requirements Agent as data only. The traveller's quoted words reach the guidance agents as data only. Facts (which include provider-supplied names and notes) reach the Synthesis Agent as data only. Nothing external is ever concatenated into an instruction, and nothing an agent returns is acted on before it has been checked. This establishes the boundaries; it is not a complete defence against prompt injection, and the design depends on agents having too little authority for manipulating them to be worth much.
 
 ---
+
+## Provider failures
+
+Every provider call goes through the registry's `ProviderPolicy`, and every capability is asked of all
+its providers at once. A provider that throws, hangs, is rate limited, answers with nothing, or answers
+with data that does not match its schema costs the search *that provider's results* and adds a note
+that says which of those it was, for which capability. The search still returns the plans it can build,
+and the run fails only when something the planner itself owns breaks. Retry, fallback, rate limiting,
+circuit breaking, caching and metrics are policies to supply later; see [providers](providers.md).
 
 ## Never fabricating data
 

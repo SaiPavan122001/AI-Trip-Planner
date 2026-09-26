@@ -271,6 +271,7 @@ export class PlanningOrchestrator {
       pinsReleased: input.pinsReleased ?? [],
       guidanceApplied: applied.applied,
       providerNotes: notes,
+      feasibility: search.feasibility,
     });
     const synthesis: AgentOutcome<Narrative> = await runSynthesisAgent(facts, ctx);
     checkpoint();

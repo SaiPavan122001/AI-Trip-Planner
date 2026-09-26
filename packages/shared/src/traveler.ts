@@ -126,6 +126,14 @@ export const SpecialRequirements = z.object({
   /** Free-text notes the traveller added, passed to providers that support them. */
   assistanceNotes: z.array(z.string()).default([]),
   petsTraveling: z.boolean().default(false),
+  /** Safety is what the traveller wants weighed first when options are close. */
+  safetyFirst: z.boolean().default(false),
+  /**
+   * Anything else the traveller asked for, in their own words. It is shown back
+   * to them on every plan and never interpreted: the planner cannot check it,
+   * and says so, instead of pretending it has been met.
+   */
+  otherRequirements: z.array(z.string().max(300)).max(5).default([]),
 });
 export type SpecialRequirements = z.infer<typeof SpecialRequirements>;
 

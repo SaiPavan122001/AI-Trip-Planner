@@ -2,6 +2,7 @@ import {
   SUPPORTED_CURRENCY,
   type HotelOffer,
   type Money,
+  type ProviderCapability,
   type ProviderNote,
   type ProviderProvenance,
   type TransportOffer,
@@ -23,10 +24,16 @@ function foreignCurrencies(amounts: Money[]): string[] {
   return [...new Set(amounts.map((m) => m.currency).filter((c) => c !== SUPPORTED_CURRENCY))];
 }
 
-function note(provenance: ProviderProvenance, currencies: string[], what: string): ProviderNote {
+function note(
+  provenance: ProviderProvenance,
+  currencies: string[],
+  what: string,
+  capability?: ProviderCapability,
+): ProviderNote {
   return {
     provider: provenance.provider,
     providerLabel: provenance.providerLabel,
+    ...(capability ? { capability } : {}),
     status: 'unsupported_capability',
     message: `${provenance.providerLabel} returned ${what} priced in ${currencies.join(', ')}. This planner works in Indian rupees only and does not convert currencies, so ${what === 'a price' ? 'that price is shown as unknown' : 'they were not used'}.`,
     occurredAt: new Date().toISOString(),
@@ -43,7 +50,10 @@ function transportAmounts(offer: TransportOffer): Money[] {
   ];
 }
 
-export function keepSupportedTransport(offers: TransportOffer[]): {
+export function keepSupportedTransport(
+  offers: TransportOffer[],
+  capability?: ProviderCapability,
+): {
   kept: TransportOffer[];
   notes: ProviderNote[];
 } {
@@ -64,7 +74,7 @@ export function keepSupportedTransport(offers: TransportOffer[]): {
   }
   return {
     kept,
-    notes: [...dropped.values()].map((d) => note(d.provenance, [...d.currencies], 'options')),
+    notes: [...dropped.values()].map((d) => note(d.provenance, [...d.currencies], 'options', capability)),
   };
 }
 
@@ -93,7 +103,7 @@ export function keepSupportedHotels(hotels: HotelOffer[]): { kept: HotelOffer[];
   }
   return {
     kept,
-    notes: [...dropped.values()].map((d) => note(d.provenance, [...d.currencies], 'rates')),
+    notes: [...dropped.values()].map((d) => note(d.provenance, [...d.currencies], 'rates', 'hotels')),
   };
 }
 
@@ -105,7 +115,8 @@ export function keepSupportedHotels(hotels: HotelOffer[]): { kept: HotelOffer[];
 export function supportedPriceOrUnknown(
   price: Money | null,
   provenance: ProviderProvenance,
+  capability?: ProviderCapability,
 ): { price: Money | null; note: ProviderNote | null } {
   if (price === null || price.currency === SUPPORTED_CURRENCY) return { price, note: null };
-  return { price: null, note: note(provenance, [price.currency], 'a price') };
+  return { price: null, note: note(provenance, [price.currency], 'a price', capability) };
 }

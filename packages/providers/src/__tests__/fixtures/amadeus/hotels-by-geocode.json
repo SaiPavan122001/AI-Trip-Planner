@@ -1,0 +1,23 @@
+{
+  "data": [
+    {
+      "chainCode": "XX",
+      "iataCode": "BLR",
+      "hotelId": "FIXHTL01",
+      "name": "Fixture Grand Bengaluru",
+      "geoCode": { "latitude": 12.9755, "longitude": 77.6035 },
+      "address": { "countryCode": "IN", "lines": ["1 MG Road"], "cityName": "BENGALURU" },
+      "rating": "5"
+    },
+    {
+      "chainCode": "XX",
+      "iataCode": "BLR",
+      "hotelId": "FIXHTL02",
+      "name": "Fixture Budget Inn",
+      "geoCode": { "latitude": 12.9611, "longitude": 77.5872 },
+      "address": { "countryCode": "IN", "lines": ["22 Residency Cross Road"], "cityName": "BENGALURU" },
+      "rating": "3"
+    }
+  ],
+  "meta": { "count": 2 }
+}

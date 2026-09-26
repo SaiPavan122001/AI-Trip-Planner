@@ -133,6 +133,7 @@ export function describeStoreContract(name: string, open: () => Promise<StoreHar
             hotelsConsidered: 3,
             hotelsFiltered: [],
             budgetConflict: null,
+            feasibility: null,
           },
         });
         const read = await store.getSession(saved.id);
@@ -183,6 +184,20 @@ export function describeStoreContract(name: string, open: () => Promise<StoreHar
         const next = await store.enqueueRun(run(trip.id));
         expect('run' in next).toBe(true);
         expect((await store.latestRunForTrip(trip.id))?.id).toBe('run' in next ? next.run.id : '');
+      });
+
+      it('reports the newest run as the latest, even when runs are made back to back in the same instant', async () => {
+        // Regression: runs created in the same millisecond share a timestamp, and
+        // the in-memory store used to pick between them by luck of the order it
+        // scanned them in, which made a Phase 1 test pass or fail at random.
+        const trip = await newTrip(null);
+        for (let i = 0; i < 12; i += 1) {
+          const made = await enqueued(trip.id);
+          expect((await store.latestRunForTrip(trip.id))?.id).toBe(made.id);
+          const claimed = await store.claimRun('w1', 60_000, 3);
+          expect(claimed?.id).toBe(made.id);
+          expect(await store.finishRun(made.id, 'w1', 'succeeded')).toBe(true);
+        }
       });
 
       it('hands the oldest queued run to a worker and marks it running', async () => {

@@ -1,0 +1,33 @@
+{
+  "places": [
+    {
+      "id": "fixture-place-1",
+      "displayName": { "text": "Fixture Fort", "languageCode": "en" },
+      "formattedAddress": "Fort Road, Bengaluru",
+      "location": { "latitude": 12.9634, "longitude": 77.5755 },
+      "types": ["historical_landmark", "tourist_attraction"],
+      "rating": 4.5,
+      "userRatingCount": 9200,
+      "editorialSummary": { "text": "An old fort." },
+      "regularOpeningHours": {
+        "periods": [
+          { "open": { "day": 0, "hour": 9, "minute": 0 }, "close": { "day": 0, "hour": 17, "minute": 30 } },
+          { "open": { "day": 1, "hour": 9, "minute": 0 }, "close": { "day": 1, "hour": 17, "minute": 30 } },
+          { "open": { "day": 2, "hour": 9, "minute": 0 }, "close": { "day": 2, "hour": 17, "minute": 30 } },
+          { "open": { "day": 3, "hour": 9, "minute": 0 }, "close": { "day": 3, "hour": 17, "minute": 30 } },
+          { "open": { "day": 4, "hour": 9, "minute": 0 }, "close": { "day": 4, "hour": 17, "minute": 30 } },
+          { "open": { "day": 5, "hour": 9, "minute": 0 }, "close": { "day": 5, "hour": 17, "minute": 30 } }
+        ]
+      },
+      "accessibilityOptions": { "wheelchairAccessibleEntrance": true }
+    },
+    {
+      "id": "fixture-place-2",
+      "displayName": { "text": "Fixture Park" },
+      "location": { "latitude": 12.9507, "longitude": 77.5848 },
+      "types": ["park"],
+      "rating": 4.6,
+      "userRatingCount": 15000
+    }
+  ]
+}

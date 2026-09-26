@@ -8,9 +8,9 @@ import {
   ActivityOffer,
   SelectedHotel,
   TransportOffer,
+  dedupeProviderNotes,
   type PlanningRunView,
   type PlanningSession,
-  type ProviderNote,
   type RunKind,
   type RunProgress,
 } from '@trip/shared';
@@ -363,15 +363,8 @@ export function withPlans(session: PlanningSession, result: OrchestrationResult)
       builtAt: now,
     },
     agentTrace: result.trace,
-    providerNotes: dedupeNotes([...session.providerNotes, ...result.notes]),
+    providerNotes: dedupeProviderNotes([...session.providerNotes, ...result.notes]),
     decisionLog: [...session.decisionLog, ...(result.search?.decisionLog ?? [])],
     updatedAt: now,
   };
-}
-
-/** Provider notes repeat across searches; the traveller only needs each once. */
-export function dedupeNotes(notes: ProviderNote[]): ProviderNote[] {
-  const seen = new Map<string, ProviderNote>();
-  for (const note of notes) seen.set(`${note.provider}|${note.status}|${note.message}`, note);
-  return [...seen.values()];
 }

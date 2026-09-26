@@ -154,6 +154,8 @@ export const TransferOffer = z.object({
   to: z.object({ name: z.string(), coordinates: Coordinates }),
   distanceKm: z.number(),
   durationMinutes: z.number().int(),
+  /** How many vehicles the price is for: a party too big for one car needs more than one. */
+  vehicles: z.number().int().min(1).default(1),
   /** Null when the provider only supplies routing, not pricing. */
   price: Money.nullable().default(null),
   priceIsEstimate: z.boolean().default(false),

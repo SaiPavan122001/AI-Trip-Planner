@@ -4,6 +4,7 @@ import {
   SUPPORTED_CURRENCY,
   TripComponent,
   money,
+  parseRupees,
   sanitizeModificationParameters,
   type ModificationRequest,
 } from '@trip/shared';
@@ -266,33 +267,30 @@ export function interpretModificationByRules(utterance: string): {
   };
 
   // "Do not exceed ₹80,000" is a firm limit. "Make the budget ₹80,000" or
-  // "budget of 1.5 lakh" is a guide. Amounts are only read when actually
-  // given, and converted to exact paise in code.
-  const AMOUNT = String.raw`(?:₹|rs\.?\s*|inr\s*)?([\d][\d,]*(?:\.\d+)?)\s*(k|lakh|lac)?`;
-  const toRupees = (m: RegExpExecArray) =>
-    Number(m[1]!.replace(/,/g, '')) * (m[2] === 'k' ? 1_000 : m[2] ? 100_000 : 1);
-  const firmAmount = new RegExp(
-    String.raw`\b(?:do not|don'?t|never|must not|cannot|can'?t|shouldn'?t|not to)\s+(?:exceed|go over|spend more than|cross)\s*` +
-      AMOUNT,
+  // "budget of 1.5 lakh" is a guide. An amount is only read when the words say
+  // it is money (see `parseRupees`): a date or a head count after the word
+  // "budget" is not a budget. Converted to exact paise in code.
+  const firmCue = new RegExp(
+    String.raw`\b(?:do not|don'?t|never|must not|cannot|can'?t|shouldn'?t|not to)\s+(?:exceed|go over|spend more than|cross)\b`,
   ).exec(text);
-  if (firmAmount) {
-    const rupees = toRupees(firmAmount);
+  const firmAmount = firmCue ? parseRupees(text.slice(firmCue.index)) : null;
+  if (firmAmount !== null) {
     return build(
       'change_budget',
-      { budgetTotal: money(rupees, SUPPORTED_CURRENCY), budgetFirm: true },
-      `Treating ₹${rupees.toLocaleString('en-IN')} as a firm limit.`,
+      { budgetTotal: money(firmAmount, SUPPORTED_CURRENCY), budgetFirm: true },
+      `Treating ₹${firmAmount.toLocaleString('en-IN')} as a firm limit.`,
     );
   }
-  const budget = new RegExp(String.raw`\bbudget\b[^\d₹]*` + AMOUNT + String.raw`\b`).exec(text);
-  if (budget) {
-    const rupees = toRupees(budget);
+  const budgetWord = /\bbudget\b/.exec(text);
+  const budgetAmount = budgetWord ? parseRupees(text.slice(budgetWord.index)) : null;
+  if (budgetAmount !== null) {
     const firm = /\b(firm|strict|hard limit|hard cap|no more than|at most)\b/.test(text)
       ? { budgetFirm: true }
       : {};
     return build(
       'change_budget',
-      { budgetTotal: money(rupees, SUPPORTED_CURRENCY), ...firm },
-      `Setting the total budget to ₹${rupees.toLocaleString('en-IN')}.`,
+      { budgetTotal: money(budgetAmount, SUPPORTED_CURRENCY), ...firm },
+      `Setting the total budget to ₹${budgetAmount.toLocaleString('en-IN')}.`,
     );
   }
   if (/\bbudget\b.*\b(firm|strict|hard limit|hard cap)\b/.test(text)) {

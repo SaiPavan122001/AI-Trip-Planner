@@ -148,6 +148,14 @@ The next question and the journey classification.
 client renders whatever it is handed. `kind` is one of `single_choice`, `multi_choice`, `ranking`,
 `money`, `number`, `boolean`, `text`, `time`.
 
+The interview follows the order a trip is planned in. The trip itself supplies where from and to, the dates and
+the party; the questions then run: money (`budget.total`, `budget.firm`), how the trip should feel
+(`style.travel_style`: budget, standard, premium, luxury), safety (`safety.preferences`: `safety_first` puts safety
+first in the ranking, `no_late_arrival` rules out arrivals between 23:00 and 05:00), what matters most
+(`priorities.ranking`), transport (`transport.*`), accommodation (`accommodation.*`), the traveller's needs
+(`traveler.*`), the daily allowance, and finally `other.requirements`: free text (up to 300 characters) shown back on
+every plan and never claimed as met, because the planner cannot check it.
+
 ### `POST /v1/trips/:id/answers`
 
 ```json
@@ -203,6 +211,15 @@ A search runs through the planning orchestrator (see [architecture](architecture
 - `plans` — validated and ranked. Every plan has been through an independent validation gate; one that fails carries `validation.*` blockers in `issues`, sorts last, and is never described as workable. Prices are the engine's: no agent can change one.
 - `narrative` — `{ summary, plans: { [planId]: text }, source, builtAt }`, a plain-language account written from the plans' facts. `source` is `template` (written in code), `model` (written by a language model and fact-checked) or `mixed`. Any part that stated a figure not in the plan, a link, or a claim of booking was replaced.
 - `agentTrace` — one entry per stage (`transport_agent`, `accommodation_agent`, `activity_agent`, `guidance`, `plan_search`, `validation`, `synthesis_agent`): `status` (`ok`, `degraded` when a fallback stood in, `failed`, `skipped`), `source` (`model` or `rules`), timing, a sentence, warnings, and what was proposed and dropped. It never contains the traveller's words.
+
+- `lastSearch.feasibility` — `{ status: "feasible" | "partial" | "infeasible", findings: [{ code, severity, message, suggestions }] }`.
+  It says, in words and numbers, what stands in the way of doing the trip as asked (an excluded journey with the
+  reasons, a source that failed, a stay that could not be searched or was not found, a budget below the cheapest
+  combination found, rooms that may not sleep the group). It never changes a plan.
+- each plan's `choices` — `[{ topic: "outbound" | "return" | "stay" | "room" | "budget", chosen, why, alternatives: [{ label, note }] }]`:
+  what the planner chose, the reason, and what it passed over, in words built from the offers actually applied.
+- `providerNotes` (and each plan's) — every note carries `capability` (`flights`, `hotels`, `trains`, ...) beside `provider` and
+  `status`. `status` includes `invalid_response`: the provider answered with something that could not be used.
 
 A request that cannot be met by anything that exists for the trip (for example "only by train" where there is no train) is reported **before any provider is called**: the run still succeeds, `plans` is empty, and `narrative.summary` says what cannot be done and that nothing was searched.
 
@@ -279,6 +296,11 @@ plan exceeds the budget, `lastSearch.budgetConflict` offers adjustments (never a
 
 Plans are ranked on the journey **and** the stay together (hotel suitability counts as much as the
 journey), then on how far over a guide budget they run.
+
+With a **firm** total budget the planner builds each plan inside it when any combination of journey, return
+and stay fits (`choices` then carries a `budget` entry saying a more preferred combination was passed over),
+and otherwise shows the closest plans marked `budget_exceeded` and says by how much in `feasibility`. It never
+loosens the limit itself.
 
 ### What the traveller says in words
 

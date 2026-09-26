@@ -33,6 +33,10 @@ shown, flagged and ranked lower, so you can see what a nicer stay costs. Say "do
 and it becomes a hard limit: what cannot fit is filtered, with the reason. Plans are ranked on the
 journey and the stay together, so a hotel that suits you counts as much as a good flight.
 
+**Not simply the cheapest.** The planner chooses among real options for reasons it can state. Three readings of "best" (cheapest known cost; fewest changes and shortest time; the best fit for what you ranked) are built from the same search; your travel style moves the balanced pick (a luxury trip is not scored on price alone); rooms are chosen for what you asked (breakfast, room type, sleeping the whole party) before price; and every plan carries a "why this plan" list of what it chose and passed over. A firm budget is kept whenever any combination fits it, and when none does the planner says by how much and what to raise, without loosening it for you.
+
+**One provider failing does not fail the search.** Sources are asked at the same time, each behind a deadline; one that throws, hangs, is rate limited, finds nothing or sends data that does not match its documented shape costs that source's results and adds a note saying which of those it was, for which of flights, hotels, trains and so on. You still get the plans that can be built.
+
 **Total cost, not sticker price.** A room ₹1,000 cheaper that adds ₹2,500 a day in taxis is priced
 with the taxis. Accommodation is chosen on what the whole stay costs.
 
@@ -127,6 +131,7 @@ would add.
 | Things to do, traffic-aware transfers | Google Maps Platform | `GOOGLE_MAPS_API_KEY` | Billed. Brings published opening hours. |
 | Rail | Your authorised provider | `RAIL_PROVIDER_URL` | No global open API exists. Implement the documented contract. |
 | Bus | Your authorised provider | `BUS_PROVIDER_URL` | Same. |
+| Sign-in email | Any mail service, through a webhook you point it at | `MAIL_WEBHOOK_URL`, `MAIL_WEBHOOK_TOKEN` | Optional. Redirects are refused. See [docs/providers.md](docs/providers.md). |
 | Language understanding | Anthropic, or any OpenAI-compatible endpoint | `ANTHROPIC_API_KEY`, or `LLM_BASE_URL` + `LLM_MODEL` | Optional. Without it, plain-language changes use keyword rules. |
 
 Rail and bus have no global open API, and the operators that do expose one require a commercial

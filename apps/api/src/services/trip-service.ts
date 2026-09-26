@@ -786,7 +786,7 @@ export class TripService {
   async resolvePlace(query: string, role: 'origin' | 'destination'): Promise<Place> {
     const geocoders = this.deps.registry.geocoding;
     if (geocoders.length === 0) {
-      const missing = this.deps.registry.missingCapabilityNote('Place lookup', ['nominatim']);
+      const missing = this.deps.registry.missingCapabilityNote('geocoding', ['nominatim']);
       throw ApiError.providerUnavailable(
         missing.provider,
         missing.providerLabel,
@@ -817,7 +817,7 @@ export class TripService {
   async searchPlaces(query: string): Promise<Place[]> {
     const geocoder = this.deps.registry.geocoding[0];
     if (!geocoder) {
-      const missing = this.deps.registry.missingCapabilityNote('Place lookup', ['nominatim']);
+      const missing = this.deps.registry.missingCapabilityNote('geocoding', ['nominatim']);
       throw ApiError.providerUnavailable(
         missing.provider,
         missing.providerLabel,

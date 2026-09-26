@@ -277,3 +277,37 @@ describe('free time', () => {
     expect(issues.map((i) => i.code)).toContain('overlapping_items');
   });
 });
+
+describe('checking out before the journey home', () => {
+  const homeward = transportOffer({ id: 'home' });
+  const check = (checkOutEnd: string) =>
+    validateItinerary({
+      intent: tripIntent,
+      classification,
+      profile: profile(),
+      constraints: noConstraints,
+      items: [
+        item({ id: 'leave', kind: 'transport', startUtc: '2026-11-14T00:30:00.000Z', endUtc: '2026-11-14T01:45:00.000Z', offerRef: { kind: 'transport', offerId: 'home' } }),
+        item({ id: 'out', kind: 'check_out', startUtc: '2026-11-14T05:40:00.000Z', endUtc: checkOutEnd }),
+      ],
+      cost: cost(),
+      outbound: null,
+      inbound: homeward,
+      hotel: null,
+    });
+
+  it('blocks a check-out that finishes after the journey home has left', () => {
+    const issue = check('2026-11-14T06:00:00.000Z').find((i) => i.code === 'check_out_after_departure');
+    expect(issue?.severity).toBe('blocker');
+    expect(issue?.itemIds).toEqual(['out', 'leave']);
+  });
+
+  it('accepts a check-out that is done in time', () => {
+    const items = [
+      item({ id: 'out', kind: 'check_out', startUtc: '2026-11-13T22:00:00.000Z', endUtc: '2026-11-13T22:20:00.000Z' }),
+      item({ id: 'leave', kind: 'transport', startUtc: '2026-11-14T00:30:00.000Z', endUtc: '2026-11-14T01:45:00.000Z', offerRef: { kind: 'transport', offerId: 'home' } }),
+    ];
+    const issues = validateItinerary({ intent: tripIntent, classification, profile: profile(), constraints: noConstraints, items, cost: cost(), outbound: null, inbound: homeward, hotel: null });
+    expect(issues.map((i) => i.code)).not.toContain('check_out_after_departure');
+  });
+});

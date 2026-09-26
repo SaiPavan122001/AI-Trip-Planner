@@ -6,7 +6,9 @@ import {
   type ProviderProvenance,
   type ProviderResult,
 } from '@trip/shared';
-import { httpJson, RequestPacer, toProviderFailure } from '../http.js';
+import { InvalidResponseError, httpJson, RequestPacer, toProviderFailure } from '../http.js';
+import { droppedWarning, readItems, readResponse } from '../guard.js';
+import { GooglePlace, GooglePlacesResponse, GoogleRoutesResponse } from '../schemas.js';
 import type {
   ActivityProvider,
   ActivitySearchRequest,
@@ -52,24 +54,6 @@ export interface GoogleMapsConfig {
   minIntervalMs: number;
 }
 
-interface GooglePlace {
-  id: string;
-  displayName?: { text: string };
-  formattedAddress?: string;
-  location?: { latitude: number; longitude: number };
-  types?: string[];
-  rating?: number;
-  userRatingCount?: number;
-  editorialSummary?: { text: string };
-  regularOpeningHours?: {
-    periods?: Array<{
-      open?: { day: number; hour: number; minute: number };
-      close?: { day: number; hour: number; minute: number };
-    }>;
-  };
-  accessibilityOptions?: Record<string, boolean>;
-}
-
 export class GooglePlacesProvider implements ActivityProvider {
   readonly descriptor = ACTIVITY_DESCRIPTOR;
   private readonly pacer: RequestPacer;
@@ -103,8 +87,8 @@ export class GooglePlacesProvider implements ActivityProvider {
 
     const includedTypes = req.categories.length ? req.categories : DEFAULT_ACTIVITY_TYPES;
     try {
-      const res = await this.pacer.run(() =>
-        httpJson<{ places?: GooglePlace[] }>('https://places.googleapis.com/v1/places:searchNearby', {
+      const raw = await this.pacer.run(() =>
+        httpJson<unknown>('https://places.googleapis.com/v1/places:searchNearby', {
           method: 'POST',
           headers: {
             'X-Goog-Api-Key': this.config.apiKey,
@@ -137,8 +121,10 @@ export class GooglePlacesProvider implements ActivityProvider {
         }),
       );
 
-      const places = res.places ?? [];
-      const warnings: string[] = [];
+      const listed = readItems(readResponse(GooglePlacesResponse, raw, 'places search').places ?? [], GooglePlace);
+      if (listed.allInvalid) throw new InvalidResponseError('places search', 'no place had the documented shape');
+      const places = listed.valid.map((v) => v.data);
+      const warnings: string[] = droppedWarning(ACTIVITY_DESCRIPTOR.label, listed.dropped, 'place(s)');
       const offers = places
         .map((p) => this.toActivity(p, warnings))
         .filter((a): a is ActivityOffer => a !== null);
@@ -240,8 +226,8 @@ export class GoogleRoutesProvider implements RoutingProvider {
     }
     const travelMode = { driving: 'DRIVE', walking: 'WALK', cycling: 'BICYCLE' }[req.profile];
     try {
-      const res = await this.pacer.run(() =>
-        httpJson<{ routes?: Array<{ distanceMeters?: number; duration?: string; polyline?: { encodedPolyline?: string } }> }>(
+      const raw = await this.pacer.run(() =>
+        httpJson<unknown>(
           'https://routes.googleapis.com/directions/v2:computeRoutes',
           {
             method: 'POST',
@@ -264,6 +250,7 @@ export class GoogleRoutesProvider implements RoutingProvider {
           },
         ),
       );
+      const res = readResponse(GoogleRoutesResponse, raw, 'route');
       const route = res.routes?.[0];
       if (!route?.distanceMeters || !route.duration) {
         return fail(

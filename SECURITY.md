@@ -45,9 +45,13 @@ history — a key that was committed and then removed is still a leaked key.
 answer against the question as it was asked (options, limits, currency, applicability). A rejected
 answer never reaches storage. Both stores validate a trip against the schema before writing it, and
 the PostgreSQL store validates again when reading, so a malformed value cannot make a trip permanently
-unreadable. Rail and bus provider responses are validated against a documented contract and discarded
-if they do not match. **Amadeus and Google responses are typed but not schema-validated**; a change on
-their side could produce odd values (see below).
+unreadable. **Every provider response** (Amadeus, OSRM, Nominatim, Google, and the rail/bus contract) is
+validated against a schema of the fields the adapter reads before it is mapped: a response that does
+not match, or a body that is not JSON, is reported as `invalid_response` and discarded, and one bad row
+in a list is dropped without discarding its neighbours. Those schemas were written from vendor
+documentation and checked against hand-written fixtures, **not against live responses** (see below).
+Anything a provider's adapter throws is turned into a failure for that provider, so one provider cannot
+end a search or leak its error text.
 
 **Language-model output is untrusted.** The only thing a model does is classify a change request. Its
 parameters are checked field by field against domain rules and invalid ones are dropped and logged;
@@ -135,8 +139,13 @@ These are real. Treat them as prerequisites before running this for other people
 - **A search that is cancelled or times out stops calling providers it has not reached yet and aborts
   the calls in flight, but a provider may already have counted a request it received.** A worker that
   is killed outright leaves its search to lapse (30 seconds by default) before another takes it up.
-- **Provider responses from Amadeus and Google are not validated against a schema**, unlike rail and
-  bus.
+- **Provider response schemas are unverified against live vendors.** Every adapter validates what it
+  reads, but the schemas come from documentation, and no live credentials have ever been used here. A
+  vendor field that differs in practice makes results *unusable* (reported as such), never wrong; the
+  first live run is where that would show.
+- **The mail webhook is unverified against a real mail service**, and has no retry: a failed delivery
+  is reported to the traveller, who can ask again. Redirects from it are refused so a sign-in link
+  cannot be forwarded to a host the operator did not configure.
 - **Free text is stored and shown back.** It is bounded and single-line, and rendered as text (not
   HTML), but any future feature that puts stored text into a prompt or a page must treat it as
   hostile.

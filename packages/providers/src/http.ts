@@ -1,3 +1,4 @@
+import { ZodError } from 'zod';
 import { fail, type ProviderFailure } from '@trip/shared';
 
 /**
@@ -37,6 +38,31 @@ export class RequestAbortedError extends Error {
   constructor(readonly url: string) {
     super(`Request to ${url} was cancelled`);
     this.name = 'RequestAbortedError';
+  }
+}
+
+/**
+ * The provider answered, but the body was not JSON. Not retried: asking again
+ * for the same thing rarely turns text into JSON, and each retry costs quota.
+ */
+export class InvalidResponseError extends Error {
+  constructor(
+    readonly url: string,
+    readonly detail: string = 'the response was not valid JSON',
+  ) {
+    super(`Response from ${url} could not be used: ${detail}`);
+    this.name = 'InvalidResponseError';
+  }
+}
+
+/** The request never got an answer (DNS, refused or reset connection). */
+export class NetworkError extends Error {
+  constructor(
+    readonly url: string,
+    readonly causeMessage: string,
+  ) {
+    super(`Request to ${url} failed: ${causeMessage}`);
+    this.name = 'NetworkError';
   }
 }
 
@@ -147,14 +173,22 @@ export async function httpJson<T>(url: string, opts: HttpOptions = {}): Promise<
         throw err;
       }
       if (res.status === 204) return undefined as T;
-      return (await res.json()) as T;
+      try {
+        return (await res.json()) as T;
+      } catch (parseError) {
+        // A body cut off by the deadline is a timeout, not bad data.
+        if (parseError instanceof Error && parseError.name === 'AbortError') throw parseError;
+        throw new InvalidResponseError(finalUrl);
+      }
     } catch (err) {
-      if (err instanceof HttpError) throw err;
+      if (err instanceof HttpError || err instanceof InvalidResponseError) throw err;
       // Stopped by the caller, not by the timeout: waiting or trying again
       // would only spend a provider's quota on an answer nobody wants.
       if (signal?.aborted) throw new RequestAbortedError(finalUrl);
       const aborted = err instanceof Error && err.name === 'AbortError';
-      lastError = aborted ? new TimeoutError(finalUrl, timeoutMs) : err;
+      lastError = aborted
+        ? new TimeoutError(finalUrl, timeoutMs)
+        : new NetworkError(finalUrl, err instanceof Error ? err.message : String(err));
       if (attempt >= retries) break;
       await sleep(backoffMs(attempt, null));
     } finally {
@@ -215,5 +249,26 @@ export function toProviderFailure(
     }
     return fail('unavailable', provider, providerLabel, `${providerLabel} returned an error.`);
   }
-  return fail('unavailable', provider, providerLabel, `${providerLabel} could not be reached.`);
+  if (err instanceof NetworkError) {
+    return fail('unavailable', provider, providerLabel, `${providerLabel} could not be reached.`);
+  }
+  // The provider answered with something this planner cannot use: not JSON,
+  // not the documented shape, or a shape the adapter's own code choked on.
+  // All of it is discarded, and it is reported as such rather than as an
+  // outage, because a retry will not help and someone should look at it.
+  if (
+    err instanceof InvalidResponseError ||
+    err instanceof ZodError ||
+    err instanceof TypeError ||
+    err instanceof RangeError ||
+    err instanceof SyntaxError
+  ) {
+    return fail(
+      'invalid_response',
+      provider,
+      providerLabel,
+      `${providerLabel} returned a response this planner could not use, so it was discarded.`,
+    );
+  }
+  return fail('unavailable', provider, providerLabel, `${providerLabel} ran into an unexpected problem.`);
 }

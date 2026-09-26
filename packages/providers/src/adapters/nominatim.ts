@@ -1,6 +1,8 @@
 import tzLookup from 'tz-lookup';
 import { fail, ok, type Coordinates, type Place, type ProviderResult } from '@trip/shared';
-import { httpJson, RequestPacer, toProviderFailure } from '../http.js';
+import { InvalidResponseError, httpJson, RequestPacer, toProviderFailure } from '../http.js';
+import { droppedWarning, readItems, readResponse } from '../guard.js';
+import { NominatimRow, NominatimSearchResponse } from '../schemas.js';
 import type { GeocodingProvider, ProviderDescriptor } from '../types.js';
 
 /**
@@ -10,17 +12,6 @@ import type { GeocodingProvider, ProviderDescriptor } from '../types.js';
  * an identifying User-Agent, both of which are enforced here rather than left
  * to the operator to remember.
  */
-
-interface NominatimPlace {
-  place_id: number;
-  lat: string;
-  lon: string;
-  display_name: string;
-  name?: string;
-  address?: Record<string, string>;
-  type?: string;
-  class?: string;
-}
 
 const DESCRIPTOR: ProviderDescriptor = {
   id: 'nominatim',
@@ -69,8 +60,8 @@ export class NominatimProvider implements GeocodingProvider {
       );
     }
     try {
-      const rows = await this.pacer.run(() =>
-        httpJson<NominatimPlace[]>(`${this.config.baseUrl}/search`, {
+      const raw = await this.pacer.run(() =>
+        httpJson<unknown>(`${this.config.baseUrl}/search`, {
           query: {
             q: query,
             format: 'jsonv2',
@@ -81,6 +72,9 @@ export class NominatimProvider implements GeocodingProvider {
           headers: { 'User-Agent': this.config.userAgent },
         }),
       );
+      const listed = readItems(readResponse(NominatimSearchResponse, raw, 'place search'), NominatimRow);
+      if (listed.allInvalid) throw new InvalidResponseError('place search', 'no result had the documented shape');
+      const rows = listed.valid.map((v) => v.data);
       const places = rows.map((r) => this.toPlace(r)).filter((p): p is Place => p !== null);
       if (places.length === 0) {
         return fail(
@@ -90,7 +84,10 @@ export class NominatimProvider implements GeocodingProvider {
           `No place matching "${query}" could be resolved. Try adding a country, for example "Hyderabad, India".`,
         );
       }
-      return ok(places, this.provenance(), this.dropWarnings(rows.length, places.length));
+      return ok(places, this.provenance(), [
+        ...this.dropWarnings(rows.length, places.length),
+        ...droppedWarning(DESCRIPTOR.label, listed.dropped, 'result(s)'),
+      ]);
     } catch (err) {
       return toProviderFailure(err, DESCRIPTOR.id, DESCRIPTOR.label);
     }
@@ -101,13 +98,15 @@ export class NominatimProvider implements GeocodingProvider {
       return fail('not_configured', DESCRIPTOR.id, DESCRIPTOR.label, 'Nominatim is not configured.');
     }
     try {
-      const row = await this.pacer.run(() =>
-        httpJson<NominatimPlace>(`${this.config.baseUrl}/reverse`, {
+      const raw = await this.pacer.run(() =>
+        httpJson<unknown>(`${this.config.baseUrl}/reverse`, {
           query: { lat: coords.lat, lon: coords.lon, format: 'jsonv2', addressdetails: 1 },
           headers: { 'User-Agent': this.config.userAgent },
         }),
       );
-      const place = this.toPlace(row);
+      // Nominatim answers 200 with {"error": ...} when a point has nothing at it.
+      const empty = typeof raw === 'object' && raw !== null && 'error' in raw;
+      const place = empty ? null : this.toPlace(readResponse(NominatimRow, raw, 'reverse lookup'));
       if (!place) {
         return fail(
           'no_availability',
@@ -127,7 +126,7 @@ export class NominatimProvider implements GeocodingProvider {
    * classification depends on the country, and guessing it would silently
    * decide whether the trip is domestic or international.
    */
-  private toPlace(row: NominatimPlace): Place | null {
+  private toPlace(row: NominatimRow): Place | null {
     const countryCode = row.address?.['country_code']?.toUpperCase();
     if (!countryCode || countryCode.length !== 2) return null;
     const lat = Number(row.lat);

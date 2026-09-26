@@ -441,3 +441,50 @@ describe('the default services', () => {
     expect(engineServices.buildPlans).toBe(generatePlans);
   });
 });
+
+describe('a trip that cannot be done as asked', () => {
+  it('says which limit stands in the way, with the numbers, in the search and in the explanation', async () => {
+    const fake = fakeTravel();
+    const p = profile({ priorities: ['cheapest'] });
+    const tripIntent = intent();
+    const result = await orchestrator(fake).plan(
+      inputFor(fake, { profile: p, intent: tripIntent, constraints: constraintsFor(p, tripIntent, { total: 30_000, firm: true }) }).input,
+    );
+
+    expect(result.search!.feasibility.status).toBe('partial');
+    const finding = result.search!.feasibility.findings.find((f) => f.code === 'budget_below_cheapest_plan');
+    expect(finding?.severity).toBe('blocker');
+    // Two flights and four nights come to 43,200 before food or getting around, against 30,000.
+    expect(finding?.message).toMatch(/43,200/);
+    expect(finding?.message).toMatch(/30,000/);
+    // Nothing was loosened: the plans are shown, and each is marked as breaking the limit.
+    expect(result.status).toBe('no_valid_plan');
+    for (const plan of result.plans) expect(plan.issues.some((i) => i.severity === 'blocker')).toBe(true);
+    // The explanation carries the same finding, from the facts, so it can say why.
+    expect(result.narrative.summary).toMatch(/none of the plans found can be carried out/);
+  });
+
+  it('keeps a hard limit through a re-plan: what was kept stays, and the rest is still held to the limit', async () => {
+    const fake = fakeTravel();
+    const p = profile({ priorities: ['cheapest'] });
+    const tripIntent = intent();
+    const constraints = constraintsFor(p, tripIntent, { total: 60_000, firm: true });
+    const first = await orchestrator(fake).plan(inputFor(fake, { profile: p, intent: tripIntent, constraints }).input);
+    const previous = first.plans[0]!;
+
+    const again = await orchestrator(fake).replan({
+      intent: tripIntent,
+      profile: p,
+      constraints,
+      classification: classificationFor(tripIntent),
+      requirements: null,
+      pins: ['hotel'],
+      previous,
+    });
+    expect(again.pinsReleased).toEqual([]);
+    for (const plan of again.plans) {
+      expect(plan.hotels[0]!.hotel.id).toBe(previous.hotels[0]!.hotel.id);
+      expect(plan.cost.total.amount).toBeLessThanOrEqual(6_000_000);
+    }
+  });
+});

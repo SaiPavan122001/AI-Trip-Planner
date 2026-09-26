@@ -1,14 +1,20 @@
 import type { ProviderRegistry } from '@trip/providers';
 import {
+  add,
   compare,
   formatMoney,
+  hasWaiver,
   money,
+  multiply,
   nightsBetween,
+  plannerNote,
+  seatedTravelers,
   type ActivityOffer,
   type ConstraintSet,
-  type HotelOffer,
+  type FeasibilityReport,
   type Money,
   type PlanArchetype,
+  type PlanChoice,
   type ProviderNote,
   type SelectedHotel,
   type TransportOffer,
@@ -24,11 +30,13 @@ import {
 } from './activities.js';
 import { classifyJourney } from './classify.js';
 import { computeCost, detectBudgetConflict, type BudgetConflict } from './cost.js';
+import { analyseFeasibility } from './feasibility.js';
 import { budgetOvershootFactor, combinePlanScore, rankPlans } from './plan-score.js';
 import { searchHotels, modelLocalTransport, type HotelSearchResult } from './hotels.js';
+import { explainStay, explainTransport, rankStays, rankTransport, withEffectivePriorities, type StayChoice } from './optimize.js';
 import { knownTransportCost } from './pricing.js';
 import { buildItinerary } from './schedule.js';
-import { cheapestRoom, scoreTransportOffers } from './scoring.js';
+import { scoreTransportOffers } from './scoring.js';
 import { searchTransport, type TransportSearchResult } from './transport.js';
 import { validateItinerary } from './validate.js';
 
@@ -90,6 +98,8 @@ export interface PlanGenerationResult {
   activities: ActivityPlanResult;
   notes: ProviderNote[];
   budgetConflict: BudgetConflict | null;
+  /** Whether the trip can be done as asked, and what stands in the way when it cannot. */
+  feasibility: FeasibilityReport;
   decisionLog: Array<{ at: string; step: string; detail: string }>;
 }
 
@@ -175,75 +185,12 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
   );
 
   const localTransportPerKm = perKmRate(registry, intent.currency);
-  progress({ step: 'hotels', label: 'Finding places to stay', percent: 55 });
-  const hotels = kept.hotel
-    ? keptHotel(kept.hotel)
-    : await searchHotels({
-        registry,
-        intent,
-        profile,
-        constraints,
-        activities: activities.activities,
-        localTransportPerKm,
-        ...(signal ? { signal } : {}),
-      });
-  checkpoint();
-  note(
-    'hotel_search',
-    hotels.candidates.length
-      ? `${hotels.candidates.length} propert(ies) met the hard requirements; ${hotels.filtered.length} were filtered out.`
-      : 'No accommodation was available under the stated requirements.',
-  );
 
-  const notes: ProviderNote[] = [
-    ...outbound.notes,
-    ...(inbound?.notes ?? []),
-    ...hotels.notes,
-    ...activities.notes,
-    ...keptNotes(kept),
-  ];
-
-  // "Use the train": every plan takes that mode where an option was found.
-  // If none was, the plans use the best alternatives and say so.
-  const preferred = profile.transport.preferredMode;
-  if (preferred && !kept.outbound) {
-    const found = outbound.modes.some((m) => m.mode === preferred && m.offers.length > 0);
-    if (!found) {
-      notes.push({
-        provider: 'engine',
-        providerLabel: 'Planner',
-        status: 'no_availability',
-        message: `You asked to travel by ${preferred.replace('_', ' ')}, but no such option could be found for these dates, so the plans use other ways of travelling.`,
-        occurredAt: new Date().toISOString(),
-      });
-    }
-  }
-
-  // One scoring pass over every outbound option, shared by all plans, so a
-  // plan's score says how its journey compares with the alternatives.
-  const outboundScores = scoreTransportOffers(
-    outbound.modes.flatMap((m) => m.offers.map((o) => o.candidate)),
-    profile,
-  );
-  const plans: TripPlan[] = [];
-  const seen = new Set<string>();
-
-  for (const [index, archetype] of ARCHETYPES.entries()) {
-    progress({
-      step: 'assemble',
-      label: 'Putting your plans together',
-      percent: 70 + Math.round((index / ARCHETYPES.length) * 22),
-    });
-    const outboundOffer = pickTransport(outbound, archetype, profile);
-    const inboundOffer = inbound ? pickTransport(inbound, archetype, profile) : null;
-    const hotel = kept.hotel ?? pickHotel(hotels, archetype, intent, profile, localTransportPerKm, nights);
-
-    // Nothing to plan with is not a plan. It is reported through the notes.
-    if (!outboundOffer && !hotel) continue;
-
-    const signature = `${outboundOffer?.id ?? 'none'}|${inboundOffer?.id ?? 'none'}|${hotel?.hotel.id ?? 'none'}`;
-    if (seen.has(signature)) continue;
-    seen.add(signature);
+  /** Builds one complete plan from one combination of options: itinerary, cost, checks, score, explanation. */
+  const assemble = async (combo: Combination, archetype: PlanArchetype): Promise<PlanDraft> => {
+    const outboundOffer = combo.out;
+    const inboundOffer = combo.back;
+    const hotel = combo.stay?.selected ?? null;
 
     const schedule = await buildItinerary({
       registry,
@@ -283,20 +230,19 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
     // with a single candidate every dimension came out as 1, so every plan
     // looked equally good on price, speed and changes.
     const journeyScore = outboundOffer
-      ? outboundScores.find((s) => s.candidate.id === outboundOffer.id)
+      ? outboundScores.find((sc) => sc.candidate.id === outboundOffer.id)
       : undefined;
-    const stayScore = hotel
-      ? hotels.candidates.find((c) => c.candidate.id === hotel.hotel.id)
-      : undefined;
+    const stayScore = hotel ? hotels.candidates.find((c) => c.candidate.id === hotel.hotel.id) : undefined;
     const combined = combinePlanScore({ journey: journeyScore, stay: stayScore });
-    const overshoot = budgetOvershootFactor(
-      cost.total,
-      constraints.budget.total,
-      constraints.budget.firm,
-    );
+    const overshoot = budgetOvershootFactor(cost.total, constraints.budget.total, constraints.budget.firm);
 
-    plans.push({
-      id: `${archetype}-${signature.length.toString(36)}-${plans.length}`,
+    const choices: PlanChoice[] = [];
+    if (outboundOffer) choices.push(explainTransport('outbound', outboundOffer, outbound, archetype, profile, Boolean(kept.outbound)));
+    if (inboundOffer && inbound) choices.push(explainTransport('return', inboundOffer, inbound, archetype, profile, Boolean(kept.return)));
+    if (hotel) choices.push(...explainStay(hotel, hotels, archetype, profile, combo.stay?.roomWhy ?? null, Boolean(combo.stay?.kept)));
+
+    const plan: TripPlan = {
+      id: `${archetype}-draft`,
       archetype,
       label: ARCHETYPE_LABEL[archetype],
       rationale: buildRationale(archetype, outboundOffer, hotel, cost.total),
@@ -309,15 +255,162 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
       cost,
       issues,
       priorityScore: Number((combined.score * overshoot).toFixed(4)),
-      scoreBreakdown: overshoot < 1 ? { ...combined.breakdown, over_budget_guide: Number((overshoot - 1).toFixed(4)) } : combined.breakdown,
+      scoreBreakdown:
+        overshoot < 1
+          ? { ...combined.breakdown, over_budget_guide: Number((overshoot - 1).toFixed(4)) }
+          : combined.breakdown,
       tradeoffs: buildTradeoffs(archetype, outboundOffer, hotel, outbound),
+      choices,
       providerNotes: [...notes, ...schedule.notes].map((n) => ({
         provider: n.provider,
+        ...(n.capability ? { capability: n.capability } : {}),
         status: n.status,
         message: n.message,
       })),
       generatedAt: new Date().toISOString(),
+    };
+    return { plan, cost, choices, outbound: outboundOffer, inbound: inboundOffer, hotel, scheduleNotes: schedule.notes };
+  };
+  progress({ step: 'hotels', label: 'Finding places to stay', percent: 55 });
+  const hotels = kept.hotel
+    ? keptHotel(kept.hotel)
+    : await searchHotels({
+        registry,
+        intent,
+        profile,
+        constraints,
+        activities: activities.activities,
+        localTransportPerKm,
+        ...(signal ? { signal } : {}),
+      });
+  checkpoint();
+  note(
+    'hotel_search',
+    hotels.candidates.length
+      ? `${hotels.candidates.length} propert(ies) met the hard requirements; ${hotels.filtered.length} were filtered out.`
+      : 'No accommodation was available under the stated requirements.',
+  );
+
+  const notes: ProviderNote[] = [
+    ...outbound.notes,
+    ...(inbound?.notes ?? []),
+    ...hotels.notes,
+    ...activities.notes,
+    ...keptNotes(kept),
+  ];
+
+  // "Use the train": every plan takes that mode where an option was found.
+  // If none was, the plans use the best alternatives and say so.
+  const preferred = profile.transport.preferredMode;
+  if (preferred && !kept.outbound) {
+    const found = outbound.modes.some((m) => m.mode === preferred && m.offers.length > 0);
+    if (!found) {
+      notes.push(
+        plannerNote(
+          `You asked to travel by ${preferred.replace('_', ' ')}, but no such option could be found for these dates, so the plans use other ways of travelling.`,
+          'no_availability',
+        ),
+      );
+    }
+  }
+
+  // One scoring pass over every outbound option, shared by all plans, so a
+  // plan's score says how its journey compares with the alternatives.
+  const scoring = withEffectivePriorities(profile);
+  const outboundScores = scoreTransportOffers(
+    outbound.modes.flatMap((m) => m.offers.map((o) => o.candidate)),
+    scoring,
+  );
+  const plans: TripPlan[] = [];
+  const seen = new Set<string>();
+  const guests = seatedTravelers(intent.travelers);
+  const firmTotal = firmTotalBudget(constraints);
+  const otherRequirements = profile.special.otherRequirements;
+  if (otherRequirements.length > 0) {
+    notes.push(
+      plannerNote(
+        `You also asked for: ${otherRequirements.map((r) => `"${r}"`).join('; ')}. The planner cannot check this against its results, so it is listed for you to confirm rather than counted as met.`,
+      ),
+    );
+  }
+
+  for (const [index, archetype] of ARCHETYPES.entries()) {
+    progress({
+      step: 'assemble',
+      label: 'Putting your plans together',
+      percent: 70 + Math.round((index / ARCHETYPES.length) * 22),
     });
+
+    // The options each reading of "best" would take, most preferred first.
+    const outs: Array<TransportOffer | null> = kept.outbound
+      ? [kept.outbound]
+      : takeOrNone(rankTransport(outbound, archetype, profile), MAX_CANDIDATES.transport);
+    const backs: Array<TransportOffer | null> = !inbound
+      ? [null]
+      : kept.return
+        ? [kept.return]
+        : takeOrNone(rankTransport(inbound, archetype, profile), MAX_CANDIDATES.transport);
+    const stays: Array<StayPick | null> =
+      nights === 0 || !intent.returnDate
+        ? [null]
+        : kept.hotel
+          ? [{ selected: kept.hotel, roomWhy: null, kept: true }]
+          : takeOrNone(
+              rankStays(hotels, archetype, { profile, constraints, rooms: profile.accommodation.rooms, guests }).map((c) =>
+                stayPick(c, hotels, intent, localTransportPerKm, nights, profile),
+              ),
+              MAX_CANDIDATES.stay,
+            );
+
+    // Every combination, the most preferred first. With no firm budget the
+    // first one is the plan; with one, the first that fits it.
+    const combos = rankedCombinations(outs, backs, stays).filter((c) => c.out || c.stay);
+    let chosen: PlanDraft | null = null;
+    let closest: PlanDraft | null = null;
+    let skippedForPrice = 0;
+    let overBudget = 0;
+    let cheapestFloor: { combo: Combination; floor: number } | null = null;
+    let builds = 0;
+
+    for (const combo of combos) {
+      checkpoint();
+      if (firmTotal) {
+        const floor = floorOf(combo, intent.currency);
+        if (floor !== null && floor.amount > firmTotal.amount) {
+          skippedForPrice += 1;
+          if (!cheapestFloor || floor.amount < cheapestFloor.floor) cheapestFloor = { combo, floor: floor.amount };
+          continue;
+        }
+      }
+      const draft = await assemble(combo, archetype);
+      builds += 1;
+      if (!firmTotal || compare(draft.cost.total, firmTotal) <= 0) {
+        chosen = draft;
+        break;
+      }
+      overBudget += 1;
+      if (!closest || draft.cost.total.amount < closest.cost.total.amount) closest = draft;
+      if (builds >= MAX_BUDGET_BUILDS) break;
+    }
+    // Nothing fits a firm limit: show the closest, marked as over it by the
+    // validator, rather than showing nothing or quietly loosening the limit.
+    if (!chosen && closest) chosen = closest;
+    if (!chosen && cheapestFloor) chosen = await assemble(cheapestFloor.combo, archetype);
+    if (!chosen) continue;
+
+    if (firmTotal && skippedForPrice + overBudget > 0) {
+      chosen.choices.push({
+        topic: 'budget',
+        chosen: 'A less preferred combination',
+        why: `More preferred combinations would have cost more than your firm limit of ${formatMoney(firmTotal)}, so the most preferred one that fits (or comes closest) was taken.`,
+        alternatives: [],
+      });
+    }
+
+    const signature = `${chosen.outbound?.id ?? 'none'}|${chosen.inbound?.id ?? 'none'}|${chosen.hotel?.hotel.id ?? 'none'}|${chosen.hotel?.room.id ?? 'none'}`;
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    plans.push({ ...chosen.plan, id: `${archetype}-${signature.length.toString(36)}-${plans.length}` });
   }
 
   progress({ step: 'rank', label: 'Comparing your options', percent: 95 });
@@ -344,6 +437,22 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
     );
   }
 
+  const feasibility = analyseFeasibility({
+    intent,
+    profile,
+    constraints,
+    outbound,
+    inbound,
+    hotels,
+    nights,
+    plans,
+    kept: { outbound: Boolean(kept.outbound), return: Boolean(kept.return), hotel: Boolean(kept.hotel) },
+  });
+  note(
+    'feasibility',
+    `${feasibility.status}: ${feasibility.findings.length ? feasibility.findings.map((f) => f.code).join(', ') : 'no findings'}.`,
+  );
+
   return {
     plans,
     transport: { outbound, inbound },
@@ -351,88 +460,100 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
     activities,
     notes,
     budgetConflict,
+    feasibility,
     decisionLog: log,
   };
 }
 
-/**
- * Archetype selection. Each one answers "best" differently, and each pulls
- * from the same pool of real offers, so the alternatives differ in substance
- * rather than in presentation.
- */
-function pickTransport(
-  search: TransportSearchResult,
-  archetype: PlanArchetype,
-  profile: TravelerProfile,
-): TransportOffer | null {
-  const every = search.modes.flatMap((m) => m.offers.map((o) => o.candidate));
-  if (every.length === 0) return null;
-  // A mode the traveller asked for narrows every archetype to it, when it
-  // has options; otherwise all modes remain and the plans say why.
-  const preferred = profile.transport.preferredMode;
-  const all = preferred && every.some((o) => o.mode === preferred) ? every.filter((o) => o.mode === preferred) : every;
+// ---------------------------------------------------------------- selection
 
-  switch (archetype) {
-    case 'budget':
-      return [...all].sort((a, b) => compare(knownTransportCost(a), knownTransportCost(b)))[0]!;
-    case 'comfort': {
-      // Comfort means the fewest changes, then the shortest time, then
-      // whichever cabin the fare actually is. Price breaks ties last.
-      const ranked = [...all].sort((a, b) => {
-        if (a.transfers !== b.transfers) return a.transfers - b.transfers;
-        if (a.totalDurationMinutes !== b.totalDurationMinutes) {
-          return a.totalDurationMinutes - b.totalDurationMinutes;
-        }
-        return compare(knownTransportCost(b), knownTransportCost(a));
-      });
-      return ranked[0]!;
-    }
-    case 'balanced':
-    default:
-      return scoreTransportOffers(all, profile)[0]?.candidate ?? all[0]!;
-  }
+/** Options considered per part of the plan when fitting a firm budget. */
+const MAX_CANDIDATES = { transport: 3, stay: 4 };
+/** Most full itineraries built for one plan while looking for a combination inside a firm budget. */
+const MAX_BUDGET_BUILDS = 4;
+
+interface StayPick {
+  selected: SelectedHotel;
+  roomWhy: string | null;
+  kept: boolean;
 }
 
-function pickHotel(
+interface Combination {
+  out: TransportOffer | null;
+  back: TransportOffer | null;
+  stay: StayPick | null;
+  /** Position in each ranking, summed: lower is more preferred. */
+  rank: number;
+}
+
+interface PlanDraft {
+  plan: TripPlan;
+  cost: TripPlan['cost'];
+  choices: PlanChoice[];
+  outbound: TransportOffer | null;
+  inbound: TransportOffer | null;
+  hotel: SelectedHotel | null;
+  scheduleNotes: ProviderNote[];
+}
+
+const takeOrNone = <T>(items: T[], max: number): Array<T | null> => (items.length === 0 ? [null] : items.slice(0, max));
+
+/** A total budget the traveller said must not be exceeded, and has not agreed to exceed. */
+function firmTotalBudget(constraints: ConstraintSet): Money | null {
+  const { total, firm } = constraints.budget;
+  return total && firm && !hasWaiver(constraints, 'max_total_budget') ? total : null;
+}
+
+/** Every combination of the options, the most preferred first; ties keep each ranking's own order. */
+function rankedCombinations(
+  outs: Array<TransportOffer | null>,
+  backs: Array<TransportOffer | null>,
+  stays: Array<StayPick | null>,
+): Combination[] {
+  const combos: Array<Combination & { at: [number, number, number] }> = [];
+  outs.forEach((out, i) =>
+    backs.forEach((back, j) =>
+      stays.forEach((stay, k) => combos.push({ out, back, stay, rank: i + j + k, at: [i, j, k] })),
+    ),
+  );
+  return combos.sort((a, b) => a.rank - b.rank || a.at[0] - b.at[0] || a.at[1] - b.at[1] || a.at[2] - b.at[2]);
+}
+
+/** What a combination is known to cost before food and local travel: fares, fees and the rooms. Null if it cannot be added up. */
+function floorOf(combo: Combination, currency: string): Money | null {
+  const parts: Money[] = [];
+  if (combo.out) parts.push(knownTransportCost(combo.out));
+  if (combo.back) parts.push(knownTransportCost(combo.back));
+  if (combo.stay) parts.push(multiply(combo.stay.selected.room.totalPrice, combo.stay.selected.rooms));
+  if (parts.length === 0 || parts.some((p) => p.currency !== currency)) return null;
+  return add(...parts);
+}
+
+/** A ranked stay as the plan's selected hotel, with what its location costs in local travel. */
+function stayPick(
+  choice: StayChoice,
   hotels: HotelSearchResult,
-  archetype: PlanArchetype,
   intent: TripIntent,
-  profile: TravelerProfile,
   perKm: Money | null,
   nights: number,
-): SelectedHotel | null {
-  if (hotels.candidates.length === 0 || nights === 0 || !intent.returnDate) return null;
-  const pool = hotels.candidates.map((c) => c.candidate);
-
-  let chosen: HotelOffer;
-  switch (archetype) {
-    case 'budget':
-      chosen = [...pool].sort((a, b) => compare(cheapestRoom(a).totalPrice, cheapestRoom(b).totalPrice))[0]!;
-      break;
-    case 'comfort':
-      chosen = [...pool].sort((a, b) => (b.category ?? 0) - (a.category ?? 0))[0]!;
-      break;
-    case 'balanced':
-    default:
-      chosen = pool[0]!;
-      break;
-  }
-
-  const distanceKm = hotels.distanceKm.get(chosen.id) ?? null;
+  profile: TravelerProfile,
+): StayPick {
+  const distanceKm = hotels.distanceKm.get(choice.hotel.id) ?? null;
   return {
-    hotel: chosen,
-    room: cheapestRoom(chosen),
-    rooms: profile.accommodation.rooms,
-    checkIn: intent.departureDate,
-    checkOut: intent.returnDate,
-    nights,
-    distanceToActivitiesKm: distanceKm,
-    // What this location costs per day in local travel: the figure that makes
-    // a cheaper room in the wrong place visibly more expensive overall.
-    impliedDailyTransportCost:
-      perKm && distanceKm !== null
-        ? modelLocalTransport(distanceKm, 1, perKm)
-        : null,
+    roomWhy: choice.roomWhy,
+    kept: false,
+    selected: {
+      hotel: choice.hotel,
+      room: choice.room,
+      rooms: profile.accommodation.rooms,
+      checkIn: intent.departureDate,
+      checkOut: intent.returnDate!,
+      nights,
+      distanceToActivitiesKm: distanceKm,
+      // What this location costs per day in local travel: the figure that makes
+      // a cheaper room in the wrong place visibly more expensive overall.
+      impliedDailyTransportCost: perKm && distanceKm !== null ? modelLocalTransport(distanceKm, 1, perKm) : null,
+    },
   };
 }
 
@@ -492,6 +613,13 @@ function buildTradeoffs(
   if (transport?.overnight) {
     tradeoffs.push('Includes an overnight leg, which saves a night of accommodation but not of sleep.');
   }
+  // A total that leaves out costs nobody could price is lower than the truth, and
+  // a cheap-looking option is the last place that should go unsaid.
+  if (transport && transport.unpricedCosts.length > 0) {
+    tradeoffs.push(
+      `The cost of this journey is not fully known: ${transport.unpricedCosts.join(', ').toLowerCase()} could not be calculated, so it will cost more than shown.`,
+    );
+  }
   if (transport?.refundable === false) {
     tradeoffs.push('This fare is non-refundable.');
   }
@@ -550,6 +678,7 @@ function keptTransport(
         fastest: offer,
         bestForYou: offer,
         note: null,
+        notes: [],
       },
     ],
     notes: [],
@@ -582,21 +711,27 @@ function keptNotes(kept: KeptComponents): ProviderNote[] {
   ];
   const notes: ProviderNote[] = items
     .filter((i): i is [string, string] => i[1] !== undefined)
-    .map(([what, at]) => ({
-      provider: 'engine',
-      providerLabel: 'Planner',
-      status: 'ok',
-      message: `Kept from your earlier plan: the ${what}, with the price as retrieved on ${at.slice(0, 10)}. Prices can change after they are retrieved.`,
-      occurredAt: new Date().toISOString(),
-    }));
-  if (kept.activities) {
-    notes.push({
-      provider: 'engine',
-      providerLabel: 'Planner',
-      status: 'ok',
-      message: 'Kept from your earlier plan: the places to visit.',
-      occurredAt: new Date().toISOString(),
-    });
+    .map(([what, at]) =>
+      plannerNote(
+        `Kept from your earlier plan: the ${what}, with the price as retrieved on ${at.slice(0, 10)}. Prices can change after they are retrieved.`,
+      ),
+    );
+  // A quote its provider said would lapse, and has, is stale: say so rather than presenting it as current.
+  const stale: Array<[string, string | null | undefined]> = [
+    ['outbound journey', kept.outbound?.provenance.validUntil],
+    ['return journey', kept.return?.provenance.validUntil],
+    ['hotel', kept.hotel?.hotel.provenance.validUntil],
+  ];
+  for (const [what, until] of stale) {
+    if (until && Date.parse(until) < Date.now()) {
+      notes.push(
+        plannerNote(
+          `The kept ${what} was quoted with a price that was only valid until ${until.slice(0, 10)}. That has passed, so treat the price as out of date until it is searched again.`,
+          'price_changed',
+        ),
+      );
+    }
   }
+  if (kept.activities) notes.push(plannerNote('Kept from your earlier plan: the places to visit.'));
   return notes;
 }

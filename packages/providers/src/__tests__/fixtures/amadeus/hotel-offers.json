@@ -1,0 +1,77 @@
+{
+  "data": [
+    {
+      "type": "hotel-offers",
+      "hotel": {
+        "type": "hotel",
+        "hotelId": "FIXHTL01",
+        "name": "Fixture Grand Bengaluru",
+        "rating": "5",
+        "latitude": 12.9755,
+        "longitude": 77.6035,
+        "amenities": ["SWIMMING_POOL", "WIFI", "RESTAURANT"],
+        "address": { "lines": ["1 MG Road"], "cityName": "BENGALURU" }
+      },
+      "available": true,
+      "offers": [
+        {
+          "id": "GRAND-DELUXE-1",
+          "checkInDate": "2030-11-10",
+          "checkOutDate": "2030-11-14",
+          "boardType": "BREAKFAST",
+          "room": {
+            "type": "DLX",
+            "typeEstimated": { "category": "DELUXE_ROOM", "beds": 1, "bedType": "KING" },
+            "description": { "text": "Deluxe king room with city view" }
+          },
+          "guests": { "adults": 2 },
+          "price": { "currency": "INR", "base": "36000.00", "total": "42480.00", "taxes": [{ "included": true }] },
+          "policies": {
+            "cancellations": [{ "deadline": "2030-11-08T00:00:00+05:30", "description": { "text": "Free cancellation until 8 Nov" } }],
+            "refundable": { "cancellationRefund": "REFUNDABLE_UP_TO_DEADLINE" }
+          }
+        },
+        {
+          "id": "GRAND-SUITE-1",
+          "checkInDate": "2030-11-10",
+          "checkOutDate": "2030-11-14",
+          "boardType": "BREAKFAST",
+          "room": {
+            "type": "STE",
+            "typeEstimated": { "category": "SUITE", "beds": 2, "bedType": "KING" },
+            "description": { "text": "One-bedroom suite" }
+          },
+          "guests": { "adults": 2 },
+          "price": { "currency": "INR", "total": "68000.00" },
+          "policies": { "refundable": { "cancellationRefund": "NON_REFUNDABLE" } }
+        }
+      ]
+    },
+    {
+      "type": "hotel-offers",
+      "hotel": {
+        "type": "hotel",
+        "hotelId": "FIXHTL02",
+        "name": "Fixture Budget Inn",
+        "rating": "3",
+        "latitude": 12.9611,
+        "longitude": 77.5872,
+        "amenities": ["WIFI"],
+        "address": { "lines": ["22 Residency Cross Road"], "cityName": "BENGALURU" }
+      },
+      "available": true,
+      "offers": [
+        {
+          "id": "INN-STD-1",
+          "checkInDate": "2030-11-10",
+          "checkOutDate": "2030-11-14",
+          "room": { "typeEstimated": { "category": "STANDARD_ROOM", "beds": 2, "bedType": "TWIN" } },
+          "guests": { "adults": 2 },
+          "price": { "currency": "INR", "total": "12000.00" },
+          "policies": { "refundable": { "cancellationRefund": "NON_REFUNDABLE" } }
+        }
+      ]
+    }
+  ],
+  "warnings": [{ "detail": "Rates are indicative and may change before booking." }]
+}

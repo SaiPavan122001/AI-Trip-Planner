@@ -29,6 +29,8 @@ export class MailDeliveryError extends Error {
 }
 
 const subject = 'Your sign-in link';
+/** Longest the sign-in request waits for the mail service. */
+const WEBHOOK_TIMEOUT_MS = 10_000;
 const text = ({ link, expiresInMinutes }: LoginEmail) =>
   `Use this link to sign in to Wayfare. It works once and expires in ${expiresInMinutes} minutes.\n\n${link}\n\nIf you did not ask for this, you can ignore this email.`;
 
@@ -66,10 +68,17 @@ export class WebhookMailer implements Mailer {
           ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
         },
         body: JSON.stringify({ type: 'login_link', to: message.to, subject, text: text(message), link: message.link }),
-        signal: AbortSignal.timeout(10_000),
+        // The body carries a sign-in link, so it goes to the address the operator
+        // configured and nowhere else: a redirect is a failure, not a detour.
+        redirect: 'manual',
+        signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
       });
-    } catch {
-      throw new MailDeliveryError('The mail webhook could not be reached.');
+    } catch (err) {
+      // Slow and unreachable are different problems for whoever runs the service.
+      const slow = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+      throw new MailDeliveryError(
+        slow ? 'The mail webhook did not answer in time.' : 'The mail webhook could not be reached.',
+      );
     }
     if (!res.ok) throw new MailDeliveryError(`The mail webhook answered ${res.status}.`);
   }

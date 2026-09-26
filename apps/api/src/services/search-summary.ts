@@ -30,5 +30,6 @@ export function searchSummaryOf(result: PlanGenerationResult, builtAt: string): 
     hotelsConsidered: result.hotels.candidates.length,
     hotelsFiltered: result.hotels.filtered,
     budgetConflict: result.budgetConflict,
+    feasibility: result.feasibility,
   };
 }

@@ -75,8 +75,20 @@ describe('a trip stored before versions, pins and search summaries existed', () 
       hotelsConsidered: 2,
       hotelsFiltered: [{ hotelId: 'h', reason: 'too dear' }],
       budgetConflict: null,
+      feasibility: null,
     };
     expect(PlanningSession.parse({ ...stored, lastSearch: summary }).lastSearch).toEqual(summary);
+  });
+
+  it('reads a search summary saved before feasibility reports existed', () => {
+    const older = { builtAt: '2026-01-01T00:00:00.000Z', outbound: null, inbound: null, hotelsConsidered: 0, hotelsFiltered: [], budgetConflict: null };
+    const read = PlanningSession.parse({ ...stored, lastSearch: older });
+    expect(read.lastSearch?.feasibility).toBeNull();
+  });
+
+  it('reads a provider note saved before notes named their capability', () => {
+    const note = { provider: 'amadeus', providerLabel: 'Amadeus', status: 'not_configured', message: 'x', occurredAt: '2026-01-01T00:00:00.000Z' };
+    expect(PlanningSession.parse({ ...stored, providerNotes: [note] }).providerNotes[0]!.capability).toBeUndefined();
   });
 });
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ProviderRegistry } from '@trip/providers';
 import { money, ok, type HotelOffer, type Priority, type TransportOffer } from '@trip/shared';
 import { buildConstraints } from '../constraints.js';
-import { budgetOvershootFactor } from '../plan-score.js';
+import { budgetOvershootFactor, rankPlans } from '../plan-score.js';
 import { generatePlans } from '../plans.js';
 import { hotel, intent, profile, transportOffer } from './fixtures.js';
 
@@ -137,13 +137,32 @@ describe('a budget is a guide unless the traveller says it is firm', () => {
   });
 
   it('never ranks a plan that cannot be carried out above one that can', async () => {
-    // ₹35,000 firm: the simple stay fits, the mid-range one does not.
-    const { plans } = await search(['most_comfortable'], { total: 35_000, firm: true });
+    // Plans are built within a firm limit whenever a combination fits (see the
+    // next test), so a blocked plan is made here by marking one, and the
+    // ranking is asked to put it last however well it scores.
+    const { plans } = await search(['most_comfortable'], null);
+    expect(plans.length).toBeGreaterThan(1);
+    const best = plans[0]!;
+    best.issues.push({ code: 'test_blocker', severity: 'blocker', message: 'cannot be carried out', itemIds: [], suggestions: [] });
+    best.priorityScore = 1;
+    rankPlans(plans);
+    expect(plans.at(-1)!.id).toBe(best.id);
     const blocked = plans.map((p) => p.issues.some((i) => i.severity === 'blocker'));
-    // Both kinds are present, and every plan that can be carried out comes first.
-    expect(blocked).toContain(true);
-    expect(blocked).toContain(false);
     expect([...blocked].sort()).toEqual(blocked);
+  });
+
+  it('builds every plan inside a firm limit when a combination that fits exists, instead of showing plans it breaks', async () => {
+    // ₹35,000 firm: the simple stay fits, the mid-range one does not. The
+    // comfort reading of best would take the mid-range stay; it takes the
+    // most comfortable one that fits instead, and says it had to.
+    const { plans } = await search(['most_comfortable'], { total: 35_000, firm: true });
+    expect(plans.length).toBeGreaterThan(0);
+    for (const plan of plans) {
+      expect(plan.cost.total.amount, plan.label).toBeLessThanOrEqual(3_500_000);
+      expect(plan.issues.filter((i) => i.severity === 'blocker')).toEqual([]);
+    }
+    const comfort = plans.find((p) => p.archetype === 'comfort');
+    if (comfort) expect(comfort.choices.some((c) => c.topic === 'budget')).toBe(true);
   });
 });
 

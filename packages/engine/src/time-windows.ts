@@ -33,6 +33,20 @@ export interface TimeWindowViolation {
   reason: string;
 }
 
+/**
+ * The local time a leg arrives, when that is in the small hours (23:00 to
+ * 05:00), and null when it is not. Used for "do not arrive late at night":
+ * a late arrival means fewer ways to reach the hotel and a desk that may be
+ * closed. Read in the zone where the leg arrives, like every other window.
+ */
+export function smallHoursArrival(offer: TransportOffer, zones: LegZones): string | null {
+  const last = offer.segments[offer.segments.length - 1];
+  if (!last) return null;
+  const zone = last.destination.timezone ?? zones.arrival;
+  const arrives = localParts(instantFrom(last.arrivalAt, zone), zone);
+  return arrives.hour >= 23 || arrives.hour < 5 ? arrives.time : null;
+}
+
 export function timeWindowViolations(
   offer: TransportOffer,
   constraints: ConstraintSet,

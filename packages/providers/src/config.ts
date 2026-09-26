@@ -85,6 +85,19 @@ export interface ProvidersEnv {
   } | null;
   taxiTariffs: Record<string, z.infer<typeof TariffSchema>>;
   selfDriveProfile: z.infer<typeof VehicleProfileSchema> | null;
+  /** Limits that apply to every provider call, whichever adapter makes it. */
+  policy: {
+    /** Backstop on one provider call, in ms; on top of each adapter's own timeout and retries. */
+    callTimeoutMs: number;
+  };
+}
+
+/** A positive number from the environment, or the default when unset. A bad value stops start-up. */
+function positiveNumber(raw: string | undefined, fallback: number, name: string): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`${name} must be a positive number of milliseconds.`);
+  return n;
 }
 
 function coverageFrom(raw: string | undefined): 'global' | string[] {
@@ -149,5 +162,6 @@ export function loadProvidersEnv(env: NodeJS.ProcessEnv = process.env): Provider
       : null,
     taxiTariffs,
     selfDriveProfile: parseJsonEnv(env['SELF_DRIVE_PROFILE'], VehicleProfileSchema, 'SELF_DRIVE_PROFILE'),
+    policy: { callTimeoutMs: positiveNumber(env['PROVIDER_CALL_TIMEOUT_MS'], 45_000, 'PROVIDER_CALL_TIMEOUT_MS') },
   };
 }
