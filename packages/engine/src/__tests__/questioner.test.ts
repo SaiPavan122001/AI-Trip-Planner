@@ -273,3 +273,39 @@ function askEverything(ctx: Ctx): string[] {
 
 void hyderabad;
 void bengaluru;
+
+describe('how firm the budget is', () => {
+  const afterBudget = () => {
+    const ctx = ctxFor();
+    return {
+      ...ctx,
+      profile: applyAnswer(ctx, {
+        key: 'budget.total',
+        value: { amount: 5_000_000, currency: 'INR' },
+        skipped: false,
+      }).profile,
+    };
+  };
+
+  it('is asked right after the budget, and only then', () => {
+    expect(nextQuestion(ctxFor())?.key).toBe('budget.total');
+    expect(nextQuestion(afterBudget())?.key).toBe('budget.firm');
+  });
+
+  it('is optional, so skipping it leaves the budget a guide', () => {
+    const q = nextQuestion(afterBudget())!;
+    expect(q.required).toBe(false);
+    const { profile: skipped } = applyAnswer(afterBudget(), { key: 'budget.firm', value: null, skipped: true });
+    expect(skipped.skippedKeys).toContain('budget.firm');
+    expect(questionnaireState({ ...afterBudget(), profile: skipped }).canPlan).toBe(false);
+  });
+
+  it('only accepts the two choices offered', () => {
+    const ctx = afterBudget();
+    expect(() => applyAnswer(ctx, { key: 'budget.firm', value: 'firm', skipped: false })).not.toThrow();
+    expect(() => applyAnswer(ctx, { key: 'budget.firm', value: 'guide', skipped: false })).not.toThrow();
+    expect(() => applyAnswer(ctx, { key: 'budget.firm', value: 'strict', skipped: false })).toThrow(
+      /choose one of the options/,
+    );
+  });
+});

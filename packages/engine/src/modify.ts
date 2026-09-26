@@ -3,6 +3,7 @@ import {
   SUPPORTED_CURRENCY,
   addMinutes,
   formatMoney,
+  hasWaiver,
   localParts,
   nightsBetween,
   seatedTravelers,
@@ -115,7 +116,11 @@ export function applyModification(proposed: ModificationRequest, ctx: Modificati
       const summary = `Comfort now leads the ranking${raised !== null ? `, and only ${d.profile.accommodation.minCategory}-star properties or better are considered` : ''}.`;
       const draft: Draft = { ...d, reSearch: ['outbound', 'return', 'hotel'], summary };
       const budget = ctx.constraints.budget.total;
-      if (!budget) return { status: 'apply', change: finish(draft) };
+      // A guide budget needs no permission: over-budget plans are already
+      // shown, ranked lower. Only a firm limit has to be asked about.
+      if (!budget || !ctx.constraints.budget.firm || hasWaiver(ctx.constraints, 'max_total_budget')) {
+        return { status: 'apply', change: finish(draft) };
+      }
       // More comfort may cost more than the budget. Both answers act: yes
       // lets the planner show options above it, no keeps the budget as a
       // hard limit and finds the most comfortable plan within it.
@@ -272,23 +277,26 @@ export function applyModification(proposed: ModificationRequest, ctx: Modificati
     }
 
     case 'change_budget': {
-      const total = p.budgetTotal;
+      const total = p.budgetTotal ?? ctx.constraints.budget.total;
       if (!total) return noChange('What would you like the total budget to be?');
       if (total.currency !== SUPPORTED_CURRENCY) return noChange(`Budgets are in Indian rupees (${SUPPORTED_CURRENCY}).`);
-      if (ctx.constraints.budget.total && ctx.constraints.budget.total.amount === total.amount) {
-        return noChange('That is already your budget.');
+      const firm = p.budgetFirm ?? ctx.constraints.budget.firm;
+      const current = ctx.constraints.budget;
+      if (current.total && current.total.amount === total.amount && current.firm === firm) {
+        return noChange(firm ? 'That is already your firm budget.' : 'That is already your budget.');
       }
       const d = base();
       if (!d.profile.answeredKeys.includes('budget.total')) d.profile.answeredKeys.push('budget.total');
+      const kind = firm ? 'a firm limit, which the planner will not exceed' : 'a guide: plans a little above it are shown, ranked lower';
       return {
         status: 'apply',
         change: finish({
           ...d,
-          budget: { ...statedBudget(ctx.constraints, ctx.profile), total },
+          budget: { ...statedBudget(ctx.constraints, ctx.profile), total, firm },
           // A new budget replaces any earlier agreement to go over the old one.
           withdraw: ['max_total_budget'],
           reSearch: ['outbound', 'return', 'hotel'],
-          summary: `The total budget is now ${formatMoney(total)}, and the transport and accommodation allowances follow from it.`,
+          summary: `The total budget is now ${formatMoney(total)}, ${kind}.`,
         }),
       };
     }

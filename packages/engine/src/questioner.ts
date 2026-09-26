@@ -75,6 +75,39 @@ const DEFS: QuestionDef[] = [
     }),
   },
   {
+    key: 'budget.firm',
+    when: (ctx) => ctx.profile.answeredKeys.includes('budget.total'),
+    requiredForPlanning: false,
+    build: () => ({
+      key: 'budget.firm',
+      kind: 'single_choice',
+      prompt: 'Is that a limit, or a guide?',
+      helpText:
+        'Either way the planner tells you before a plan goes over. Skip this and it is treated as a guide.',
+      options: [
+        {
+          value: 'guide',
+          label: 'A guide',
+          description: 'Going a little over is fine if it is worth it.',
+          implication: 'Plans above it are still shown, ranked lower and clearly marked.',
+        },
+        {
+          value: 'firm',
+          label: 'A firm limit',
+          description: 'Never exceed it.',
+          implication: 'Anything that cannot fit is left out, and you are told what was.',
+        },
+      ],
+      min: null,
+      max: null,
+      currency: null,
+      required: false,
+      reason:
+        'Most people treat a budget as a rough target. Saying it is firm changes what is filtered out, so it is asked rather than assumed.',
+      stage: 'budget',
+    }),
+  },
+  {
     key: 'style.travel_style',
     when: () => true,
     requiredForPlanning: true,
@@ -760,6 +793,7 @@ export function applyAnswer(
         : (v as TravelerProfile['special']['dietary']);
       break;
     case 'budget.total':
+    case 'budget.firm':
     case 'budget.daily_spend':
       // Budget answers are money and live on the constraint set, not the
       // profile; the caller passes the validated value to `buildConstraints`.

@@ -46,7 +46,7 @@ describe('asking about accessibility', () => {
   });
 
   it('offers every need the planner can represent', () => {
-    const ctx = { intent: intent(), classification: classifyJourney(intent().origin, intent().destination), profile: profile({ answeredKeys: ['budget.total', 'style.travel_style', 'priorities.ranking', 'transport.mode_openness', 'transport.cabin_class', 'transport.baggage', 'transport.overnight', 'accommodation.type', 'accommodation.category', 'accommodation.rooms', 'accommodation.cancellation', 'accommodation.location', 'traveler.party_type'] }) };
+    const ctx = { intent: intent(), classification: classifyJourney(intent().origin, intent().destination), profile: profile({ answeredKeys: ['budget.total', 'budget.firm', 'style.travel_style', 'priorities.ranking', 'transport.mode_openness', 'transport.cabin_class', 'transport.baggage', 'transport.overnight', 'accommodation.type', 'accommodation.category', 'accommodation.rooms', 'accommodation.cancellation', 'accommodation.location', 'traveler.party_type'] }) };
     const q = nextQuestion(ctx);
     expect(q?.key).toBe('traveler.accessibility');
     expect(q?.options.map((o) => o.value).sort()).toEqual(

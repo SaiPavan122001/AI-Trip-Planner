@@ -101,7 +101,7 @@ describe('comparing self-drive with other transport', () => {
     const p = profile();
     const constraints = {
       ...buildConstraintsOnly(p),
-      budget: { total: null, transport: money(1300, 'INR'), accommodation: null, dailySpend: null, activities: null },
+      hard: [{ kind: 'max_transport_budget' as const, value: money(1300, 'INR') }],
     };
     const { kept, dropped } = applyHardConstraints([drive(true), drive(false)], constraints, p, INDIA_LEG);
     expect(kept.map((o) => o.id)).toEqual(['drive-bare']);
@@ -148,7 +148,7 @@ describe('the cost breakdown', () => {
     const p = profile();
     const constraints = {
       ...buildConstraintsOnly(p),
-      budget: { total: money(50_000, 'INR'), transport: null, accommodation: null, dailySpend: null, activities: null },
+      budget: { total: money(50_000, 'INR'), transport: null, accommodation: null, dailySpend: null, activities: null, firm: false },
     };
     const cost = computeCost({ ...base, constraints, items: [], outbound: drive(false) });
     const issues = validateItinerary({

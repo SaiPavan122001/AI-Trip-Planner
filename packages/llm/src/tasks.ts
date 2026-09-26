@@ -49,6 +49,8 @@ const ModificationSchema = z.object({
       infants: z.number().nullable().default(null),
       /** A new total budget in rupees; converted to exact paise by code, not the model. */
       budgetTotalRupees: z.number().nullable().default(null),
+      /** True for "do not exceed"; false for "just a guide"; null when not said. */
+      budgetFirm: z.boolean().nullable().default(null),
     })
     .default({}),
   pinnedComponents: z.array(TripComponent).default([]),
@@ -63,7 +65,7 @@ Rules:
 - Fill only the parameters the traveller actually stated. Leave everything else null or empty.
 - "Keep the same X" means X goes in pinnedComponents.
 - "Make it cheaper" is reduce_cost. "I want a nicer hotel" is change_hotel_tier. "Use the train" is change_transport_mode with mode: "train".
-- "Move the trip to 12 December" is change_dates. "Two of my friends are joining" is change_party_size with the new totals. "Make the budget 80,000" is change_budget with budgetTotalRupees: 80000.
+- "Move the trip to 12 December" is change_dates. "Two of my friends are joining" is change_party_size with the new totals. "Make the budget 80,000" is change_budget with budgetTotalRupees: 80000. "Do not exceed 80,000" also sets budgetFirm: true; "it is only a guide" sets budgetFirm: false. Leave budgetFirm null unless the traveller said which.
 - Only fill departureDate, returnDate or traveller counts with values the traveller actually gave; never work them out or guess.
 - Valid modes: flight, train, bus, self_drive, rental_car, taxi, ferry.
 - Valid priorities: cheapest, fastest, most_comfortable, safest, luxury, family_friendly, flexible, scenic, least_travel_time, fewest_transfers.
@@ -146,7 +148,7 @@ function finalise(
   pinned: ModificationRequest['pinnedComponents'],
   source: { fromFallback: boolean; fallbackReason: string | null },
 ): InterpretedModification {
-  const { budgetTotalRupees, ...rest } = raw;
+  const { budgetTotalRupees, budgetFirm, ...rest } = raw;
   const nonEmpty: Record<string, unknown> = Object.fromEntries(
     Object.entries(rest).filter(([, v]) => !(Array.isArray(v) && v.length === 0)),
   );
@@ -157,6 +159,7 @@ function finalise(
         ? money(budgetTotalRupees, SUPPORTED_CURRENCY)
         : budgetTotalRupees;
   }
+  if (budgetFirm !== null && budgetFirm !== undefined) nonEmpty['budgetFirm'] = budgetFirm;
   const { parameters, rejected } = sanitizeModificationParameters(nonEmpty);
   const request: ModificationRequest = {
     utterance,
@@ -248,17 +251,41 @@ export function interpretModificationByRules(utterance: string): {
     };
   };
 
-  // "Make the budget ₹80,000", "budget of 1.5 lakh": only when an amount is
-  // actually given, and converted to exact paise in code.
-  const budget = /\bbudget\b[^\d₹]*(?:₹|rs\.?\s*|inr\s*)?([\d][\d,]*(?:\.\d+)?)\s*(k|lakh|lac)?\b/.exec(text);
-  if (budget) {
-    const unit = budget[2] === 'k' ? 1_000 : budget[2] ? 100_000 : 1;
-    const rupees = Number(budget[1]!.replace(/,/g, '')) * unit;
+  // "Do not exceed ₹80,000" is a firm limit. "Make the budget ₹80,000" or
+  // "budget of 1.5 lakh" is a guide. Amounts are only read when actually
+  // given, and converted to exact paise in code.
+  const AMOUNT = String.raw`(?:₹|rs\.?\s*|inr\s*)?([\d][\d,]*(?:\.\d+)?)\s*(k|lakh|lac)?`;
+  const toRupees = (m: RegExpExecArray) =>
+    Number(m[1]!.replace(/,/g, '')) * (m[2] === 'k' ? 1_000 : m[2] ? 100_000 : 1);
+  const firmAmount = new RegExp(
+    String.raw`\b(?:do not|don'?t|never|must not|cannot|can'?t|shouldn'?t|not to)\s+(?:exceed|go over|spend more than|cross)\s*` +
+      AMOUNT,
+  ).exec(text);
+  if (firmAmount) {
+    const rupees = toRupees(firmAmount);
     return build(
       'change_budget',
-      { budgetTotal: money(rupees, SUPPORTED_CURRENCY) },
+      { budgetTotal: money(rupees, SUPPORTED_CURRENCY), budgetFirm: true },
+      `Treating ₹${rupees.toLocaleString('en-IN')} as a firm limit.`,
+    );
+  }
+  const budget = new RegExp(String.raw`\bbudget\b[^\d₹]*` + AMOUNT + String.raw`\b`).exec(text);
+  if (budget) {
+    const rupees = toRupees(budget);
+    const firm = /\b(firm|strict|hard limit|hard cap|no more than|at most)\b/.test(text)
+      ? { budgetFirm: true }
+      : {};
+    return build(
+      'change_budget',
+      { budgetTotal: money(rupees, SUPPORTED_CURRENCY), ...firm },
       `Setting the total budget to ₹${rupees.toLocaleString('en-IN')}.`,
     );
+  }
+  if (/\bbudget\b.*\b(firm|strict|hard limit|hard cap)\b/.test(text)) {
+    return build('change_budget', { budgetFirm: true }, 'Treating your budget as a firm limit.');
+  }
+  if (/\bbudget\b.*\b(flexible|just a guide|only a guide|rough|not strict)\b/.test(text)) {
+    return build('change_budget', { budgetFirm: false }, 'Treating your budget as a guide.');
   }
   if (/cheaper|less expensive|lower (the )?(cost|price)|reduce (the )?cost|save money/.test(text)) {
     return build('reduce_cost', {}, 'Re-planning with price as the first priority.');

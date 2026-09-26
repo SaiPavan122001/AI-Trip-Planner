@@ -14,6 +14,7 @@ import {
   type TravelerProfile,
   type TripIntent,
 } from '@trip/shared';
+import { budgetCeiling } from './constraints.js';
 import { keepSupportedTransport } from './currency.js';
 import { knownTransportCost } from './pricing.js';
 import { timeWindowViolations, type LegZones } from './time-windows.js';
@@ -222,7 +223,9 @@ async function searchFlightMode(
   if (destination.note) return { ...empty, note: destination.note };
 
   const maxStops = findHard(constraints, 'max_stops')?.value ?? profile.transport.maxStops;
-  const transportBudget = constraints.budget.transport;
+  // Only a firm budget asks the provider to filter; a guide leaves every
+  // option in the comparison.
+  const transportBudget = budgetCeiling(constraints, 'transport');
 
   const all: TransportOffer[] = [];
   let lastNote: ProviderNote | null = null;
@@ -355,7 +358,7 @@ export function applyHardConstraints(
   const kept: TransportOffer[] = [];
   const dropped: Array<{ offerId: string; reason: string }> = [];
   const maxStops = findHard(constraints, 'max_stops')?.value ?? null;
-  const transportBudget = constraints.budget.transport;
+  const transportBudget = budgetCeiling(constraints, 'transport');
   const requiredBags = findHard(constraints, 'required_checked_bags')?.value ?? 0;
   const needsRefundable = profile.transport.refundableRequired;
 
@@ -386,7 +389,7 @@ export function applyHardConstraints(
       if (compare(knownTransportCost(offer), transportBudget) > 0) {
         dropped.push({
           offerId: offer.id,
-          reason: 'Costs more than the transport budget on its own.',
+          reason: 'Costs more than your firm budget on its own.',
         });
         continue;
       }

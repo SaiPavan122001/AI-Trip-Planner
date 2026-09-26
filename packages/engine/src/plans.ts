@@ -19,6 +19,7 @@ import {
 import { clusterByProximity, planActivities, type ActivityPlanResult } from './activities.js';
 import { classifyJourney } from './classify.js';
 import { computeCost, detectBudgetConflict, type BudgetConflict } from './cost.js';
+import { budgetOvershootFactor, combinePlanScore, rankPlans } from './plan-score.js';
 import { searchHotels, modelLocalTransport, type HotelSearchResult } from './hotels.js';
 import { knownTransportCost } from './pricing.js';
 import { buildItinerary } from './schedule.js';
@@ -231,9 +232,18 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
     // normalises each dimension between the best and worst candidate, and
     // with a single candidate every dimension came out as 1, so every plan
     // looked equally good on price, speed and changes.
-    const scored = outboundOffer
+    const journeyScore = outboundOffer
       ? outboundScores.find((s) => s.candidate.id === outboundOffer.id)
       : undefined;
+    const stayScore = hotel
+      ? hotels.candidates.find((c) => c.candidate.id === hotel.hotel.id)
+      : undefined;
+    const combined = combinePlanScore({ journey: journeyScore, stay: stayScore });
+    const overshoot = budgetOvershootFactor(
+      cost.total,
+      constraints.budget.total,
+      constraints.budget.firm,
+    );
 
     plans.push({
       id: `${archetype}-${signature.length.toString(36)}-${plans.length}`,
@@ -248,8 +258,8 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
       days: schedule.days,
       cost,
       issues,
-      priorityScore: scored?.score ?? 0.5,
-      scoreBreakdown: scored?.breakdown ?? {},
+      priorityScore: Number((combined.score * overshoot).toFixed(4)),
+      scoreBreakdown: overshoot < 1 ? { ...combined.breakdown, over_budget_guide: Number((overshoot - 1).toFixed(4)) } : combined.breakdown,
       tradeoffs: buildTradeoffs(archetype, outboundOffer, hotel, outbound),
       providerNotes: [...notes, ...schedule.notes].map((n) => ({
         provider: n.provider,
@@ -264,7 +274,7 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
 
   // Ranked by how well each plan matches the traveller's own priorities, so
   // the order of the alternatives is itself an answer rather than a default.
-  plans.sort((a, b) => b.priorityScore - a.priorityScore);
+  rankPlans(plans);
 
   const primary = plans[0];
   const budgetConflict = primary

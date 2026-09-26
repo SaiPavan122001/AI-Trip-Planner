@@ -32,6 +32,8 @@ function context(overrides: Partial<ModificationContext> = {}): ModificationCont
       transport: null,
       accommodation: null,
       dailySpendPerPerson: null,
+      // The fixture trip has a firm budget; a guide is exercised separately.
+      firm: true,
     }),
     planComponents: FULL_PLAN,
     today: '2026-10-01',
@@ -98,6 +100,23 @@ describe('consent', () => {
     // Either way, comfort now leads.
     expect(outcome.accept.profile.priorities[0]).toBe('most_comfortable');
     expect(outcome.decline?.profile.priorities[0]).toBe('most_comfortable');
+  });
+
+  it('needs no consent for more comfort when the budget is only a guide', () => {
+    const tripIntent = intent();
+    const guide = context({
+      constraints: buildConstraints(tripIntent, profile({ priorities: ['fastest'] }), {
+        total: money(50_000, 'INR'),
+        transport: null,
+        accommodation: null,
+        dailySpendPerPerson: null,
+      }),
+    });
+    const change = applied(ask('increase_comfort', {}, [], guide));
+    // Nothing is asked, and nothing is granted or removed: over-budget plans
+    // are already shown, ranked lower.
+    expect(change.constraints.waivers).toEqual([]);
+    expect(change.profile.priorities[0]).toBe('most_comfortable');
   });
 
   it('needs no consent for more comfort when there is no budget', () => {
@@ -172,9 +191,27 @@ describe('changing the budget', () => {
     expect(change.constraints.budget.total).toEqual(money(80_000, 'INR'));
     // Standard style: 40% each, from the new total rather than the old one.
     expect(change.constraints.budget.transport).toEqual(money(32_000, 'INR'));
-    // Derived allowances are not the traveller's words, so they never become
-    // explicit hard constraints.
-    expect(change.constraints.hard.map((h) => h.kind)).not.toContain('max_transport_budget');
+    // The 40% split is only a ranking signal. The one hard ceiling on a part
+    // is the firm total itself, the most any single part could spend.
+    const transportCap = change.constraints.hard.find((h) => h.kind === 'max_transport_budget');
+    expect(transportCap?.value).toEqual(money(80_000, 'INR'));
+  });
+
+  it('can make the same budget firm, or a guide again, without a new amount', () => {
+    const guide = applied(ask('change_budget', { budgetFirm: false }));
+    expect(guide.constraints.budget.firm).toBe(false);
+    expect(guide.constraints.hard.map((h) => h.kind)).not.toContain('max_total_budget');
+    expect(guide.summary).toMatch(/a guide/);
+
+    const ctxGuide = context({ constraints: guide.constraints });
+    const firm = applied(ask('change_budget', { budgetFirm: true }, [], ctxGuide));
+    expect(firm.constraints.hard.map((h) => h.kind)).toContain('max_total_budget');
+    expect(firm.summary).toMatch(/firm limit/);
+  });
+
+  it('says so when the budget is already as asked', () => {
+    const outcome = ask('change_budget', { budgetFirm: true });
+    expect(outcome.status === 'no_change' && outcome.summary).toMatch(/already your firm budget/);
   });
 
   it('replaces an earlier agreement to go over the old budget', () => {

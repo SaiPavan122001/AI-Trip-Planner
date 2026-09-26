@@ -3,6 +3,7 @@ import {
   formatMoney,
   hasWaiver,
   isGreater,
+  subtract,
   seatedTravelers,
   type AccessibilityNeed,
   type ConstraintSet,
@@ -61,7 +62,10 @@ export function validateItinerary(input: ValidationInput): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const items = [...input.items].sort((a, b) => Date.parse(a.startUtc) - Date.parse(b.startUtc));
 
-  issues.push(...checkSequencing(items));
+  // A `rest` item is a stretch of free time ("Unplanned day"), which may
+  // legitimately contain meals and anything else; it is not a commitment to be
+  // somewhere, so it cannot overlap them. Ordering is checked among the rest.
+  issues.push(...checkSequencing(items.filter((i) => i.kind !== 'rest')));
   issues.push(...checkDates(input));
   issues.push(...checkBudget(input));
   issues.push(...checkCompleteness(input));
@@ -185,6 +189,20 @@ function checkBudget(input: ValidationInput): ValidationIssue[] {
   const budget = input.constraints.budget.total;
   if (!budget || budget.currency !== input.cost.total.currency) return [];
   if (!isGreater(input.cost.total, budget)) return [];
+  const over = formatMoney(subtract(input.cost.total, budget));
+  if (!input.constraints.budget.firm) {
+    // A guide, not a limit: the plan is still worth showing, and the ranking
+    // has already counted the overrun against it.
+    return [
+      {
+        code: 'over_budget_guide',
+        severity: 'warning',
+        message: `This plan costs ${formatMoney(input.cost.total)}, which is ${over} above your budget of ${formatMoney(budget)}. You said the budget is a guide, so it is shown, but ranked lower.`,
+        itemIds: [],
+        suggestions: ['Look at the suggested adjustments, or say the budget is a firm limit and the planner will stay within it.'],
+      },
+    ];
+  }
   if (hasWaiver(input.constraints, 'max_total_budget')) {
     return [
       {

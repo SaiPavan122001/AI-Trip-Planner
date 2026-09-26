@@ -1,4 +1,6 @@
 import {
+  findHard,
+  hasWaiver,
   multiply,
   nightsBetween,
   priorityWeights,
@@ -45,6 +47,8 @@ export interface BudgetAnswers {
   transport: Money | null;
   accommodation: Money | null;
   dailySpendPerPerson: Money | null;
+  /** The traveller said the total must never be exceeded. Absent means a guide. */
+  firm?: boolean;
 }
 
 export function buildConstraints(
@@ -60,11 +64,19 @@ export function buildConstraints(
   if (intent.returnDate) hard.push({ kind: 'fixed_return_date', value: intent.returnDate });
   hard.push({ kind: 'traveler_count', value: intent.travelers });
 
-  if (budget.total) hard.push({ kind: 'max_total_budget', value: budget.total });
-  if (budget.transport) hard.push({ kind: 'max_transport_budget', value: budget.transport });
-  if (budget.accommodation) {
-    hard.push({ kind: 'max_accommodation_budget', value: budget.accommodation });
-  }
+  // A budget is a guide unless the traveller said "do not exceed". Only a
+  // firm total becomes a hard constraint; otherwise it shapes the ranking and
+  // the warnings, and nothing is filtered out for being dear. The derived
+  // transport and accommodation allowances are never hard: a dear flight
+  // beside a cheap hotel can still fit the total. When the total is firm, no
+  // single part may exceed all of it, which is the most that can be said of
+  // one part on its own.
+  const firmTotal = budget.firm === true ? budget.total : null;
+  if (firmTotal) hard.push({ kind: 'max_total_budget', value: firmTotal });
+  const transportCap = budget.transport ?? firmTotal;
+  if (transportCap) hard.push({ kind: 'max_transport_budget', value: transportCap });
+  const accommodationCap = budget.accommodation ?? firmTotal;
+  if (accommodationCap) hard.push({ kind: 'max_accommodation_budget', value: accommodationCap });
 
   // --- hard: stated requirements -------------------------------------------
   if (profile.accommodation.rooms > 1) {
@@ -185,7 +197,22 @@ export function deriveEnvelope(
       budget.accommodation ?? (budget.total ? multiply(budget.total, split.accommodation) : null),
     dailySpend: budget.dailySpendPerPerson ?? dailyFromTotal,
     activities: null,
+    firm: budget.firm === true && budget.total !== null,
   };
+}
+
+/**
+ * The ceiling a part of the trip must stay under, or null when there is none:
+ * a guide budget imposes no ceiling, and one the traveller agreed to exceed
+ * is lifted. Searches and filters read this, never the derived envelope.
+ */
+export function budgetCeiling(
+  constraints: ConstraintSet,
+  part: 'transport' | 'accommodation',
+): Money | null {
+  const kind = part === 'transport' ? 'max_transport_budget' : 'max_accommodation_budget';
+  if (hasWaiver(constraints, kind) || hasWaiver(constraints, 'max_total_budget')) return null;
+  return findHard(constraints, kind)?.value ?? null;
 }
 
 /**
@@ -201,6 +228,7 @@ export function deriveEnvelope(
 export function statedBudget(constraints: ConstraintSet, profile: TravelerProfile): BudgetAnswers {
   return {
     total: constraints.budget.total,
+    firm: constraints.budget.firm,
     transport: null,
     accommodation: null,
     // The envelope fills dailySpend from the total when none was stated, so

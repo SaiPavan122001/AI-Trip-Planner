@@ -518,6 +518,10 @@ export class TripService {
     if (answer.key === 'budget.total' && !answer.skipped) {
       return { ...existing, total: answer.value as Money };
     }
+    if (answer.key === 'budget.firm') {
+      // Skipping means "a guide", which is also the default.
+      return { ...existing, firm: !answer.skipped && answer.value === 'firm' };
+    }
     if (answer.key === 'budget.daily_spend') {
       // Skipping withdraws an allowance given earlier, rather than keeping it.
       return { ...existing, dailySpendPerPerson: answer.skipped ? null : (answer.value as Money) };

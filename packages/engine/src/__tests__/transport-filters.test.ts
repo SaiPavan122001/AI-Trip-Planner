@@ -8,6 +8,7 @@ const constraints = (overrides: Partial<ConstraintSet> = {}): ConstraintSet => (
   soft: [],
   budget: {
     total: null,
+    firm: false,
     transport: null,
     accommodation: null,
     dailySpend: null,
@@ -59,21 +60,14 @@ describe('hard constraints on transport', () => {
         transportOffer({ id: 'affordable', totalPrice: money(9000, 'INR') }),
         transportOffer({ id: 'expensive', totalPrice: money(60_000, 'INR') }),
       ],
-      constraints({
-        budget: {
-          total: null,
-          transport: money(20_000, 'INR'),
-          accommodation: null,
-          dailySpend: null,
-          activities: null,
-        },
-      }),
+      // Only a firm limit filters; the ceiling is a hard constraint.
+      constraints({ hard: [{ kind: 'max_transport_budget', value: money(20_000, 'INR') }] }),
       profile(),
       INDIA_LEG,
     );
 
     expect(kept.map((o) => o.id)).toEqual(['affordable']);
-    expect(dropped[0]?.reason).toMatch(/transport budget/);
+    expect(dropped[0]?.reason).toMatch(/firm budget/);
   });
 
   it('keeps a fare whose baggage the provider did not state, rather than hiding it', () => {

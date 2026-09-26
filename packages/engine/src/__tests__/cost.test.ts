@@ -31,6 +31,7 @@ const constraints = (total?: number): ConstraintSet => ({
     accommodation: null,
     dailySpend: null,
     activities: null,
+    firm: false,
   },
   waivers: [],
 });

@@ -67,14 +67,37 @@ describe('itinerary validation', () => {
     expect(overlap?.itemIds).toEqual(['a', 'b']);
   });
 
-  it('blocks a plan that exceeds a stated budget', () => {
+  it('warns, but does not block, when a plan exceeds a budget that is only a guide', () => {
     const issues = validateItinerary({
       intent: tripIntent,
       classification,
       profile: profile(),
       constraints: {
         ...noConstraints,
-        budget: { total: money(150_000, 'INR') } as never,
+        budget: { total: money(150_000, 'INR'), firm: false } as never,
+      },
+      items: [item({})],
+      cost: cost(178_000),
+      outbound: null,
+      inbound: null,
+      hotel: null,
+    });
+
+    const guide = issues.find((i) => i.code === 'over_budget_guide');
+    expect(guide?.severity).toBe('warning');
+    expect(guide?.message).toMatch(/guide/);
+    expect(guide?.message).toMatch(/28,000/);
+    expect(issues.map((i) => i.code)).not.toContain('budget_exceeded');
+  });
+
+  it('blocks a plan that exceeds a firm budget', () => {
+    const issues = validateItinerary({
+      intent: tripIntent,
+      classification,
+      profile: profile(),
+      constraints: {
+        ...noConstraints,
+        budget: { total: money(150_000, 'INR'), firm: true } as never,
       },
       items: [item({})],
       cost: cost(178_000),
@@ -95,7 +118,7 @@ describe('itinerary validation', () => {
       profile: profile(),
       constraints: {
         ...noConstraints,
-        budget: { total: money(150_000, 'INR') } as never,
+        budget: { total: money(150_000, 'INR'), firm: true } as never,
         waivers: [
           {
             kind: 'max_total_budget',
@@ -204,5 +227,53 @@ describe('itinerary validation', () => {
     });
 
     expect(issues.find((i) => i.code === 'opening_hours_unknown')?.severity).toBe('warning');
+  });
+});
+
+describe('free time', () => {
+  it('does not treat meals inside an unplanned day as overlapping it', () => {
+    const rest = item({
+      id: 'rest',
+      kind: 'rest',
+      title: 'Unplanned day',
+      startUtc: '2026-11-11T04:00:00.000Z',
+      endUtc: '2026-11-11T11:30:00.000Z',
+    });
+    const lunch = item({
+      id: 'lunch',
+      kind: 'meal',
+      title: 'Lunch',
+      startUtc: '2026-11-11T07:30:00.000Z',
+      endUtc: '2026-11-11T08:30:00.000Z',
+    });
+    const issues = validateItinerary({
+      intent: tripIntent,
+      classification,
+      profile: profile(),
+      constraints: noConstraints,
+      items: [rest, lunch],
+      cost: cost(),
+      outbound: null,
+      inbound: null,
+      hotel: null,
+    });
+    expect(issues.map((i) => i.code)).not.toContain('overlapping_items');
+  });
+
+  it('still flags two real commitments that overlap', () => {
+    const a = item({ id: 'a', title: 'Museum', startUtc: '2026-11-11T04:00:00.000Z', endUtc: '2026-11-11T06:00:00.000Z' });
+    const b = item({ id: 'b', title: 'Fort', startUtc: '2026-11-11T05:00:00.000Z', endUtc: '2026-11-11T07:00:00.000Z' });
+    const issues = validateItinerary({
+      intent: tripIntent,
+      classification,
+      profile: profile(),
+      constraints: noConstraints,
+      items: [a, b],
+      cost: cost(),
+      outbound: null,
+      inbound: null,
+      hotel: null,
+    });
+    expect(issues.map((i) => i.code)).toContain('overlapping_items');
   });
 });

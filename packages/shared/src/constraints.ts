@@ -85,6 +85,12 @@ export const BudgetEnvelope = z.object({
   /** Per person, per day, for meals and incidentals. */
   dailySpend: Money.nullable().default(null),
   activities: Money.nullable().default(null),
+  /**
+   * False (the default) means the budget is a guide: plans above it are still
+   * shown, flagged and ranked lower. True means the traveller said "do not
+   * exceed" it, and it filters and blocks like any other hard constraint.
+   */
+  firm: z.boolean().default(false),
 });
 export type BudgetEnvelope = z.infer<typeof BudgetEnvelope>;
 

@@ -19,6 +19,7 @@ import {
   type TripIntent,
 } from '@trip/shared';
 import { describeNeeds, unconfirmedHotelNeeds } from './accessibility.js';
+import { budgetCeiling } from './constraints.js';
 import { keepSupportedHotels } from './currency.js';
 import { cheapestRoom, scoreHotels, type ScoredCandidate } from './scoring.js';
 
@@ -90,7 +91,7 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
   }
 
   const centre = activityCentroid(activities, intent.destination.coordinates);
-  const accommodationBudget = constraints.budget.accommodation;
+  const accommodationBudget = budgetCeiling(constraints, 'accommodation');
   const maxPerNight = accommodationBudget
     ? Math.round(toMajor(accommodationBudget) / nights)
     : null;
@@ -226,7 +227,7 @@ function filterHotels(
   const filtered: Array<{ hotelId: string; reason: string }> = [];
   const requiredRooms = findHard(constraints, 'required_rooms')?.value ?? profile.accommodation.rooms;
   const needsFreeCancellation = Boolean(findHard(constraints, 'required_free_cancellation'));
-  const accommodationBudget = constraints.budget.accommodation;
+  const accommodationBudget = budgetCeiling(constraints, 'accommodation');
   const minCategory = profile.accommodation.minCategory;
   const rooms = Math.max(1, requiredRooms);
   const guests = seatedTravelers(intent.travelers);
@@ -281,7 +282,7 @@ function filterHotels(
       if (compare(cheapest.totalPrice, accommodationBudget) > 0) {
         filtered.push({
           hotelId: hotel.id,
-          reason: `Cheapest rate for ${nights} night(s) exceeds the accommodation budget.`,
+          reason: `Cheapest rate for ${nights} night(s) is more than your firm budget on its own.`,
         });
         continue;
       }

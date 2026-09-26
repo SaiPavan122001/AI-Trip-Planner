@@ -80,7 +80,8 @@ describe('budgets are never skipped because of currency', () => {
     const p = profile();
     const constraints = {
       ...buildConstraintsOnly(p),
-      budget: { total: null, transport: money(5000, 'INR'), accommodation: null, dailySpend: null, activities: null },
+      // A firm limit is what makes the transport ceiling a filter.
+      hard: [{ kind: 'max_transport_budget' as const, value: money(5000, 'INR') }],
     };
     const { kept, dropped } = applyHardConstraints([inEuros()], constraints, p, INDIA_LEG);
 

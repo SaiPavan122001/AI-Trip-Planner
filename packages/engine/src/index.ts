@@ -13,5 +13,6 @@ export * from './schedule.js';
 export * from './cost.js';
 export * from './validate.js';
 export * from './plans.js';
+export * from './plan-score.js';
 export * from './pricing.js';
 export * from './modify.js';

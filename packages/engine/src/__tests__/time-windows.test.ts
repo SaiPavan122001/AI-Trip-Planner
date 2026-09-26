@@ -29,7 +29,7 @@ const windows = (
     ...(latest ? [{ kind: 'latest_arrival_time' as const, value: latest }] : []),
   ],
   soft: [],
-  budget: { total: null, transport: null, accommodation: null, dailySpend: null, activities: null },
+  budget: { total: null, transport: null, accommodation: null, dailySpend: null, activities: null, firm: false },
   waivers: waived.map((kind) => ({ kind, waivedAt: '2026-01-01T00:00:00.000Z', reason: 'test' })),
 });
 

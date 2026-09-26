@@ -89,6 +89,8 @@ export const ModificationParameters = z
     infants: z.number().int().min(0).max(10).optional(),
     /** A new total budget. Must be positive and in the trip's currency. */
     budgetTotal: Money.refine((m) => Number.isSafeInteger(m.amount) && m.amount > 0, 'positive amount').optional(),
+    /** True for "do not exceed"; false for "just a guide". */
+    budgetFirm: z.boolean().optional(),
   })
   .strict();
 export type ModificationParameters = z.infer<typeof ModificationParameters>;

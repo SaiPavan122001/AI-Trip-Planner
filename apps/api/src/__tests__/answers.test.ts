@@ -57,14 +57,11 @@ describe('POST /v1/trips/:id/answers', () => {
     expect(res.json().trip.profile.answeredKeys).toContain('style.travel_style');
   });
 
-  it('turns a valid budget into a hard constraint', async () => {
+  it('records a valid budget as the traveller\'s guide', async () => {
     const res = await answer({ key: 'budget.total', value: { amount: 15_000_000, currency: 'INR' } });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().trip.constraints.hard).toContainEqual({
-      kind: 'max_total_budget',
-      value: { amount: 15_000_000, currency: 'INR' },
-    });
+    expect(res.json().trip.constraints.budget.total).toEqual({ amount: 15_000_000, currency: 'INR' });
   });
 
   it('never echoes a rejected value back', async () => {
@@ -101,5 +98,40 @@ describe('the store refuses documents it could not read back', () => {
 
     const stored = await repository.getSession(TRIP_ID);
     expect(stored?.profile.travelStyle).toBeNull();
+  });
+});
+
+describe('a firm budget', () => {
+  const total = { key: 'budget.total', value: { amount: 15_000_000, currency: 'INR' } };
+
+  it('is a guide by default: the total is recorded but does not filter or block', async () => {
+    const res = await answer(total);
+    const budget = res.json().trip.constraints;
+    expect(budget.budget.firm).toBe(false);
+    expect(budget.hard.map((h: { kind: string }) => h.kind)).not.toContain('max_total_budget');
+    expect(budget.budget.total).toEqual({ amount: 15_000_000, currency: 'INR' });
+  });
+
+  it('becomes a hard limit when the traveller says so', async () => {
+    await answer(total);
+    const res = await answer({ key: 'budget.firm', value: 'firm' });
+    const constraints = res.json().trip.constraints;
+    expect(constraints.budget.firm).toBe(true);
+    expect(constraints.hard).toContainEqual({ kind: 'max_total_budget', value: { amount: 15_000_000, currency: 'INR' } });
+  });
+
+  it('goes back to a guide when the answer is withdrawn', async () => {
+    await answer(total);
+    await answer({ key: 'budget.firm', value: 'firm' });
+    const res = await answer({ key: 'budget.firm', value: null, skipped: true });
+    expect(res.json().trip.constraints.budget.firm).toBe(false);
+  });
+
+  it('keeps the firm flag when the total is answered again', async () => {
+    await answer(total);
+    await answer({ key: 'budget.firm', value: 'firm' });
+    const res = await answer({ key: 'budget.total', value: { amount: 9_000_000, currency: 'INR' } });
+    expect(res.json().trip.constraints.budget.firm).toBe(true);
+    expect(res.json().trip.constraints.budget.total.amount).toBe(9_000_000);
   });
 });
