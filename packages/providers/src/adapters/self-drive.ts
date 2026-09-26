@@ -1,8 +1,12 @@
 import {
+  addMinutes,
   divide,
   fail,
+  isoWithOffset,
+  localParts,
   money,
   ok,
+  utcFromLocal,
   type IsoDate,
   type Place,
   type ProviderResult,
@@ -82,12 +86,24 @@ export class SelfDriveProvider implements BaseProvider {
       );
     }
 
-    const departureAt = `${opts.date}T${opts.departLocalTime}:00`;
+    if (!/^\d{2}:\d{2}$/.test(opts.departLocalTime)) {
+      return fail(
+        'invalid_request',
+        DESCRIPTOR.id,
+        DESCRIPTOR.label,
+        'The departure time for this drive is not a valid time of day.',
+      );
+    }
+
+    // The departure is a wall-clock time where the traveller starts, so it is
+    // resolved in the origin's zone. Parsing it with `new Date()` would use
+    // whatever zone the server happens to run in.
+    const departUtc = utcFromLocal(opts.date, opts.departLocalTime, opts.origin.timezone);
     const route = await this.routing.route({
       from: opts.origin.coordinates,
       to: opts.destination.coordinates,
       profile: 'driving',
-      departAt: new Date(departureAt).toISOString(),
+      departAt: departUtc,
     });
     if (route.status !== 'ok') return route;
 
@@ -117,7 +133,16 @@ export class SelfDriveProvider implements BaseProvider {
       );
     }
 
-    const arrivalAt = new Date(Date.parse(departureAt) + totalMinutes * 60_000).toISOString();
+    // Arithmetic on the instant, then each end written as local wall time in
+    // its own zone with its offset, the same shape every other transport
+    // segment uses. A drive across a zone boundary arrives in the
+    // destination's local time, not the origin's.
+    const arriveUtc = addMinutes(departUtc, totalMinutes);
+    const departureAt = isoWithOffset(departUtc, opts.origin.timezone);
+    const arrivalAt = isoWithOffset(arriveUtc, opts.destination.timezone);
+    const overnight =
+      localParts(departUtc, opts.origin.timezone).date !==
+      localParts(arriveUtc, opts.destination.timezone).date;
 
     const offer: TransportOffer = {
       id: `self-drive:${opts.origin.id}-${opts.destination.id}-${opts.date}`,
@@ -157,7 +182,7 @@ export class SelfDriveProvider implements BaseProvider {
       selectedFareCode: null,
       totalDurationMinutes: totalMinutes,
       transfers: 0,
-      overnight: departureAt.slice(0, 10) !== arrivalAt.slice(0, 10),
+      overnight,
       refundable: null,
       cancellationPolicy: null,
       baggageSummary: 'Limited only by the vehicle',

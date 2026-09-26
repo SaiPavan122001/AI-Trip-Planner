@@ -9,3 +9,4 @@ export * from './itinerary.js';
 export * from './questions.js';
 export * from './booking.js';
 export * from './session.js';
+export * from './time.js';
