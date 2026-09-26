@@ -156,6 +156,27 @@ try {
   const first = trip.trip.plans[0];
   check('no revalidation tokens are sent to the browser', !JSON.stringify(trip).includes('"revalidationToken":"'));
 
+  // The multi-agent path: an explanation written from the plans' facts, and a trace of every stage.
+  const stagesRun = (trip.trip.agentTrace ?? []).map((t) => t.stage).join(',');
+  check(
+    'the search went through the orchestrator and left an explanation and a trace',
+    Boolean(trip.trip.narrative?.summary) && /Nothing has been booked/.test(trip.trip.narrative.summary) &&
+      stagesRun === 'transport_agent,accommodation_agent,activity_agent,guidance,plan_search,validation,synthesis_agent',
+    stagesRun,
+  );
+  const said = await call('POST', `/v1/trips/${id}/requirements`, { message: 'We like history and a relaxed pace. No buses please.' });
+  check(
+    'what the traveller says in words is read, checked and applied through the answers',
+    said.status === 200 && said.json.applied.includes('transport.mode_openness') && said.json.keptForPlanning.includes('activity interest: history'),
+    `status ${said.status}`,
+  );
+  const interpreted = await call('POST', '/v1/requirements/interpret', { message: 'a beach holiday from Pune' });
+  check(
+    'a request written in words says what is missing instead of inventing it',
+    interpreted.status === 200 && interpreted.json.missing.some((m) => m.field === 'departure_date') && interpreted.json.tripInput === null,
+  );
+  check('what was said is kept with the trip for the planning agents', (await call('GET', `/v1/trips/${id}`)).json.trip.statedRequirements !== null);
+
   const pins = await call('PUT', `/v1/trips/${id}/pins`, { pins: ['outbound'] });
   check('a part can be pinned', pins.status === 200 && pins.json.trip.pins[0] === 'outbound');
   const replan = await call('POST', `/v1/trips/${id}/plan`);

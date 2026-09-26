@@ -103,6 +103,8 @@ const EnvSchema = z.object({
   RUN_LEASE_MS: z.coerce.number().int().min(1000).default(30_000),
   RUN_POLL_MS: z.coerce.number().int().min(50).default(1000),
   RUN_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(3),
+  /** Ceiling on one call to a language model made by a planning agent, in ms. Past it the agent falls back to rules. */
+  AGENT_TIMEOUT_MS: z.coerce.number().int().min(1000).default(15_000),
   RUN_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(2),
   /** Searches a person may start per day; each one calls paid provider APIs. */
   PLAN_RUNS_PER_DAY_ANONYMOUS: z.coerce.number().int().min(1).default(15),

@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { zodToJsonSchema } from 'zod-to-json-schema';
-import { LlmUnavailableError, type ExtractRequest, type LlmProvider, type LlmResult } from './types.js';
+import { LlmInvalidOutputError, LlmUnavailableError, type ExtractRequest, type LlmProvider, type LlmResult } from './types.js';
 
 /**
  * Anthropic adapter.
@@ -88,7 +88,7 @@ export class AnthropicLlmProvider implements LlmProvider {
         ],
         tool_choice: { type: 'tool', name: req.schemaName },
         messages: [{ role: 'user', content: req.input }],
-      });
+      }, req.signal ? { signal: req.signal } : undefined);
 
       if (response.stop_reason === 'refusal') {
         throw new LlmUnavailableError(
@@ -101,12 +101,12 @@ export class AnthropicLlmProvider implements LlmProvider {
         (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
       );
       if (!toolUse) {
-        throw new LlmUnavailableError(this.id, 'The model returned no structured result.');
+        throw new LlmInvalidOutputError(this.id, 'The model returned no structured result.');
       }
 
       const parsed = req.schema.safeParse(toolUse.input);
       if (!parsed.success) {
-        throw new LlmUnavailableError(
+        throw new LlmInvalidOutputError(
           this.id,
           `Structured output failed validation: ${parsed.error.issues.map((i) => i.message).join('; ')}`,
         );

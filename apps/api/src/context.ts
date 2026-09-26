@@ -80,7 +80,7 @@ export async function buildContext(overrides: Partial<AppContext> = {}): Promise
   let worker: RunWorker | null = null;
   const runs =
     overrides.runs ??
-    new RunService({ store: repository, registry, env, logger, onQueued: () => worker?.wake() });
+    new RunService({ store: repository, registry, llm, env, logger, onQueued: () => worker?.wake() });
   worker = overrides.worker ?? new RunWorker({ store: repository, runs, env, logger });
 
   for (const disabled of registry.disabled) {

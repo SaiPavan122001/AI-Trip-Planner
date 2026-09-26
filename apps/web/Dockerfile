@@ -7,6 +7,7 @@ COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/shared/package.json      packages/shared/
 COPY packages/providers/package.json   packages/providers/
 COPY packages/engine/package.json      packages/engine/
+COPY packages/agents/package.json      packages/agents/
 COPY packages/llm/package.json         packages/llm/
 COPY apps/api/package.json             apps/api/
 COPY apps/web/package.json             apps/web/

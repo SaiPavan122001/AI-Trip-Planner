@@ -99,6 +99,17 @@ export const api = {
 
   listTrips: () => request<{ trips: TripSession[] }>('/v1/trips'),
 
+  /**
+   * Tell the planner more, in your own words. What is understood is checked and
+   * applied through the same answers as the interview; the reply says what was
+   * applied, what could not be, and what still needs the change flow.
+   */
+  sayInWords: (id: string, message: string) =>
+    request<RequirementsReply>(`/v1/trips/${id}/requirements`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }),
+
   deleteTrip: (id: string) => request<void>(`/v1/trips/${id}`, { method: 'DELETE' }),
 
   answer: (id: string, key: string, value: unknown, skipped = false) =>
@@ -247,6 +258,18 @@ export interface TripSession {
     completeness: number;
     canPlan: boolean;
   } | null;
+  /** The explanation of the latest plans, written from their checked facts. */
+  narrative: {
+    summary: string;
+    plans: Record<string, string>;
+    /** template: written in code. model: written by a language model and fact-checked. mixed: both. */
+    source: 'model' | 'template' | 'mixed';
+    builtAt: string;
+  } | null;
+  /** What the planning agents and services did on the latest search. */
+  agentTrace: AgentTraceEntry[];
+  /** What the traveller has said in words, as understood and checked. */
+  statedRequirements: { soft: Array<{ kind: string; value: string }>; hard: Array<{ kind: string; value: string }> } | null;
   /** What the traveller said about money. `firm` is true only for "do not exceed". */
   constraints: { budget: { total: Money | null; firm: boolean } };
   plans: TripPlan[];
@@ -403,6 +426,36 @@ export interface SearchSummary {
   hotelsConsidered: number;
   hotelsFiltered: Array<{ hotelId: string; reason: string }>;
   budgetConflict: BudgetConflict | null;
+}
+
+export interface AgentTraceEntry {
+  stage: string;
+  kind: 'agent' | 'service';
+  status: 'ok' | 'degraded' | 'failed' | 'skipped';
+  source: 'model' | 'rules' | null;
+  durationMs: number;
+  detail: string;
+  warnings: string[];
+  rejected: string[];
+}
+
+export interface RequirementsReply {
+  trip: TripSession;
+  /** What was understood, quoted from the message. */
+  requirements: {
+    hard: Array<{ kind: string; value: string; evidence: string }>;
+    soft: Array<{ kind: string; value: string; evidence: string }>;
+  };
+  missing: Array<{ field: string; question: string }>;
+  conflicts: Array<{ fields: string[]; message: string }>;
+  applied: string[];
+  rejected: Array<{ key: string; reason: string }>;
+  unmapped: Array<{ item: string; reason: string }>;
+  keptForPlanning: string[];
+  differences: Array<{ field: string; said: string; current: string }>;
+  understoodBy: string;
+  droppedCount: number;
+  notes: string[];
 }
 
 export interface PlanStarted {

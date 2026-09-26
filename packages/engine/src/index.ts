@@ -16,3 +16,4 @@ export * from './plans.js';
 export * from './plan-score.js';
 export * from './pricing.js';
 export * from './modify.js';
+export * from './pins.js';

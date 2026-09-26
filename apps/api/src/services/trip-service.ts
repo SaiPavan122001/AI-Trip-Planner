@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import {
   AnswerValidationError,
+  checkPins,
+  componentsOf,
+  selectedPlanOf,
   applyAnswer,
   applyModification,
   classifyJourney,
@@ -11,6 +14,13 @@ import {
   type KeptComponents,
   type ValidatedAnswer,
 } from '@trip/engine';
+import {
+  mergeRequirements,
+  requirementsToAnswers,
+  runRequirementsAgent,
+  toTripInput,
+  type AgentContext,
+} from '@trip/agents';
 import type { ProviderRegistry } from '@trip/providers';
 import type { TripLlm } from '@trip/llm';
 import {
@@ -27,13 +37,13 @@ import {
   type PlanningRunView,
   type PlanningSession,
   type ProposedChange,
+  type RequirementsState,
   type TravelerProfile,
   type TripPlan,
 } from '@trip/shared';
 import { ApiError } from '../errors.js';
 import type { RunRecord, Store } from '../repository/store.js';
 import { TripChangedError } from '../repository/types.js';
-import { checkPins, componentsOf, selectedPlanOf } from './pins.js';
 import { runView, type Actor, type RunService } from './run-service.js';
 
 /**
@@ -54,6 +64,35 @@ export interface TripServiceDeps {
   llm: TripLlm;
   repository: Store;
   runs: RunService;
+  /** Ceiling on one language-model call made by an agent, in ms. */
+  agentTimeoutMs?: number;
+}
+
+/** Today where a trip starts, for reading dates a traveller wrote without a year. */
+const today = (timezone: string) => localParts(new Date().toISOString(), timezone).date;
+
+export interface RequirementsReading {
+  requirements: RequirementsState;
+  /** Who read it: the model's name, or `rules`. */
+  understoodBy: string;
+  /** How many proposals failed a check and were dropped. */
+  droppedCount: number;
+  /** Notes on how it was read (model unavailable, message truncated…). Written in code. */
+  notes: string[];
+}
+
+export interface RequirementsApplied extends RequirementsReading {
+  session: PlanningSession;
+  /** Answer keys that were applied to the trip, through the ordinary answer path. */
+  applied: string[];
+  /** Answers the trip refused (a question that does not apply, a value out of range), with why. */
+  rejected: Array<{ key: string; reason: string }>;
+  /** Said and understood, but nothing carries it yet. */
+  unmapped: Array<{ item: string; reason: string }>;
+  /** Said, and used by the planning agents at the next search. */
+  keptForPlanning: string[];
+  /** Things said about the trip itself that differ from the trip. Changing them is a change that needs consent. */
+  differences: Array<{ field: string; said: string; current: string }>;
 }
 
 export class TripService {
@@ -139,6 +178,9 @@ export class TripService {
       version: 0,
       pins: [],
       lastSearch: null,
+      statedRequirements: null,
+      narrative: null,
+      agentTrace: [],
       stage: 'profiling',
       intent: { ...intent, origin, destination },
       classification,
@@ -190,6 +232,116 @@ export class TripService {
     await this.owned(id, actor);
     // Its runs go with it; a worker in the middle of one finds its lease gone and stops.
     await this.store.deleteSession(id);
+  }
+
+  // --------------------------------------------------------- requirements
+
+  private agentContext(): AgentContext {
+    return {
+      llm: this.deps.llm,
+      ...(this.deps.agentTimeoutMs ? { timeoutMs: this.deps.agentTimeoutMs } : {}),
+    };
+  }
+
+  /**
+   * Reads what a traveller wrote and reports what it understood and what is
+   * still missing. Nothing is stored and no trip is made: this is reading,
+   * not acting. When everything a trip needs is present, `tripInput` is the
+   * body for creating it; the caller still goes through `createTrip`, which
+   * resolves places and checks dates like any other request.
+   */
+  async interpretRequirements(message: string): Promise<RequirementsReading & { tripInput: ReturnType<typeof toTripInput> }> {
+    const reading = await this.readRequirements(message, today('Asia/Kolkata'), {});
+    return { ...reading, tripInput: toTripInput(reading.requirements) };
+  }
+
+  private async readRequirements(
+    message: string,
+    onDate: string,
+    known: Parameters<typeof runRequirementsAgent>[0]['known'],
+  ): Promise<RequirementsReading> {
+    const outcome = await runRequirementsAgent({ message, today: onDate, ...(known ? { known } : {}) }, this.agentContext());
+    if (!outcome.ok) {
+      // Whatever the code, the traveller is told in words; nothing internal leaves.
+      throw outcome.error.code === 'missing_data'
+        ? ApiError.badRequest(outcome.error.message)
+        : ApiError.unprocessable(outcome.error.message);
+    }
+    return {
+      requirements: outcome.data,
+      understoodBy: outcome.meta.source === 'model' ? this.deps.llm.label : 'rules',
+      droppedCount: outcome.meta.rejected.length,
+      notes: outcome.meta.warnings,
+    };
+  }
+
+  /**
+   * Applies what a traveller said, in words, to a trip they own.
+   *
+   * The agent's reading is untrusted, and it enters the trip only through the
+   * same door as a click: each thing said is turned into the answer the
+   * interview would have collected, and applied one at a time by `answer`,
+   * which checks it against the question as asked for this trip and refuses
+   * what does not apply. Nothing here changes the trip's dates, places or
+   * party (those need the consent flow); differences are reported instead.
+   * If the requirements contradict each other, nothing is applied.
+   */
+  async applyRequirements(id: string, actor: Actor, message: string): Promise<RequirementsApplied> {
+    const before = await this.owned(id, actor);
+    const { intent } = before;
+    const reading = await this.readRequirements(message, today(intent.origin.timezone), {
+      origin: intent.origin.name,
+      destination: intent.destination.name,
+      departureDate: intent.departureDate,
+      returnDate: intent.returnDate,
+      adults: intent.travelers.adults,
+    });
+    const { requirements } = reading;
+
+    const differences: RequirementsApplied['differences'] = [];
+    const said = requirements.trip;
+    const differ = (field: string, saidValue: string | null, current: string | null) => {
+      if (saidValue && current !== saidValue && saidValue.toLowerCase() !== (current ?? '').toLowerCase()) {
+        differences.push({ field, said: saidValue, current: current ?? 'not set' });
+      }
+    };
+    differ('origin', said.origin, intent.origin.name);
+    differ('destination', said.destination, intent.destination.name);
+    differ('departure date', said.departureDate, intent.departureDate);
+    differ('return date', said.returnDate, intent.returnDate);
+    differ('adults', said.travelers ? String(said.travelers.adults) : null, String(intent.travelers.adults));
+
+    const applied: string[] = [];
+    const rejected: RequirementsApplied['rejected'] = [];
+    let mapped: ReturnType<typeof requirementsToAnswers> = { answers: [], unmapped: [], keptForPlanning: [] };
+
+    if (requirements.conflicts.length === 0) {
+      mapped = requirementsToAnswers(requirements, { eligibleModes: before.classification.eligibleModes });
+      for (const answer of mapped.answers) {
+        try {
+          await this.answer(id, actor, answer);
+          applied.push(answer.key);
+        } catch (err) {
+          if (err instanceof ApiError && err.statusCode === 400) rejected.push({ key: answer.key, reason: err.message });
+          else throw err;
+        }
+      }
+    }
+
+    // What was said is kept for the planning agents. The latest word on each
+    // kind of requirement replaces the earlier one.
+    const session = await this.mutate(id, actor, (current) => ({
+      ...current,
+      statedRequirements: mergeRequirements(current.statedRequirements, requirements),
+      updatedAt: new Date().toISOString(),
+    }));
+    await this.audit(id, actor, 'requirements.applied', {
+      applied: applied.length,
+      rejected: rejected.length,
+      understoodBy: reading.understoodBy,
+    });
+
+    return { ...reading, session, applied, rejected, unmapped: mapped.unmapped, keptForPlanning: mapped.keptForPlanning, differences };
   }
 
   // -------------------------------------------------------------- answers
@@ -338,6 +490,7 @@ export class TripService {
       kind: session.plans.length > 0 ? 'replan' : 'plan',
       keep: keptFrom(selectedPlanOf(session), check.keep),
       reason: 'The traveller asked for plans.',
+      pinsReleased: check.released,
     });
     return { session, run, reused, pinsReleased: check.released };
   }
@@ -605,6 +758,7 @@ export class TripService {
       kind: 'replan',
       keep: keptFrom(selected, change.keep),
       reason: change.summary,
+      pinsReleased: change.released,
     });
     return {
       ...answer,

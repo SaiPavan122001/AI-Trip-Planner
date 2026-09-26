@@ -16,10 +16,12 @@ import { useRunWatcher } from '@/lib/useRunWatcher';
 import { BudgetPanel } from '@/components/BudgetPanel';
 import { ItineraryTimeline } from '@/components/ItineraryTimeline';
 import { ModifyBar } from '@/components/ModifyBar';
+import { AgentTrace, NarrativeCard } from '@/components/NarrativeCard';
 import { PinsPanel } from '@/components/PinsPanel';
 import { PlanCards } from '@/components/PlanCards';
 import { PlanningProgress } from '@/components/PlanningProgress';
 import { QuestionCard } from '@/components/QuestionCard';
+import { SayItBox } from '@/components/SayItBox';
 import { TransportComparison } from '@/components/TransportComparison';
 
 /**
@@ -245,6 +247,7 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
           />
           <aside className="space-y-4">
             <ClassificationCard trip={trip} />
+            <SayItBox tripId={id} disabled={searching} onTrip={setTrip} />
             {trip.questionnaire?.canPlan ? (
               <div className="card p-5">
                 <p className="text-sm text-ink-soft">
@@ -272,6 +275,8 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
           ) : null}
 
           {!searching && run ? <RunOutcome run={run} /> : null}
+
+          {!searching ? <NarrativeCard trip={trip} planId={selectedPlan?.id ?? null} /> : null}
 
           {plans.length === 0 && !searching ? (
             <section className="card p-6">
@@ -321,6 +326,7 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
                   refused={pinRefusals}
                   onChange={(pins) => void changePins(pins)}
                 />
+                <SayItBox tripId={id} disabled={searching} onTrip={setTrip} />
                 <ModifyBar
                   busy={busy || searching}
                   lastResult={lastModification}
@@ -333,6 +339,7 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
           ) : null}
 
           <ProviderNotes trip={trip} />
+          <AgentTrace trip={trip} />
           <DecisionLog trip={trip} />
         </div>
       )}

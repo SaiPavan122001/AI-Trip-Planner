@@ -16,7 +16,12 @@ import {
   type TripIntent,
   type TripPlan,
 } from '@trip/shared';
-import { clusterByProximity, planActivities, type ActivityPlanResult } from './activities.js';
+import {
+  clusterByProximity,
+  planActivities,
+  type ActivityGuidance,
+  type ActivityPlanResult,
+} from './activities.js';
 import { classifyJourney } from './classify.js';
 import { computeCost, detectBudgetConflict, type BudgetConflict } from './cost.js';
 import { budgetOvershootFactor, combinePlanScore, rankPlans } from './plan-score.js';
@@ -52,6 +57,8 @@ export interface PlanGenerationDeps {
    * original provenance, so it is visibly the same item and not a new quote.
    */
   keep?: KeptComponents;
+  /** Steers which things to do are searched for, and how many a day. Closed vocabulary only. */
+  activityGuidance?: ActivityGuidance;
   /**
    * Stops the search when it fires: provider calls in flight are cancelled,
    * and nothing further is started. The search then rejects with the
@@ -64,7 +71,7 @@ export interface PlanGenerationDeps {
 
 export interface PlanProgress {
   /** A stable name for the step, for a client to key on. */
-  step: 'classify' | 'search' | 'hotels' | 'assemble' | 'rank';
+  step: 'classify' | 'guidance' | 'search' | 'hotels' | 'assemble' | 'rank' | 'validate' | 'explain';
   label: string;
   percent: number;
 }
@@ -142,7 +149,15 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
           clusters: clusterByProximity(kept.activities, activityDays),
           notes: [],
         })
-      : planActivities(registry, intent.destination, profile, activityDays, intent.currency, signal),
+      : planActivities(
+          registry,
+          intent.destination,
+          profile,
+          activityDays,
+          intent.currency,
+          signal,
+          deps.activityGuidance,
+        ),
   ]);
   checkpoint();
 

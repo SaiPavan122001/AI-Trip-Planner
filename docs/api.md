@@ -110,7 +110,7 @@ suggests adding one.
 `{ "trip": PlanningSession, "run": PlanningRun | null }` — the trip and its latest background search,
 which may be running, finished or failed. A trip that is not yours is `404`.
 
-`PlanningSession` includes `version`, `pins` (parts the traveller asked to keep), and `lastSearch`:
+`PlanningSession` includes `version`, `pins` (parts the traveller asked to keep), `statedRequirements` (what they said in words, as checked), `narrative` and `agentTrace` (below), and `lastSearch`:
 the mode comparison from the latest search (`outbound`, `inbound`, `hotelsConsidered`,
 `hotelsFiltered`, `budgetConflict`, `builtAt`), so a screen can be rebuilt from the trip alone.
 
@@ -196,6 +196,16 @@ background (see [Searching in the background](#searching-in-the-background)).
 - `422` if required answers are still missing (`details.nextQuestion`). `409 run_in_progress` if the
   trip is being searched for something else. `429 daily_search_limit` past the daily allowance.
 
+### What a search leaves on the trip
+
+A search runs through the planning orchestrator (see [architecture](architecture.md#planning-agents)). When it succeeds the trip carries:
+
+- `plans` — validated and ranked. Every plan has been through an independent validation gate; one that fails carries `validation.*` blockers in `issues`, sorts last, and is never described as workable. Prices are the engine's: no agent can change one.
+- `narrative` — `{ summary, plans: { [planId]: text }, source, builtAt }`, a plain-language account written from the plans' facts. `source` is `template` (written in code), `model` (written by a language model and fact-checked) or `mixed`. Any part that stated a figure not in the plan, a link, or a claim of booking was replaced.
+- `agentTrace` — one entry per stage (`transport_agent`, `accommodation_agent`, `activity_agent`, `guidance`, `plan_search`, `validation`, `synthesis_agent`): `status` (`ok`, `degraded` when a fallback stood in, `failed`, `skipped`), `source` (`model` or `rules`), timing, a sentence, warnings, and what was proposed and dropped. It never contains the traveller's words.
+
+A request that cannot be met by anything that exists for the trip (for example "only by train" where there is no train) is reported **before any provider is called**: the run still succeeds, `plans` is empty, and `narrative.summary` says what cannot be done and that nothing was searched.
+
 ### Searching in the background
 
 A run has a `status`:
@@ -269,6 +279,40 @@ plan exceeds the budget, `lastSearch.budgetConflict` offers adjustments (never a
 
 Plans are ranked on the journey **and** the stay together (hotel suitability counts as much as the
 journey), then on how far over a guide budget they run.
+
+### What the traveller says in words
+
+Two endpoints read a message written in plain language. Each may use a language model (or the built-in rules when there is none), so each is limited to 10 a minute.
+
+**`POST /v1/requirements/interpret`** — `{ "message": "…" }` (1–2000 characters). Changes nothing and needs no session. Returns what was understood and what is missing:
+
+```json
+{
+  "requirements": { "trip": { "origin": "Pune", "destination": null, "departureDate": null, "returnDate": null, "travelers": { "adults": 2, "children": 0, "infants": 0 } },
+                    "budget": { "total": null, "firm": null }, "hard": [], "soft": [ { "kind": "activity_interest", "value": "beaches", "evidence": "beach" } ],
+                    "missing": [ { "field": "destination", "question": "Where would you like to go?" } ], "conflicts": [], "complete": false },
+  "missing": [ { "field": "destination", "question": "Where would you like to go?" } ],
+  "conflicts": [],
+  "tripInput": null,
+  "understoodBy": "rules",
+  "droppedCount": 0,
+  "notes": []
+}
+```
+
+Every item carries `evidence`, the traveller's own words it was read from; an item whose quote is not in the message is dropped, and `droppedCount` says how many were. A date is only accepted if it is named ("12 December"): "next Friday" is reported as missing. `tripInput` is the body for `POST /v1/trips` when nothing is missing and nothing conflicts, and `null` otherwise: a trip is never assembled by guessing. `missing` and `conflicts` are worked out in code and cannot be hidden by a model.
+
+**`POST /v1/trips/:id/requirements`** — the same reading, against a trip the caller owns (`404` otherwise). It is applied through the ordinary answer path: each thing said becomes the answer the interview would have collected and is checked exactly as one is. Returns:
+
+- `applied` — answer keys that were applied. `rejected` — answers the trip refused, each with the reason (for example a question that does not apply to this trip).
+- `unmapped` — understood, but no question carries it yet (a latest arrival time, a maximum number of stops, free cancellation); reported, never dropped.
+- `keptForPlanning` — interests, pace, preferred mode and stay preferences, kept on the trip (`statedRequirements`) for the planning agents at the next search.
+- `differences` — things said about the trip itself (places, dates, party) that differ from it. **Nothing about the trip itself is changed here**: changing dates or the group is a change that asks first, through `modify`.
+- `conflicts` — if what was said contradicts itself, **nothing is applied**.
+
+The latest word on each kind of requirement replaces the earlier one. What was said is part of what a search depends on, so a search started before it is `superseded`.
+
+---
 
 ### `POST /v1/trips/:id/select`
 

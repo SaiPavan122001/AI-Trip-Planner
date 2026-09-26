@@ -24,7 +24,9 @@ export function canonicalJson(value: unknown): string {
  * traveller changed the trip while the search ran, the plans it found are for
  * a trip that no longer exists and are thrown away, not shown.
  */
-export function inputsHash(session: Pick<PlanningSession, 'intent' | 'profile' | 'constraints' | 'pins'>): string {
+export function inputsHash(
+  session: Pick<PlanningSession, 'intent' | 'profile' | 'constraints' | 'pins' | 'statedRequirements'>,
+): string {
   return createHash('sha256')
     .update(
       canonicalJson({
@@ -32,6 +34,8 @@ export function inputsHash(session: Pick<PlanningSession, 'intent' | 'profile' |
         profile: session.profile,
         constraints: session.constraints,
         pins: [...session.pins].sort(),
+        // What the traveller said in words steers the planning agents, so it is part of what a search depends on.
+        requirements: session.statedRequirements,
       }),
     )
     .digest('hex');

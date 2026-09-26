@@ -220,6 +220,50 @@ unaffected either way, because planning never used the model.
 
 ---
 
+## Planning agents
+
+Planning is done by a small number of **bounded agents** working with **deterministic services**, coordinated by one **orchestrator**. It lives in `packages/agents` (`@trip/agents`), between the engine and the API, and is plain code: there is no agent framework, no agent that plans the whole trip, and no agent that calls another.
+
+The division of labour is the rule the rest follows. Agents understand language, interpret preferences and explain. Code does everything that has a right answer: prices, totals, dates, durations, constraints, validation, ranking, state changes, persistence and authorisation. An agent's output is never the source of truth for any of those.
+
+```
+what the traveller wrote
+        │
+ Requirements Agent ──▶ checked in code ──▶ answers (the interview's own door) + stated requirements
+        │
+ search starts (background run)
+        │
+ Orchestrator ─┬─ Transport Agent ─┐
+               ├─ Accommodation Agent ├─ guidance, checked; fills gaps in soft preferences only
+               └─ Activity Agent ──┘
+        │
+ plan search   (engine: providers, itinerary, cost, its own validation)     ← deterministic
+        │
+ Validation Service (independent gate: dates, party, currency, arithmetic, hard constraints, kept parts)
+        │
+ Synthesis Agent ──▶ fact-check ──▶ narrative (template if anything fails)
+        │
+ saved on the trip by the run service, under its own version and fingerprint checks
+```
+
+**The agent contract** (`contract.ts`). Every agent is the same shape: ask a model for a schema (the traveller's and providers' words go in a delimited, JSON-escaped data block, never in the instructions); treat the answer as untrusted and check every value in code; if there is no model, or its answer is unusable, a deterministic fallback answers and the outcome says so; return a value, never throw. An outcome is `ok` with data, what was dropped, and warnings, or an error with a code (`invalid_output`, `unavailable`, `timeout`, `aborted`, `missing_data`, `conflict`, `impossible`) and a sentence written for a traveller. No agent touches a store, a provider or a secret.
+
+**Requirements Agent.** Reads a message into hard requirements and soft preferences, each with a quote of the traveller's own words. The checks that make it safe to trust: the quote must really be in the message; a date is re-read from its quote (the model's value is not used) and only if the quote names one; an amount only if the quote states it; a count only if the quote contains it; every requirement comes from a closed vocabulary and its quote must talk about that very thing, and, for ruling a mode out or insisting on one, must use the words that say so ("we like trains" excludes nothing); what is missing and what conflicts is worked out afterwards in code, so a model cannot hide a gap. Its output reaches a trip only as answers, applied one at a time by the ordinary `answer` path.
+
+**Transport, Accommodation and Activity Agents.** Each turns what the traveller said into *guidance*, and guidance can only fill what the traveller left empty (`applyGuidance`): it never overwrites an answer, never touches a hard requirement, the priority ranking or the budget. Every value must be one the traveller stated or their words mention. The set of transport modes to consult is decided in code (allowed by the journey, minus what was ruled out); a request nothing can meet ("only by train" on a journey with no train) is reported before any model or provider is called. Activity interests are a closed list that the engine turns into provider place types; the agent names no place. None of them can carry a price, a schedule, a duration or an availability: their output has no such field.
+
+**Budget service.** Arithmetic, not an agent. It states exactly where a plan stands: no budget, within, over a guide, over a firm limit, or over a limit the traveller agreed to pass, and whether the total is complete. "Within budget" is never said when it is not, or without saying what the total leaves out.
+
+**Validation service.** A second, independent check of a finished plan, written against the trip rather than the engine's reasoning. Failures become blockers on the plan, which sorts last and is never described as workable. It marks; it never repairs or edits a number.
+
+**Synthesis Agent.** Writes prose from a facts object built in code. What it writes is checked part by part: no number the facts do not contain (including numbers spelled in words), no link, no claim that anything was booked, paid for or guaranteed, no recommendation of a plan that cannot be carried out. Provider-supplied text (a hotel's name, a note) is cleaned and left out if it asserts too much. A failing part is replaced by the template's plain sentence.
+
+**Orchestrator.** A fixed workflow (`orchestrator.ts`): order and control flow are code. A guidance agent that fails costs guidance, not the search. Cancellation is honoured between stages and passed into agents and providers. Every stage leaves a trace entry (stage, outcome, source, timing, a sentence written in code; never the traveller's words), saved with the trip. It returns a result and does not persist: the run service decides what to save. `replan` re-runs every agent for the changed trip, revalidates pins with the same rules as the API (a pin that no longer fits is released with a reason, carried into the explanation), and the budget is recomputed because the plans are new.
+
+**Where untrusted text goes.** The traveller's message reaches the Requirements Agent as data only. The traveller's quoted words reach the guidance agents as data only. Facts (which include provider-supplied names and notes) reach the Synthesis Agent as data only. Nothing external is ever concatenated into an instruction, and nothing an agent returns is acted on before it has been checked. This establishes the boundaries; it is not a complete defence against prompt injection, and the design depends on agents having too little authority for manipulating them to be worth much.
+
+---
+
 ## Never fabricating data
 
 This is enforced structurally rather than by convention.

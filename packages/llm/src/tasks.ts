@@ -7,7 +7,7 @@ import {
   sanitizeModificationParameters,
   type ModificationRequest,
 } from '@trip/shared';
-import { LlmUnavailableError, type LlmProvider } from './types.js';
+import { LlmUnavailableError, type ExtractRequest, type LlmProvider, type LlmResult } from './types.js';
 
 /**
  * The three jobs the model actually has.
@@ -81,6 +81,20 @@ export class TripLlm {
 
   get label(): string {
     return this.provider?.label ?? 'Rule-based fallback';
+  }
+
+  /**
+   * A schema-checked call for the planning agents. Throws `LlmUnavailableError`
+   * (or its subclass `LlmInvalidOutputError`) when there is no model or it did
+   * not produce something usable; each agent then decides what its own
+   * deterministic fallback is. The result is still untrusted: the schema only
+   * proves the shape, and the agent's sanitiser checks the values.
+   */
+  async structured<T>(req: ExtractRequest<T>): Promise<LlmResult<T>> {
+    if (!this.provider?.isConfigured()) {
+      throw new LlmUnavailableError('none', 'No language model is configured.');
+    }
+    return this.provider.extract(req);
   }
 
   /**

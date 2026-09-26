@@ -115,16 +115,21 @@ export interface FakeTravel {
   registry: ProviderRegistry;
   /** How many times each kind of search was made, to see what a re-plan reused. */
   calls: { flights: number; hotels: number };
+  /** What the things-to-do search was asked for, when `activities` was requested. */
+  activityRequests: Array<{ categories: string[]; limit: number }>;
 }
 
 export function fakeTravelRegistry(
   options: {
     /** Replaces the flight search, for tests about slow or failing providers. */
     flights?: FlightSearchStub;
+    /** Adds a things-to-do provider that finds nothing but records what it was asked for. */
+    activities?: boolean;
   } = {},
 ): FakeTravel {
   const registry = new ProviderRegistry(loadProvidersEnv({}));
   const calls = { flights: 0, hotels: 0 };
+  const activityRequests: FakeTravel['activityRequests'] = [];
 
   registry.geocoding.push(fakeGeocoder as never);
 
@@ -166,5 +171,17 @@ export function fakeTravelRegistry(
     },
   } as never);
 
-  return { registry, calls };
+  if (options.activities) {
+    registry.activities.push({
+      descriptor: { id: 'fake-activities', label: 'Fake activities', kinds: ['activity'], requiredEnv: [], coverage: 'global', docsUrl: null, attribution: null },
+      isConfigured: () => true,
+      health: async () => ok({ ok: true as const, latencyMs: 1 }, provenance),
+      searchActivities: async (req: { categories: string[]; limit: number }) => {
+        activityRequests.push({ categories: req.categories, limit: req.limit });
+        return ok([], provenance) as never;
+      },
+    } as never);
+  }
+
+  return { registry, calls, activityRequests };
 }

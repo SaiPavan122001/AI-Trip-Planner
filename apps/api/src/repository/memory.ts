@@ -228,9 +228,12 @@ export class InMemoryRepository implements Store {
   }
 
   async latestRunForTrip(tripId: string): Promise<RunRecord | null> {
-    const latest = [...this.runs.values()]
-      .filter((r) => r.tripId === tripId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    // Runs made in the same millisecond share a timestamp, so ties go to the one
+    // made last: the map keeps insertion order, and `>=` lets a later run win.
+    let latest: RunRecord | null = null;
+    for (const run of this.runs.values()) {
+      if (run.tripId === tripId && (latest === null || run.createdAt >= latest.createdAt)) latest = run;
+    }
     return latest ? structuredClone(latest) : null;
   }
 

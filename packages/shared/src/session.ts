@@ -5,6 +5,8 @@ import { IsoDate, JourneyClassification, LocalTime, TransportMode, TripIntent } 
 import { Priority, TravelerProfile } from './traveler.js';
 import { TripPlan } from './itinerary.js';
 import { QuestionnaireState } from './questions.js';
+import { AgentTraceEntry, PlanNarrative } from './guidance.js';
+import { RequirementsState } from './requirements.js';
 
 /**
  * The planning session is the single aggregate the API reads and writes. It is
@@ -205,6 +207,16 @@ export const PlanningSession = z.object({
    */
   pins: z.array(TripComponent).default([]),
   lastSearch: SearchSummary.nullable().default(null),
+  /**
+   * What the traveller has said in their own words, as the Requirements Agent
+   * read it and the deterministic checks accepted it. It feeds the guidance
+   * agents at planning time. Untrusted in origin, sanitised before it is here.
+   */
+  statedRequirements: RequirementsState.nullable().default(null),
+  /** The explanation of the latest plans; every part checked against the plans' facts. */
+  narrative: PlanNarrative.nullable().default(null),
+  /** What the agents and services did on the latest search. */
+  agentTrace: z.array(AgentTraceEntry).max(20).default([]),
   stage: PlanningStage,
   intent: TripIntent,
   classification: JourneyClassification,

@@ -10,6 +10,7 @@ COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/shared/package.json      packages/shared/
 COPY packages/providers/package.json   packages/providers/
 COPY packages/engine/package.json      packages/engine/
+COPY packages/agents/package.json      packages/agents/
 COPY packages/llm/package.json         packages/llm/
 COPY apps/api/package.json             apps/api/
 COPY apps/web/package.json             apps/web/
@@ -23,6 +24,7 @@ RUN npx prisma generate --schema apps/api/prisma/schema.prisma \
  && npm run build -w @trip/providers \
  && npm run build -w @trip/llm \
  && npm run build -w @trip/engine \
+ && npm run build -w @trip/agents \
  && npm run build -w @trip/api \
  && npm prune --omit=dev
 

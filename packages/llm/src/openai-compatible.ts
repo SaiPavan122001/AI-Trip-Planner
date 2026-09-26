@@ -1,5 +1,5 @@
 import { zodToJsonSchema } from 'zod-to-json-schema';
-import { LlmUnavailableError, type ExtractRequest, type LlmProvider, type LlmResult } from './types.js';
+import { LlmInvalidOutputError, LlmUnavailableError, type ExtractRequest, type LlmProvider, type LlmResult } from './types.js';
 
 /**
  * Adapter for any service that speaks the OpenAI chat-completions shape:
@@ -71,7 +71,9 @@ export class OpenAiCompatibleProvider implements LlmProvider {
             { role: 'user', content: req.input },
           ],
         }),
-        signal: AbortSignal.timeout(this.config.timeoutMs),
+        signal: req.signal
+          ? AbortSignal.any([AbortSignal.timeout(this.config.timeoutMs), req.signal])
+          : AbortSignal.timeout(this.config.timeoutMs),
       });
     } catch (err) {
       throw new LlmUnavailableError(this.id, `${this.label} could not be reached.`, err);
@@ -87,19 +89,19 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const body = (await response.json()) as ChatCompletionResponse;
     const content = body.choices?.[0]?.message?.content;
     if (!content) {
-      throw new LlmUnavailableError(this.id, `${this.label} returned an empty response.`);
+      throw new LlmInvalidOutputError(this.id, `${this.label} returned an empty response.`);
     }
 
     let raw: unknown;
     try {
       raw = JSON.parse(content);
     } catch {
-      throw new LlmUnavailableError(this.id, `${this.label} did not return valid JSON.`);
+      throw new LlmInvalidOutputError(this.id, `${this.label} did not return valid JSON.`);
     }
 
     const parsed = req.schema.safeParse(raw);
     if (!parsed.success) {
-      throw new LlmUnavailableError(
+      throw new LlmInvalidOutputError(
         this.id,
         `Structured output failed validation: ${parsed.error.issues.map((i) => i.message).join('; ')}`,
       );

@@ -45,6 +45,7 @@ jobs:
           npm run build -w @trip/providers
           npm run build -w @trip/llm
           npm run build -w @trip/engine
+          npm run build -w @trip/agents
 
       # Explicit and separate from the build, so a type error is reported as a
       # type error in every workspace, including the web app, whose production
@@ -108,6 +109,7 @@ jobs:
           npm run build -w @trip/providers
           npm run build -w @trip/llm
           npm run build -w @trip/engine
+          npm run build -w @trip/agents
 
       - name: Integration tests
         run: npm run test:integration -w @trip/api

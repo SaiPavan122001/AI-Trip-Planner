@@ -22,6 +22,7 @@ export function registerTripRoutes(app: FastifyInstance, ctx: AppContext, auth: 
     llm: ctx.llm,
     repository: ctx.repository,
     runs: ctx.runs,
+    agentTimeoutMs: ctx.env.AGENT_TIMEOUT_MS,
   });
 
   /** Who is asking; refuses if nobody is signed in. Reading someone's trip needs a session. */
@@ -212,6 +213,71 @@ export function registerTripRoutes(app: FastifyInstance, ctx: AppContext, auth: 
       return sendError(reply, err);
     }
   });
+
+  const requirementsBody = z.object({ message: z.string().trim().min(1).max(2000) });
+
+  /**
+   * Reads a request written in plain language and says what was understood,
+   * what is missing, and what conflicts. Changes nothing and creates nothing:
+   * when the request is complete, `tripInput` is what to send to
+   * `POST /v1/trips`. Each call may use a language model, so it is tightly
+   * limited; it needs no session, as it stores nothing.
+   */
+  app.post(
+    '/v1/requirements/interpret',
+    { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      try {
+        const { message } = requirementsBody.parse(req.body);
+        const reading = await service.interpretRequirements(message);
+        return reply.send({
+          requirements: reading.requirements,
+          missing: reading.requirements.missing,
+          conflicts: reading.requirements.conflicts,
+          tripInput: reading.tripInput,
+          understoodBy: reading.understoodBy,
+          droppedCount: reading.droppedCount,
+          notes: reading.notes,
+        });
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * Applies what the traveller said, in words, to their own trip. Every part
+   * goes through the ordinary answer path, so it is checked exactly as a click
+   * would be; what cannot be applied is reported, with the reason, never
+   * dropped. Changes to the trip's dates, places or party are reported as
+   * `differences` and need the change flow, which asks first.
+   */
+  app.post(
+    '/v1/trips/:id/requirements',
+    { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      try {
+        const { message } = requirementsBody.parse(req.body);
+        const result = await service.applyRequirements(idParam(req), actor(req), message);
+        return reply.send({
+          trip: publicView(result.session),
+          requirements: result.requirements,
+          missing: result.requirements.missing,
+          conflicts: result.requirements.conflicts,
+          applied: result.applied,
+          rejected: result.rejected,
+          unmapped: result.unmapped,
+          keptForPlanning: result.keptForPlanning,
+          differences: result.differences,
+          understoodBy: result.understoodBy,
+          droppedCount: result.droppedCount,
+          notes: result.notes,
+        });
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
 
   app.delete('/v1/trips/:id', async (req, reply) => {
     try {

@@ -81,6 +81,8 @@ changes something and names an `Origin` outside `CORS_ORIGINS` is refused. `GET 
 `DELETE /v1/me` let a person take or erase their data; deletion removes their trips, runs, audit events and
 sessions together.
 
+**Planning agents**: agents are untrusted logic boundaries. The Requirements Agent's output is checked against the traveller's own message (every item needs a real quote; dates, amounts and counts are re-read from the quote, not taken from the model), the guidance agents' output is reduced to closed vocabularies and may only fill preferences the traveller left empty, and the Synthesis Agent's prose is checked against the plan's facts (no invented figure, link, or claim of booking). What an agent proposes reaches a trip only as ordinary answers, through the same validation, ownership and consent rules as a click; an agent cannot write to a store, call a provider, set a price, or touch a secret (its package has no access to any). Text from a traveller, a provider (a hotel's name, a note) or a destination reaches a model only as JSON-escaped data inside a delimited block, never in the instructions. This establishes the boundaries; it is not a complete defence against prompt injection.
+
 **Cost controls**: each search calls paid provider APIs, so a person may start a limited number a day
 (lower until they sign in), a trip can have at most one active search, the expensive routes have their
 own tight rate limits, and the rate limiter keys on the person where there is one and on the client
@@ -110,6 +112,9 @@ output.
 
 These are real. Treat them as prerequisites before running this for other people.
 
+- **The agents have only been exercised against scripted models.** Their boundaries (quotes, closed vocabularies, fact-check, template fallbacks) are tested with models that return garbage, obey injected instructions, and fail; no real language model has been run through them, and how a real one behaves against these checks (how often a good answer is dropped for want of a quote, say) is unmeasured. The rule-based fallback is deliberately narrow: it reads plainly stated facts and leaves the rest unread.
+- **A hard requirement stated in words can be missed, but not invented.** The checks err toward dropping: a real requirement whose quote does not use the words that say it is required is dropped and, where relevant, reported as dropped. The traveller can always state it through the interview or a change.
+- **Later words do not withdraw earlier hard requirements they do not mention.** The latest statement about a kind replaces the earlier one, but a requirement of a kind not mentioned stays until changed through the interview.
 - **Anonymous sessions are cheap to make.** Anyone can get a fresh session, and each has its own daily
   search allowance, so clearing cookies restarts the count. What bounds it is the per-address limit on
   creating a first trip (30 an hour) and the general per-address rate limit, both of which are only as

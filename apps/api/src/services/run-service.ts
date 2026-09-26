@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import type { Logger } from 'pino';
-import { generatePlans, type KeptComponents, type PlanGenerationResult } from '@trip/engine';
+import { PlanningOrchestrator, type OrchestrationResult } from '@trip/agents';
+import type { KeptComponents } from '@trip/engine';
+import type { TripLlm } from '@trip/llm';
 import type { ProviderRegistry } from '@trip/providers';
 import {
   ActivityOffer,
@@ -18,6 +20,11 @@ import type { RunRecord, Store } from '../repository/store.js';
 import { TripChangedError } from '../repository/types.js';
 import { inputsHash } from '../util/canonical.js';
 import { searchSummaryOf } from './search-summary.js';
+
+/** The longest explanation stored per trip; longer text is cut, not refused. */
+const MAX_SUMMARY = 1200;
+const MAX_PLAN_TEXT = 1000;
+const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
 /**
  * Background planning.
@@ -41,6 +48,8 @@ import { searchSummaryOf } from './search-summary.js';
 export const RunParams = z.object({
   /** Why the search was started, for the log. */
   reason: z.string().default(''),
+  /** Pins that could not be kept for this search, so the explanation can say so. */
+  pinsReleased: z.array(z.object({ component: z.string(), reason: z.string() })).default([]),
   /** Parts of the earlier plan to use exactly as they were. */
   keep: z
     .object({
@@ -95,6 +104,8 @@ export function runView(run: RunRecord): PlanningRunView {
 export interface RunServiceDeps {
   store: Store;
   registry: ProviderRegistry;
+  /** The model the planning agents use; with none configured they run on their rule-based fallbacks. */
+  llm: TripLlm;
   env: Env;
   logger: Logger;
   /** Told when a run is queued, so an in-process worker can start at once instead of on its next poll. */
@@ -102,7 +113,14 @@ export interface RunServiceDeps {
 }
 
 export class RunService {
-  constructor(private readonly deps: RunServiceDeps) {}
+  private readonly orchestrator: PlanningOrchestrator;
+
+  constructor(private readonly deps: RunServiceDeps) {
+    this.orchestrator = new PlanningOrchestrator({
+      registry: deps.registry,
+      agents: { llm: deps.llm, timeoutMs: deps.env.AGENT_TIMEOUT_MS },
+    });
+  }
 
   // ----------------------------------------------------------- requesting
 
@@ -114,7 +132,12 @@ export class RunService {
   async enqueue(
     session: PlanningSession,
     actor: Actor,
-    options: { kind: RunKind; keep?: Partial<KeptComponents>; reason: string },
+    options: {
+      kind: RunKind;
+      keep?: Partial<KeptComponents>;
+      reason: string;
+      pinsReleased?: Array<{ component: string; reason: string }>;
+    },
   ): Promise<{ run: RunRecord; reused: boolean }> {
     const { store } = this.deps;
     const hash = inputsHash(session);
@@ -124,7 +147,11 @@ export class RunService {
 
     await this.assertQuota(actor);
 
-    const params: RunParams = RunParams.parse({ reason: options.reason, keep: options.keep ?? {} });
+    const params: RunParams = RunParams.parse({
+      reason: options.reason,
+      keep: options.keep ?? {},
+      pinsReleased: options.pinsReleased ?? [],
+    });
     const queued = await store.enqueueRun({
       tripId: session.id,
       ownerId: actor.userId,
@@ -218,19 +245,25 @@ export class RunService {
     signal: AbortSignal,
     beat: (p: RunProgress) => void,
   ): Promise<'succeeded' | 'superseded' | 'cancelled'> {
-    const { store, registry } = this.deps;
+    const { store } = this.deps;
     const session = await store.getSession(run.tripId);
     // The trip was deleted, or changed since the run was queued.
     if (!session) return 'cancelled';
     if (inputsHash(session) !== run.inputsHash) return 'superseded';
 
     const params = RunParams.parse(run.params);
-    const result = await generatePlans({
-      registry,
+    // The orchestrator coordinates the agents and the deterministic services
+    // and returns a result; it never writes to the store. What is saved, and
+    // whether it may be, is decided here, under the run's own version and
+    // fingerprint checks.
+    const result = await this.orchestrator.plan({
       intent: session.intent,
       profile: session.profile,
       constraints: session.constraints,
+      classification: session.classification,
+      requirements: session.statedRequirements,
       keep: params.keep,
+      pinsReleased: params.pinsReleased,
       signal,
       onProgress: (p) => beat({ step: p.step, label: p.label, percent: p.percent }),
     });
@@ -245,7 +278,7 @@ export class RunService {
    * then read again and the check repeated, so plans are never written over
    * someone else's change and never dropped for an unrelated one.
    */
-  private async savePlans(run: RunRecord, result: PlanGenerationResult): Promise<'succeeded' | 'superseded'> {
+  private async savePlans(run: RunRecord, result: OrchestrationResult): Promise<'succeeded' | 'superseded'> {
     const { store } = this.deps;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const session = await store.getSession(run.tripId);
@@ -309,8 +342,12 @@ export class RunService {
   }
 }
 
-/** A trip with a search's plans on it. */
-export function withPlans(session: PlanningSession, result: PlanGenerationResult): PlanningSession {
+/**
+ * A trip with a search's outcome on it: the validated plans, the explanation,
+ * and the trace of what the agents and services did. A request that could not
+ * be met leaves no plans and says why in the explanation.
+ */
+export function withPlans(session: PlanningSession, result: OrchestrationResult): PlanningSession {
   const now = new Date().toISOString();
   return {
     ...session,
@@ -318,9 +355,16 @@ export function withPlans(session: PlanningSession, result: PlanGenerationResult
     stage: result.plans.length > 0 ? 'planned' : 'searching',
     plans: result.plans,
     selectedPlanId: result.plans[0]?.id ?? null,
-    lastSearch: searchSummaryOf(result, now),
+    lastSearch: result.search ? searchSummaryOf(result.search, now) : null,
+    narrative: {
+      summary: clip(result.narrative.summary, MAX_SUMMARY),
+      plans: Object.fromEntries(Object.entries(result.narrative.plans).map(([id, text]) => [id, clip(text, MAX_PLAN_TEXT)])),
+      source: result.narrative.source,
+      builtAt: now,
+    },
+    agentTrace: result.trace,
     providerNotes: dedupeNotes([...session.providerNotes, ...result.notes]),
-    decisionLog: [...session.decisionLog, ...result.decisionLog],
+    decisionLog: [...session.decisionLog, ...(result.search?.decisionLog ?? [])],
     updatedAt: now,
   };
 }

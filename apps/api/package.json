@@ -25,6 +25,7 @@
     "@fastify/helmet": "^12.0.1",
     "@fastify/rate-limit": "^10.1.1",
     "@prisma/client": "^5.20.0",
+    "@trip/agents": "*",
     "@trip/engine": "*",
     "@trip/llm": "*",
     "@trip/providers": "*",

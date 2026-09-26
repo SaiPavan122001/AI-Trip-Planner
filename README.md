@@ -53,6 +53,8 @@ group make a pinned part impossible to keep, you are told which part and why, no
 was kept. Changes that would break something you set (new dates, a different group size, a comfort
 upgrade over a firm budget) are explained and asked about before anything happens.
 
+**Agents that understand you; code that decides.** Tell it what you want in your own words and a Requirements Agent reads it, quoting your words for everything it takes from them. Transport, stay and activity agents turn that into soft guidance; an orchestrator runs them, then the deterministic planner (every price, date, total and constraint is code), an independent validation gate, and a writer whose explanation is fact-checked against the plans, so it can only restate what the plan contains. Agents fill gaps and never overwrite your answers, cannot set a price, and cannot make a request you did not make. Without a language model configured, every agent falls back to plain rules and says so.
+
 **Searches run in the background.** Searching many providers takes a while, so it never holds a
 request open: you get a progress view you can leave and come back to, cancel, or reload without losing
 anything. If a worker dies mid-search another picks it up, and results for a trip you changed
@@ -152,6 +154,8 @@ packages/
   engine/      The planner. Classification, questioning, scoring, search
                orchestration, scheduling, costing, validation.
   llm/         Pluggable LLM boundary with a deterministic fallback.
+  agents/      The planning agents, deterministic services and the orchestrator
+               that coordinates them. Agent output is untrusted and checked.
 apps/
   api/         Fastify service, Prisma persistence, booking state machine.
   web/         Next.js front end.

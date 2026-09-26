@@ -1,8 +1,11 @@
 import type { ProviderRegistry } from '@trip/providers';
 import {
+  ACTIVITIES_PER_DAY,
   haversineKm,
   isOk,
+  type ActivityInterest,
   type ActivityOffer,
+  type ActivityPace,
   type Coordinates,
   type OpeningHours,
   type Place,
@@ -44,6 +47,33 @@ const DURATION_BY_CATEGORY: Record<string, number> = {
 
 const DEFAULT_DURATION_MINUTES = 90;
 
+/**
+ * What a traveller's interests mean to a place provider. The mapping lives here,
+ * in code, so a model can only ever choose an interest from a closed list and
+ * never puts a string of its own into a provider request.
+ */
+const PLACE_TYPES_BY_INTEREST: Record<ActivityInterest, string[]> = {
+  museums: ['museum', 'art_gallery'],
+  history: ['historical_landmark', 'tourist_attraction'],
+  nature: ['park', 'national_park', 'hiking_area'],
+  beaches: ['beach'],
+  adventure: ['amusement_park', 'hiking_area'],
+  religious: ['place_of_worship', 'hindu_temple', 'church', 'mosque'],
+  shopping: ['shopping_mall', 'market'],
+  nightlife: ['night_club'],
+  family: ['zoo', 'aquarium', 'amusement_park', 'park'],
+};
+
+export function placeTypesFor(interests: readonly ActivityInterest[]): string[] {
+  return [...new Set(interests.flatMap((i) => PLACE_TYPES_BY_INTEREST[i] ?? []))];
+}
+
+/** What the activity search may be steered by. Both parts are optional and closed-vocabulary. */
+export interface ActivityGuidance {
+  interests?: readonly ActivityInterest[];
+  pace?: ActivityPace;
+}
+
 export function assumedDuration(activity: ActivityOffer): {
   minutes: number;
   assumed: boolean;
@@ -62,6 +92,7 @@ export async function planActivities(
   days: number,
   currency: string,
   signal?: AbortSignal,
+  guidance: ActivityGuidance = {},
 ): Promise<ActivityPlanResult> {
   const notes: ProviderNote[] = [];
   if (days <= 0) return { activities: [], clusters: [], notes };
@@ -80,7 +111,9 @@ export async function planActivities(
 
   // Roughly two anchored activities a day, which leaves room for meals, rest
   // and the unplanned wandering that is usually the best part of a trip.
-  const target = Math.max(3, days * 2);
+  const perDay = ACTIVITIES_PER_DAY[guidance.pace ?? 'balanced'];
+  const target = Math.max(3, days * perDay);
+  const categories = placeTypesFor(guidance.interests ?? []);
   const found: ActivityOffer[] = [];
 
   for (const provider of registry.activities) {
@@ -88,7 +121,7 @@ export async function planActivities(
       destination,
       near: destination.coordinates,
       radiusKm: 12,
-      categories: [],
+      categories,
       accessibilityNeeds: profile.special.accessibility,
       currency,
       limit: Math.min(20, target * 2),

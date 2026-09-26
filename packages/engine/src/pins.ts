@@ -31,7 +31,10 @@ export function componentsOf(plan: TripPlan | undefined): TripComponent[] {
 
 const dateOf = (iso: string) => iso.slice(0, 10);
 
-export function checkPins(session: PlanningSession): PinCheck {
+/** What a pin check needs of a trip: its dates and group, its plans, and what was pinned. */
+export type PinnableTrip = Pick<PlanningSession, 'intent' | 'plans' | 'selectedPlanId' | 'pins'>;
+
+export function checkPins(session: PinnableTrip): PinCheck {
   const plan = selectedPlanOf(session);
   const keep: TripComponent[] = [];
   const released: PinCheck['released'] = [];
