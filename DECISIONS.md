@@ -1,6 +1,6 @@
 # DECISIONS
 
-Saved: 2026-09-27. Decisions actually made in this project, with who made them. "User" = stated by
+Saved: 2026-09-27 (updated after Phases 3 and 4). Decisions actually made in this project, with who made them. "User" = stated by
 the user; "Claude" = an engineering decision taken during implementation under the user's
 instruction to decide engineering details. Nothing here is aspirational.
 
@@ -38,6 +38,15 @@ instruction to decide engineering details. Nothing here is aspirational.
     database state, no bypassing authorisation, validation or the Phase 1 protections, no unnecessary
     microservices, no rewrite of the existing application, no booking or payment, no push or PR, and
     the old npm cache on C: is not to be deleted. Do not begin Phase 3.
+
+16. **Phases 3 and 4 (user-defined).** Phase 3: real external APIs/tools and the provider architecture
+    (interchangeable adapters, failures that do not break the request, distinct outcomes, capability-specific
+    notes, deterministic fixtures, no secrets in source, validate Nominatim/OSRM/Amadeus/mail, international
+    → flights and domestic → flight/train/bus/car, fix the Phase 2 parsing bugs). Phase 4: advanced trip
+    planning and optimisation (a complete trip; deterministic, explainable, not cheapest-only; keep within a
+    budget when feasible and say when it cannot be; safe replanning; failure-handling extension points).
+    **Phase 8 (later) holds RAG/testing/evaluation; no RAG in Phase 3 or 4.** Phases 5–7 are not defined and
+    were not invented. Do not ask the user for real API keys; use placeholders.
 
 ## Architectural decisions (Claude, Phase 0–1)
 
@@ -147,10 +156,85 @@ instruction to decide engineering details. Nothing here is aspirational.
   `/trips/:id/requirements` is owner-only; both rate-limited at 10 a minute because each may cost a
   model call.
 
+## Architectural decisions (Claude, Phases 3 and 4 — under the user's Phase 3/4 instruction)
+
+**Providers (Phase 3)**
+
+- **Six outcome classes, not one "unavailable".** `invalid_response` is a new status: the provider answered
+  and the answer could not be read or trusted. `statusClass()` (in a dependency-free
+  `@trip/shared/provider-status`, so the browser can use it) collapses statuses into not available /
+  failed / timed out / rate limited / no results / unusable. A body that is not JSON, a schema mismatch and
+  the `TypeError`/`RangeError` that bad data causes are `unusable`; only a connection that fails is
+  "could not be reached".
+- **Validate at the boundary, keep the raw item where it must be sent back.** Each adapter reads its
+  responses through Zod schemas of only the fields it uses (`schemas.ts`), item by item: a bad row is
+  dropped with a warning, a list with no usable row is `invalid_response`. Amadeus offers keep their raw
+  payload for re-pricing, because the pricing endpoint takes the offer back verbatim.
+- **Notes belong to a capability.** `ProviderNote`/`ProviderFailure` carry an optional `capability`; each
+  capability's missing-provider message is written for it; notes merge only when provider, capability,
+  status and words agree. (Flights and Hotels from one vendor used to merge.)
+- **One policy port for every provider call** (`ProviderPolicy` on the registry, default
+  `IsolatingPolicy`): throws become failures, a deadline per call (`PROVIDER_CALL_TIMEOUT_MS`, 45 s), the
+  failure is tagged with its capability. It deliberately does *not* retry, fall back, limit, break circuits,
+  cache or measure: those are policies to supply later, so nothing pretends to be solved that is not.
+- **Ask all providers of a capability at once and keep every failure** (`sweepProviders`); a mode or provider
+  that throws costs its own results. The single "why this mode is empty" note is the one that explains most
+  (broke > timed out > limited > unusable > empty > not connected).
+- **Offer ids are unique per search**: Amadeus numbers offers 1, 2 in each response, so the route and date
+  are part of the id; rail/bus ids include the day.
+- **Fixtures are hand-written from vendor documentation and are labelled so**; no recording was made because no
+  live credential is ever used. Contract tests stub `fetch` and fail on any unlisted address.
+- **One amount reader** (`parseRupees` in `@trip/shared`) for both the Requirements Agent's rules and the
+  change-request fallback: a number is money only with a currency word/symbol or unit, or as a plausible
+  bare amount (≥ ₹1,000, not a year) right after a money word, and never before a month, a head count or a
+  length of stay.
+- **Mail webhook:** redirects are refused (the body carries a sign-in link) and a timeout is told apart from an
+  unreachable hook; neither error repeats the address, status text or body.
+
+**Planning (Phase 4)**
+
+- **Extend, do not replace.** `generatePlans`, the scheduler, cost, validation and the modify/pin/consent flow
+  stay; selection moved into `optimize.ts` and `feasibility.ts`.
+- **Three readings of "best", each over the same options, most preferred first:** Budget = cheapest known cost
+  (fuel counted when a vehicle profile exists); Comfort = fewest changes, then shortest time; Balanced = the
+  traveller's ranking, or what their travel style implies when they ranked nothing (a stated ranking always
+  wins; asking for safety puts `safest` first). Travel style also sets the rating a stay is judged against and
+  the room tier (budget lowest, standard best value, premium upper, luxury top within any accommodation ceiling).
+- **A room is chosen for what was asked (breakfast, room type, cancellation, sleeping the party) before price.**
+  Occupancy is judged room by room, and the stay budget counts every room booked.
+- **A firm total budget is kept when a combination fits it:** combinations of journey, return and stay are tried
+  most preferred first, pruned by their known floor (fares + fees + rooms), at most four full itineraries per
+  plan; if none fits, the closest is shown marked as breaking the limit and `feasibility` says by how much. The
+  planner never loosens a limit itself. (This changed behaviour: before, the Comfort plan could be built above a
+  firm limit and shown blocked.)
+- **Explain every choice in code:** each plan carries `choices` (chosen, why, what was passed over) built from
+  the offers and rules actually applied; provider text in them is cleaned and shortened.
+- **Feasibility is a report, not an action:** blockers/warnings for excluded journeys (with reasons), failed or
+  unsearched sources (not connected ≠ none found ≠ the search failed), a budget below the cheapest combination
+  found, rooms that may not sleep the group, an own car for a large party. It is on `lastSearch` and reaches
+  the explanation as facts.
+- **Safety means what can be computed:** `safety.preferences` (safety first in the ranking; no arrival between
+  23:00 and 05:00, applied as a filter like "no overnight travel" and re-checked by the validator). The planner
+  does not rate destinations. A late arrival warning checks both journeys.
+- **Free text stays free text:** `other.requirements` is shown on every plan and stated as *not* checked.
+- **Scheduling fixes:** a visit starts after the journey to it, fits inside the opening hours for its whole length
+  (waiting for opening is spent at the place), avoids lunch and dinner (fixed points), places are visited nearest
+  first from the hotel, and check-out is the earlier of the property's time and the time you must leave for the
+  journey home (validated in the engine and again by the agents' gate). Itinerary item ids are numbered in time
+  order so a trip always gets the same ids.
+- **Own-car "cheapest" is said, not hidden:** with no vehicle profile the drive's known cost is ₹0 (the user's
+  rule), and the plan's trade-offs say which costs could not be calculated.
+
 ## Open decisions (not made)
 
-- Scope of Phase 3 (user has not defined it).
 - Whether the agents' checks are well-tuned against a real language model (never run).
+- What Phases 5, 6 and 7 are (the user has not defined them).
+- Whether Amadeus's `price.total` is for the whole stay across all rooms requested or for one room: the code
+  multiplies a room's price by the number of rooms (as before), which double-counts if it is already the total
+  for `roomQuantity` rooms. Unverified without a live sandbox.
+- Whether to rank a drive with unpriced costs (fuel, tolls, parking) as "cheapest" at ₹0 when no vehicle profile
+  is configured, or to treat it as unknown; currently ₹0 (the user's rule) with the gap stated in trade-offs.
+- Which retry/fallback/rate-limit/circuit-breaker/cache/metrics policies to build, and when.
 - How CI's dependency-audit gate should be handled while major upgrades are forbidden.
 - Whether/when to add shared rate-limit storage, response caching, push progress, second factors.
 - Anonymous-abuse policy beyond the current caps (documented in `SECURITY.md`).

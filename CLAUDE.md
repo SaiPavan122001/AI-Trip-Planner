@@ -21,13 +21,17 @@ Wayfare (AI Trip Planner): a TypeScript monorepo, India-focused, INR only. Read,
 
 - **Do not push. Do not open a PR.** Work stays on the local branch.
 - Booking is **disabled** and stays so. Never ask for API keys or credentials; use env
-  placeholders.
+  placeholders. Never ask the user to paste repository files: read them yourself, and read the
+  repository before planning.
 - **Agents (changed in Phase 2, by the user):** the multi-agent architecture in `packages/agents`
   is in scope and is the product's design. Earlier sessions were told "no agents"; that was
   superseded by the user's Phase 2 instruction. Still no agent *frameworks* (LangChain and the
   like), no single "master" planner agent, and **no RAG, vector database or embeddings** (the user
-  ruled these out for Phase 2; a knowledge layer would be a separate, user-approved phase). Do not
-  start Phase 3 unless asked.
+  ruled these out for Phase 2; a knowledge layer would be a separate, user-approved phase).
+- **Phases (defined by the user):** 3 = real external APIs/tools and the provider architecture and
+  4 = advanced trip planning and optimisation are **done** (see `PHASE_PLAN.md`). **Phase 8 (later)
+  holds RAG/testing/evaluation; do not introduce RAG earlier.** Phases 5–7 are not defined: do not
+  invent them or start any new scope unprompted.
 - **Agents are untrusted.** LLMs/agents understand, interpret and explain; deterministic code owns
   prices, totals, dates, durations, constraints, validation, ranking, state changes, persistence and
   authorisation. Agent output is checked before use, never written to a store by an agent, and
@@ -54,9 +58,11 @@ production-specific assumptions.
 
 ## Layout
 
-npm workspaces. `packages/shared` (Zod domain model, INR money) → `packages/providers` (vendor
-adapters, `httpJson`) → `packages/llm` (narrow router; output untrusted) → `packages/engine`
-(deterministic planner) → `packages/agents` (planning agents, budget and validation services,
+npm workspaces. `packages/shared` (Zod domain model, INR money, provider result/status/notes, the
+rupee-amount reader) → `packages/providers` (vendor adapters, `httpJson`, response schemas, the
+`ProviderPolicy` port) → `packages/llm` (narrow router; output untrusted) → `packages/engine`
+(deterministic planner: `plans.ts` orchestrates, `optimize.ts` chooses, `feasibility.ts` reports,
+`provider-calls.ts` asks providers safely) → `packages/agents` (planning agents, budget and validation services,
 orchestrator; Phase 2) → `apps/api` (Fastify 5, Prisma 5.22, Zod) and `apps/web` (Next 15.5,
 React 18, Tailwind 3). Tests: Vitest 2.1. Lint: ESLint 10 flat config at the root. Node ≥ 22.
 Docs: `README.md`, `docs/api.md`, `docs/architecture.md`, `docs/providers.md`, `docs/booking.md`,
@@ -81,6 +87,16 @@ see their changes.
 - Money is integer minor units; only INR (`SUPPORTED_CURRENCY`). `@trip/shared/currency` is a
   dependency-free subpath for the browser.
 - Provider results are a tagged union with provenance; never fabricate data; unknown price ≠ ₹0.
+  A provider outcome is one of six classes (`statusClass`): not available, failed, timed out, rate
+  limited, no results, unusable response (`invalid_response`); notes carry the `capability` they are
+  about and are never merged across capabilities.
+- Every adapter reads a response through a Zod schema (`packages/providers/src/schemas.ts`) before
+  mapping it; every provider call goes through `registry.policy`; the engine asks providers with
+  `sweepProviders`. Provider fixtures under `packages/providers/src/__tests__/fixtures` are
+  hand-written from vendor docs, **not recordings**; tests stub `fetch` and fail on any unlisted URL.
+- Choosing among offers is `optimize.ts`, deterministic and explained (`plan.choices`); whether a trip
+  can be done as asked is `feasibility.ts` (`lastSearch.feasibility`). A firm budget is kept when a
+  combination fits it; the planner never loosens a limit itself.
 - The LLM only classifies modification requests; its output is sanitised per field and the text shown
   to travellers is written from the validated request, never by the model.
 - The API talks to the `Store` interface (trips + runs + identity); `InMemoryRepository` and
@@ -102,8 +118,12 @@ see their changes.
   and edit scripts with the Write/Edit tools, run scripts from files, and avoid `sed` with
   backslashes. `.devcache/tmp/fix-bs.cjs` repairs backspace characters in the agents package.
 - Paths contain spaces: quote them (an unquoted `$L/…` log path failed once).
-- Many files are CRLF in the working tree while the repo stores LF (`.gitattributes`); git prints
-  harmless CRLF warnings. Edit scripts normalise line endings.
+- The repo stores LF (`.gitattributes`). In Phase 3/4 the working tree was normalised to LF, but a
+  file written by another tool can come back CRLF; `git diff --stat` (not `git status`, whose entries
+  can be stale after a rewrite) shows what really changed.
+- Bash tool: backticks and `${…}` inside `node -e "…"` strings are executed or mangled by the shell.
+  Put edit scripts in a file with the Write tool (`.devcache/tmp/*.cjs`) and run them; Edit works
+  directly on LF files.
 
 ## When a new session starts
 

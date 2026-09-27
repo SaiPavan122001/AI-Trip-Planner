@@ -1,18 +1,17 @@
 # PROJECT STATUS
 
-Saved: 2026-09-27. Everything below was checked against the repository and Git state at save time.
+Saved: 2026-09-27 (after Phases 3 and 4). Everything below was checked against the repository and Git state at save time.
 
 ## Git state
 
 - Branch: **`phase-0-hardening`** (local only; no upstream configured; nothing pushed; no PR).
-- Code HEAD at save time: `d86bee0` "Test the agent contract … and self-drive through the orchestrator".
-  The commit after it (if present) only records these four status files.
-- 22 commits on the branch before the status commit; ahead of `main`. Remote `origin` =
-  `https://github.com/SaiPavan122001/AI-Trip-Planner.git`. No stashes.
-- Phase 2 commits: `c32d650` (multi-agent architecture), `d86bee0` (contract and self-drive tests).
-- Phase 1 commits: `91b3d14` (budget guide/firm, whole-plan ranking), `e5a4fd9` (accounts, background
-  runs, pins, PostgreSQL path), `09683bb` (web, docs, compose worker, CI).
-- Phase 0 commits: `ac56815` … `377cf81` plus `b5b193c`, `2302a8c`.
+- Code HEAD at save time: `5451f24` "Phase 3 and 4: safe provider foundation, and a planner that chooses
+  for reasons". The commit after it (if present) only records these four status files.
+- 23 commits ahead of `main` with the Phase 3+4 commit included (the status-recording commit is the next
+  one). Remote `origin` = `https://github.com/SaiPavan122001/AI-Trip-Planner.git`. No stashes.
+- Phase 3+4: `5451f24`. Phase 2: `c32d650` (multi-agent architecture), `d86bee0` (contract and self-drive
+  tests), `ab92923` (status files). Phase 1: `91b3d14`, `e5a4fd9`, `09683bb`. Phase 0: `ac56815` … `377cf81`
+  plus `b5b193c`, `2302a8c`.
 
 ## Phase 0 — completed
 
@@ -92,10 +91,78 @@ database, no embeddings, no booking or payment, no new services.
   the same millisecond (a latent flaky test); the itinerary "service" is the existing engine
   scheduler (`buildItinerary`), reached through the services port, not re-implemented.
 
+## Phase 3 — real external APIs/tools and the provider architecture — implemented; nothing live-verified
+
+Defined by the user. No RAG. Extended the existing provider interfaces (no parallel layer).
+
+- **Outcomes:** `invalid_response` status; `statusClass()` (not available / failed / timed out / rate limited
+  / no results / unusable) in a dependency-free `@trip/shared/provider-status` (used by the web page too).
+  `ProviderNote`/`ProviderFailure` gained an optional `capability`; `dedupeProviderNotes` (shared, used by the
+  run service) keys on provider + capability + status + message; `missingCapabilityNote(capability, ids)` words
+  each capability separately (the Flights/Hotels merge is fixed).
+- **Validation:** `packages/providers/src/schemas.ts` + `guard.ts` (`readResponse`, `readItems`). Amadeus
+  (token, flight offers, pricing, airports, hotel list, hotel offers), OSRM, Nominatim, Google Places/Routes and
+  the rail/bus contract are all read through schemas; `httpJson` throws `InvalidResponseError` /
+  `NetworkError`; `toProviderFailure` classifies them. The rail/bus contract now really enforces the UTC offset
+  and arrival-after-departure rules its docs promised, and validates service by service.
+- **Isolation:** `ProviderPolicy` on `ProviderRegistry` (`policy`, default `IsolatingPolicy`,
+  `PROVIDER_CALL_TIMEOUT_MS`, default 45000); engine `provider-calls.ts` (`sweepProviders`,
+  `primaryFailure`); transport, hotels, activities and transfers use it; each transport mode is isolated.
+- **Adapter fixes found on the way:** OSRM night tariff used the server clock (now the ride's zone, via a new
+  `timezone` on `TransferSearchRequest`); one taxi for any party (now `ceil(party/4)` cars, `vehicles` on
+  `TransferOffer`); Amadeus offer ids collided between outward and return (now include route and date);
+  rail/bus ids include the day; Nominatim "nothing here" reverse answers are empty, not errors.
+- **Mail/webhook:** `WebhookMailer` refuses redirects and tells timeout from unreachable; new `mailer.test.ts`.
+- **Phase 2 fixes:** `parseRupees` moved to `@trip/shared` (`amounts.ts`) and made strict; used by the
+  Requirements Agent and by `interpretModificationByRules` in `@trip/llm`, which had its own reader with the same
+  bug. Confirmed against the old code: "a budget trip to Goa on 12 December" → ₹12, "at most 4 people" → ₹4,
+  "max 3 nights" → ₹3; and in the change-request reader "keep the budget as it is but leave on 12 December" → ₹12 and
+  "budget for 4 people" → ₹4 (both readers were executed against their old code). The money-clause filter in `rules.ts` now uses word boundaries. "confirm" never matched
+  "firm" (already `\bfirm\b`); regression tests added. The same-millisecond run ordering fix is kept and now has
+  a store-contract regression test (memory and real PostgreSQL).
+- **Config/docs:** `PROVIDER_CALL_TIMEOUT_MS` in `.env.example`; `docs/providers.md` (outcome classes,
+  capability notes, isolation, what is not built, fixtures, mail webhook), `SECURITY.md`, README.
+- **Not built (extension points only):** retries beyond `httpJson`'s bounded transient retries, fallback between
+  providers, shared rate limiting, circuit breaking, response caching, metrics/tracing.
+
+## Phase 4 — advanced trip planning and optimisation — implemented on the existing engine
+
+Defined by the user. No RAG. `generatePlans`, the scheduler, cost, validation, and the pin/consent/replan flow
+were extended, not replaced.
+
+- **`optimize.ts`:** `styleTargets`, `effectivePriorities` (own ranking wins; else the travel style; safety-first
+  prepends `safest`), `rankTransport` (budget / comfort / balanced orderings), `chooseRoom` (fit to what was
+  asked first, then price tier by archetype and style, within an accommodation ceiling), `rankStays`,
+  `explainTransport` / `explainStay` (plan `choices`: what, why, what was passed over).
+- **`plans.ts`:** each archetype builds a ranked set of candidates (3 journeys × 3 returns × 4 stays), tries
+  combinations most preferred first, and under a firm total budget prunes by the known floor and builds at most 4
+  itineraries, taking the first that fits, else the closest (marked as breaking the limit); nothing loosens a
+  limit. `other.requirements` free text is listed on the plan and stated as not checked. Kept offers whose price
+  quote has expired are flagged. Own-car plans state which costs were not calculated.
+- **`feasibility.ts`:** `lastSearch.feasibility` = `{ status, findings[] }`; excluded journeys with reasons,
+  failed vs unsearched vs empty sources, a budget below the cheapest combination found (with the figure and what to
+  raise), rooms that may not sleep the group, own car for more than five. Findings reach the explanation as facts.
+- **Scheduler (bugs reproduced by failing tests first):** activities started at the same moment as the journey
+  to them; opening hours were checked only at the start; a visit could run through dinner; check-out was fixed at
+  11:00 even for a 06:00 flight (now the earlier of the two, validated in the engine and the agents' gate);
+  `late_night_arrival` looked at the journey home. Also: nearest-first visiting order from the hotel, item ids in
+  time order (they were a process-wide counter), hotel occupancy judged room by room, stay budget counts every
+  room.
+- **Interview:** `safety.preferences` (after travel style; `safety_first`, `no_late_arrival` = no arrival 23:00–05:00,
+  enforced as a filter and a validator blocker — `avoidRedEyeArrival` existed but was never enforced) and
+  `other.requirements` (last). Both optional. Profile gained `special.safetyFirst` and `special.otherRequirements`.
+- **Schema (additive, JSON document, no migration):** `TripPlan.choices`, `SearchSummary.feasibility`,
+  `TransferOffer.vehicles`, note `capability`. Older stored trips read with defaults (tested).
+- **Web:** `FeasibilityPanel`, "Why this plan" in `PlanCards`, per-capability note headings with status labels.
+  Type-checked, built and linted; **not** clicked through in a browser.
+- **Changed behaviour to know about:** with a firm total budget the planner now builds plans inside it when it can
+  (before, the Comfort plan could be built above it and shown blocked), so one Phase 1 test was rewritten to test
+  the ranking invariant directly and a new one asserts the fitting behaviour.
+
 ## Currently being worked on
 
-Nothing is in progress. Phase 2 is implemented, verified and committed. **Phase 3 has not been
-defined and must not be started unprompted.**
+Nothing is in progress. Phases 3 and 4 are implemented, verified as listed below, and committed. **Phases 5–7 are
+not defined; do not invent or start them. Phase 8 (RAG/testing/evaluation) is later; no RAG exists.**
 
 ## Tests and checks completed (all executed after the final code change)
 
@@ -104,22 +171,26 @@ defined and must not be started unprompted.**
 | `npm run build` (all workspaces incl. web) | exit 0 |
 | `npm run lint` | exit 0; 0 errors; 1 pre-existing warning (`no-page-custom-font`, `apps/web/app/layout.tsx`) |
 | `npm run typecheck` | exit 0 |
-| `npm test` | agents 134, engine 189, llm 29, providers 52, shared 30, api 216 = **650 passed** (Phase 1 baseline was 478; every Phase 0/1 test still passes) |
-| `npm run test:integration` (embedded PostgreSQL 16) | 42 passed |
-| `node apps/api/scripts/smoke.mjs` and `… --split` | both passed, 19 checks each (15 from Phase 1 + 4 new: orchestrator trace and explanation, words applied through answers, missing-info interpretation, requirements kept) |
-| RAG/vector/embedding scan of Phase 2 code and manifests | nothing found |
-| Imports of `packages/agents` (non-test) | only `@trip/shared`, `@trip/engine`, `@trip/llm`, `@trip/providers` (a type), `zod`; no store, fetch, Prisma or `process.env` |
-| Secret scan (`git grep`) | nothing found |
-| Changed files | limited to `packages/{agents,engine,llm,shared}`, `apps/{api,web}`, root/CI/Docker build lists, docs and the four state files |
-| `npm ci --dry-run` | accepts the lockfile with the new workspace |
+| `npm test` | agents 140, engine 263, llm 33, providers 137, shared 58, api 226 = **857 passed** (Phase 2 baseline 650) |
+| `npm run test:integration` (embedded PostgreSQL 16) | 43 passed (includes the new run-ordering test) |
+| `node apps/api/scripts/smoke.mjs` and `… --split` | both passed (19 checks each, unchanged) |
+| RAG/vector/embedding scan of the Phase 3/4 diff and manifests | nothing found; no dependency or lockfile change |
+| Secret scan of the diff | nothing found (tests use `placeholder-*` values) |
 
-Tests that guard the Phase 2 boundaries: invalid/garbage/obedient/unavailable model output for every
-agent; prompt-injected traveller text and provider-supplied hotel names; a hostile model produces
-byte-identical plan totals; impossible requests make no provider call; conflicting requirements apply
-nothing; partial agent failure still plans; validation catches tampered plans (and both engine and
-validation independently caught a check-out overlap in a self-drive fixture); pins preserved or
-released with a reason on a date change; agents re-run on re-plan; determinism of the deterministic
-side (apart from random item ids and timestamps).
+New tests, by what they hold to: **providers** — every adapter through success / empty / refused / rate limited /
+5xx / hang / network failure / not JSON / wrong shape / one bad row, from fixtures, no network; the isolating
+policy; capability-specific notes; OSRM tariff clock and party size; offer ids. **engine** — domestic vs
+international mode selection; provider throw / hang / limit / empty / unusable / partial failure; itinerary
+overlaps, travel legs, opening hours for the whole visit, meals, early check-out; style, room, budget-fit,
+infeasible-budget, safety, feasibility, group, replanning-with-kept-parts, cancellation, determinism, domestic
+mode choice. **agents/llm** — the date-as-money and "confirm" regressions, feasibility in the explanation, a hard
+limit surviving a re-plan. **api** — a crashing provider no longer fails the run, a crash in the search itself
+still does (detail kept out of the response), the mail webhook.
+
+All of Phase 2's boundary tests still pass: invalid/garbage/obedient/unavailable model output for every agent,
+prompt-injected traveller text and provider-supplied names, a hostile model producing byte-identical totals,
+impossible requests making no provider call, conflicting requirements applying nothing, pins preserved or released
+with a reason, agents re-run on re-plan.
 
 ## Known issues, gaps and blockers
 
@@ -127,9 +198,13 @@ side (apart from random item ids and timestamps).
   scripted fakes and mocked HTTP. How often a good real answer is dropped for want of a quote, and how
   a real model behaves against the checks, is unmeasured. Anthropic's SDK `signal` option and the new
   `LlmInvalidOutputError` paths in `anthropic.ts` are unexercised against the real service.
-- **Real external services untested:** Nominatim (needs a real contact in `NOMINATIM_USER_AGENT`),
-  Amadeus, Google Maps (the interest → place-type mapping uses Places (New) type names that were not
-  verified against the live API), a real mail service.
+- **No external service has been called live** (none of Nominatim, OSRM, Amadeus, Google Places/Routes, a rail/bus
+  endpoint, a real mail service), because no credentials are ever requested. Every adapter is tested against
+  **hand-written fixtures, not recordings** (`packages/providers/src/__tests__/fixtures/README.md`), so what is
+  proven is the mapping of the documented shape and the safe failure of everything else. Unverified specifically:
+  Amadeus enum values (cancellation policy, board type) and response fields, **whether Amadeus's hotel `price.total`
+  is for all requested rooms or one** (the code multiplies by rooms), the Places (New) type names the interest
+  mapping uses, Nominatim's real rate-limit behaviour, and the webhook contract with any real mail service.
 - **Not run:** Docker (not installed), so compose and the Dockerfiles (now including the agents
   package) are checked by inspection only; the CI workflow has not run; the web UI (including the new
   boxes) was built, typechecked and linted but not clicked through in a browser.
@@ -138,7 +213,17 @@ side (apart from random item ids and timestamps).
   `rejected`). Later messages do not withdraw earlier requirements of kinds they do not mention.
 - Unmapped requirements (latest arrival, earliest departure, max stops, free cancellation) are
   understood but have no interview question yet; they are reported, not applied.
-- Accommodation amenities other than breakfast are noted but nothing scores or filters on them.
+- Accommodation amenities other than breakfast are noted but nothing scores or filters on them; rooms are chosen
+  on breakfast, room type and cancellation only.
+- **Phase 3/4 limits:** local legs between the hotel and activities are straight-line estimates (only terminal
+  transfers are routed); no activities are planned on the arrival or departure day; visit lengths are assumed where
+  unpublished; the budget-fit search looks at 3 journeys × 3 returns × 4 stays and builds at most 4 itineraries per
+  plan, so it is not a global optimum; the known-cost floor ignores food and local travel until the itinerary is
+  built; "safety" is only what timing and published reviews can show (no destination data, by design); free-text
+  "anything else" is never interpreted; a drive with no vehicle profile ranks as ₹0 (the user's rule) with the gap
+  stated; a 4-seat car per taxi, and more than five people in one own car only warns.
+- **Not built, by design of the phase boundary:** retries, provider fallback, shared rate limiting, circuit breaking,
+  caching, metrics/tracing. The `ProviderPolicy` port is the extension point; nothing claims these are solved.
 - Validation does not re-check accessibility (the engine enforces it) or that items lie inside the trip
   window.
 - **`npm audit` fails at baseline**; the fix needs Next 16 / Vitest 5 majors, which the user forbade.
@@ -148,8 +233,8 @@ side (apart from random item ids and timestamps).
   by per-address limits); rate-limit counters are per instance; sign-in is an emailed link only;
   pre-accounts trips are unreachable; `/v1/providers/health` is public (5/min).
 - **Observed, not investigated (Phase 1):** a self-drive-only plan with no hotel provider shows a ₹0
-  counted total with the unpriced costs listed as not included; `dedupeNotes` merges Flights and Hotels
-  "Amadeus not configured" notes into one because their messages are identical.
+  counted total with the unpriced costs listed as not included. (The Flights/Hotels note merge was fixed in
+  Phase 3.)
 - The user asked that the old npm cache on C: **not** be deleted; it was not. C: had 2.5 GB free at the
   last check (it had dropped to 345 MB during Phase 1, for reasons outside this project).
 - Redis is unused; booking remains disabled; migration drift (schema vs SQL) is not checked
@@ -157,16 +242,18 @@ side (apart from random item ids and timestamps).
 
 ## Exact next step when a new session starts
 
-1. Read `CLAUDE.md`, this file, `PHASE_PLAN.md`, `DECISIONS.md`.
+1. Read `CLAUDE.md`, this file, `PHASE_PLAN.md`, `DECISIONS.md` (and `SECURITY.md`, `README.md`, `docs/` when the
+   work touches them). Do not ask the user to paste them.
 2. `source "/h/Projects/Mutli Agent AI Trip Planner/.devcache/env.sh"`, then `git status` and
-   `git log --oneline -5`; confirm branch `phase-0-hardening` and that `d86bee0` is in the history (the
-   newest commit may be the one that records these status files). Check C: free space.
+   `git log --oneline -5`; confirm branch `phase-0-hardening` and that `5451f24` is in the history (the newest
+   commit may be the one that records these status files). Check C: free space.
 3. If the tree is not clean, find out why before touching anything.
-4. **Do not start Phase 3 or any new scope on your own.** Tell the user Phase 2 is complete with the
-   caveats above and ask what they want next, offering the candidates in `PHASE_PLAN.md`
-   ("Phase 3 — not defined"). The most useful single next action, if the user has no other priority, is
-   to run the agents against a real language model with the user's own key placed in the environment by
-   the user (never ask for the key in chat) and measure how the checks treat real output.
-5. Whatever is done next: run lint, typecheck, build and tests (and `test:integration` if storage or the
-   API changed, and both smoke topologies if the request path changed), never claim a pass that was not
-   executed, and do not push.
+4. **Do not start Phases 5–7 or any new scope on your own** (they are not defined), and **do not introduce RAG**
+   (Phase 8, later). Tell the user Phases 3 and 4 are complete with the caveats above and ask what they want
+   next. The most useful single next actions, if the user has no other priority, are (a) run the adapters against
+   the real services with the user's own credentials placed in the environment by the user (never ask for them in
+   chat), record real responses over the hand-written fixtures and see which schemas need to change, and (b) run
+   the agents against a real language model and measure how the checks treat real output.
+5. Whatever is done next: run lint, typecheck, build and tests (and `test:integration` if storage or the API
+   changed, and both smoke topologies if the request path changed), never claim a pass that was not executed, and
+   do not push.
