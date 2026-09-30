@@ -25,6 +25,14 @@ x-app-env: &app-env
   RUN_CONCURRENCY: ${RUN_CONCURRENCY:-2}
   PLAN_RUNS_PER_DAY_ANONYMOUS: ${PLAN_RUNS_PER_DAY_ANONYMOUS:-15}
   PLAN_RUNS_PER_DAY_SIGNED_IN: ${PLAN_RUNS_PER_DAY_SIGNED_IN:-60}
+  PLAN_RUNS_PER_DAY_PER_ADDRESS: ${PLAN_RUNS_PER_DAY_PER_ADDRESS:-60}
+  MAX_QUEUED_RUNS: ${MAX_QUEUED_RUNS:-200}
+  MAX_ACTIVE_RUNS_PER_USER: ${MAX_ACTIVE_RUNS_PER_USER:-3}
+  RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+  RATE_LIMIT_ADDRESS_MAX: ${RATE_LIMIT_ADDRESS_MAX:-600}
+  # Knowledge answers (docs/knowledge.md). Off unless switched on; documents are ingested by a script.
+  KNOWLEDGE_ENABLED: ${KNOWLEDGE_ENABLED:-false}
+  KNOWLEDGE_NAMESPACE: ${KNOWLEDGE_NAMESPACE:-public}
   # Provider credentials. Every one is optional; an unset value disables
   # that adapter and the UI says which source is missing and why.
   NOMINATIM_USER_AGENT: ${NOMINATIM_USER_AGENT:-}

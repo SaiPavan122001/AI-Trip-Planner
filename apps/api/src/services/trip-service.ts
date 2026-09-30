@@ -21,12 +21,13 @@ import {
   toTripInput,
   type AgentContext,
 } from '@trip/agents';
-import type { ProviderRegistry } from '@trip/providers';
+import { passthroughPolicy, withBudget, type ProviderRegistry } from '@trip/providers';
 import type { TripLlm } from '@trip/llm';
 import {
   Answer,
   TripComponent,
   TripIntentInput,
+  cleanUntrustedText,
   emptyConstraintSet,
   emptyTravelerProfile,
   isOk,
@@ -37,6 +38,8 @@ import {
   type PlanningRunView,
   type PlanningSession,
   type ProposedChange,
+  type ProviderFailure,
+  type ProviderResult,
   type RequirementsState,
   type TravelerProfile,
   type TripPlan,
@@ -67,6 +70,9 @@ export interface TripServiceDeps {
   /** Ceiling on one language-model call made by an agent, in ms. */
   agentTimeoutMs?: number;
 }
+
+/** The longest a person is made to wait on one place lookup while filling in a form. */
+const LOOKUP_BUDGET_MS = 12_000;
 
 /** Today where a trip starts, for reading dates a traveller wrote without a year. */
 const today = (timezone: string) => localParts(new Date().toISOString(), timezone).date;
@@ -146,7 +152,16 @@ export class TripService {
    * where from, where to, when, and how many people.
    */
   async createTrip(input: unknown, actor: Actor): Promise<PlanningSession> {
-    const intent = TripIntentInput.parse(input);
+    const parsed = TripIntentInput.parse(input);
+    // What a person typed is stored and sent to a place lookup: no hidden characters, one line.
+    const intent = {
+      ...parsed,
+      originQuery: cleanUntrustedText(parsed.originQuery, { maxLength: 200 }),
+      destinationQuery: cleanUntrustedText(parsed.destinationQuery, { maxLength: 200 }),
+    };
+    if (!intent.originQuery || !intent.destinationQuery) {
+      throw ApiError.badRequest('Say where you are travelling from and to.');
+    }
 
     if (intent.returnDate && intent.returnDate < intent.departureDate) {
       throw ApiError.badRequest('The return date is before the departure date.');
@@ -352,7 +367,17 @@ export class TripService {
    * so they are routed to the constraint builder.
    */
   async answer(id: string, actor: Actor, raw: unknown): Promise<PlanningSession> {
-    const parsed = Answer.parse(raw);
+    const answered = Answer.parse(raw);
+    // Free text is stored and shown back: hidden characters out, one line.
+    const parsed = {
+      ...answered,
+      value:
+        typeof answered.value === 'string'
+          ? cleanUntrustedText(answered.value, { maxLength: 2000 })
+          : Array.isArray(answered.value)
+            ? answered.value.map((v) => cleanUntrustedText(v, { maxLength: 200 }))
+            : answered.value,
+    };
     return this.mutate(id, actor, (session) => {
       let profile: TravelerProfile;
       let answer: ValidatedAnswer;
@@ -752,14 +777,37 @@ export class TripService {
       stage: 'searching',
       ...(tripChanged ? { plans: [], selectedPlanId: null, lastSearch: null } : {}),
     };
+    // Turned away before anything is saved, when it can be: a trip that is
+    // marked as searching, with plans cleared and no search behind it, is the
+    // worst outcome of a full queue.
     await this.deps.runs.assertQuota(actor);
     const saved = await this.store.updateSession(staged);
-    const { run } = await this.deps.runs.enqueue(saved, actor, {
-      kind: 'replan',
-      keep: keptFrom(selected, change.keep),
-      reason: change.summary,
-      pinsReleased: change.released,
-    });
+    let run: RunRecord;
+    try {
+      ({ run } = await this.deps.runs.enqueue(saved, actor, {
+        kind: 'replan',
+        keep: keptFrom(selected, change.keep),
+        reason: change.summary,
+        pinsReleased: change.released,
+      }));
+    } catch (err) {
+      // The change is saved and must not be lost, and the trip must not be left
+      // "searching" with nothing searching. Put it back to a state a person can
+      // act on, and say what happened.
+      if (!(err instanceof ApiError)) throw err;
+      const restored = await this.mutate(saved.id, actor, (s) => ({
+        ...s,
+        stage: s.plans.length > 0 ? 'planned' : 'profiling',
+        updatedAt: new Date().toISOString(),
+      })).catch(() => saved);
+      return {
+        ...answer,
+        session: restored,
+        status: 'saved',
+        interpretation: `${change.summary} Your change is saved, but new plans could not be started right now: ${err.message}`,
+        run: null,
+      };
+    }
     return {
       ...answer,
       session: saved,
@@ -795,8 +843,13 @@ export class TripService {
       );
     }
 
+    // Each geocoder is asked through the registry's policy (a time limit, a
+    // circuit breaker), and if one is down the next is tried. It is only a
+    // failure to place the query if *no* geocoder could answer at all.
+    let firstFailure: ProviderFailure | null = null;
+    let someoneAnswered = false;
     for (const geocoder of geocoders) {
-      const res = await geocoder.resolvePlace(query, { limit: 5 });
+      const res = await this.lookup(geocoder, (g) => g.resolvePlace(query, { limit: 5 }));
       if (isOk(res) && res.data[0]) {
         const place = res.data[0];
         // Enriching with airport codes here keeps flight search from having
@@ -804,9 +857,11 @@ export class TripService {
         // the trip record.
         return this.withAirports(place);
       }
-      if (!isOk(res) && res.status !== 'no_availability') {
-        throw ApiError.providerUnavailable(res.provider, res.providerLabel, res.status, res.message);
-      }
+      if (isOk(res) || res.status === 'no_availability') someoneAnswered = true;
+      else firstFailure ??= res;
+    }
+    if (!someoneAnswered && firstFailure) {
+      throw ApiError.providerUnavailable(firstFailure.provider, firstFailure.providerLabel, firstFailure.status, firstFailure.message);
     }
 
     throw ApiError.badRequest(
@@ -825,7 +880,7 @@ export class TripService {
         missing.message,
       );
     }
-    const res = await geocoder.resolvePlace(query, { limit: 6 });
+    const res = await this.lookup(geocoder, (g) => g.resolvePlace(query, { limit: 6 }));
     if (!isOk(res)) {
       if (res.status === 'no_availability') return [];
       throw ApiError.providerUnavailable(res.provider, res.providerLabel, res.status, res.message);
@@ -833,10 +888,34 @@ export class TripService {
     return res.data;
   }
 
+  /**
+   * One interactive lookup through the registry's policy: it cannot throw, has
+   * the circuit breaker's protection, and is limited to what a person waiting on
+   * a form should be made to wait.
+   */
+  private lookup<P extends { descriptor?: { id: string; label: string } }, T>(
+    provider: P,
+    ask: (provider: P) => Promise<ProviderResult<T>>,
+    capability: 'geocoding' = 'geocoding',
+  ) {
+    const policy = this.deps.registry.policy ?? passthroughPolicy;
+    return withBudget({ ms: LOOKUP_BUDGET_MS }, () =>
+      policy.execute(
+        {
+          provider: provider.descriptor?.id ?? capability,
+          providerLabel: provider.descriptor?.label ?? 'Place lookup',
+          capability,
+          operation: 'lookup',
+        },
+        () => ask(provider),
+      ),
+    );
+  }
+
   private async withAirports(place: Place): Promise<Place> {
     const amadeus = this.deps.registry.amadeus;
     if (!amadeus) return place;
-    const res = await amadeus.nearestAirports(place.coordinates);
+    const res = await this.lookup(amadeus, (a) => a.nearestAirports(place.coordinates), 'geocoding');
     if (!isOk(res)) return place;
     return {
       ...place,

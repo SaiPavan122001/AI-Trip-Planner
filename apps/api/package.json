@@ -17,7 +17,8 @@
     "test:integration": "vitest run -c vitest.integration.config.ts",
     "smoke": "node scripts/smoke.mjs",
     "dev:worker": "tsx watch src/worker.ts",
-    "start:worker": "node dist/worker.js"
+    "start:worker": "node dist/worker.js",
+    "ingest:knowledge": "node scripts/ingest-knowledge.mjs"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
@@ -27,11 +28,14 @@
     "@prisma/client": "^5.20.0",
     "@trip/agents": "*",
     "@trip/engine": "*",
+    "@trip/knowledge": "*",
     "@trip/llm": "*",
     "@trip/providers": "*",
     "@trip/shared": "*",
+    "@trip/telemetry": "*",
     "dotenv": "^16.4.5",
     "fastify": "^5.0.0",
+    "ioredis": "^6.0.0",
     "pino": "^9.4.0",
     "zod": "^3.23.8"
   },

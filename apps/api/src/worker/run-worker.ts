@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Logger } from 'pino';
+import { metrics } from '@trip/telemetry';
 import type { Env } from '../env.js';
 import type { Store } from '../repository/store.js';
 import type { RunService } from '../services/run-service.js';
@@ -53,6 +54,7 @@ export class RunWorker {
   async drain(): Promise<number> {
     const { store, runs, env } = this.deps;
     await store.reapRuns(env.RUN_MAX_ATTEMPTS);
+    await store.expireStaleQueued(env.RUN_QUEUE_TIMEOUT_MS);
     let done = 0;
     for (;;) {
       const run = await store.claimRun(this.id, env.RUN_LEASE_MS, env.RUN_MAX_ATTEMPTS);
@@ -78,6 +80,12 @@ export class RunWorker {
   private async tick(): Promise<void> {
     const { store, runs, env, logger } = this.deps;
     await store.reapRuns(env.RUN_MAX_ATTEMPTS);
+    // A backlog is shed, not served after the people who asked have gone.
+    const dropped = await store.expireStaleQueued(env.RUN_QUEUE_TIMEOUT_MS);
+    if (dropped > 0) {
+      metrics.runs.inc({ event: 'expired' }, dropped);
+      logger.warn({ operation: 'planning.queue_expiry', dropped }, 'Dropped searches that waited too long for a worker');
+    }
     while (!this.stopping && this.inflight.size < env.RUN_CONCURRENCY) {
       const run = await store.claimRun(this.id, env.RUN_LEASE_MS, env.RUN_MAX_ATTEMPTS);
       if (!run) return;

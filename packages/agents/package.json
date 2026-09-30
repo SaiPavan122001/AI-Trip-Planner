@@ -23,6 +23,7 @@
     "@trip/llm": "*",
     "@trip/providers": "*",
     "@trip/shared": "*",
+    "@trip/telemetry": "*",
     "zod": "^3.23.8"
   },
   "devDependencies": {

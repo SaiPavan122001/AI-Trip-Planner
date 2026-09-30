@@ -41,5 +41,10 @@ export function llmFromEnv(env: NodeJS.ProcessEnv = process.env): TripLlm {
     });
   }
 
-  return new TripLlm(provider && provider.isConfigured() ? provider : null);
+  // Prices are only ever the operator's own; with none given no cost is estimated.
+  const inputPrice = Number(env['LLM_PRICE_INPUT_PER_MTOK']);
+  const outputPrice = Number(env['LLM_PRICE_OUTPUT_PER_MTOK']);
+  const pricing = inputPrice > 0 && outputPrice > 0 ? { inputPerMillion: inputPrice, outputPerMillion: outputPrice } : undefined;
+
+  return new TripLlm(provider && provider.isConfigured() ? provider : null, pricing ? { pricing } : {});
 }

@@ -1,4 +1,4 @@
-import { passthroughPolicy, type ProviderRegistry } from '@trip/providers';
+import { passthroughPolicy, withBudget, type ProviderRegistry } from '@trip/providers';
 import {
   add,
   divide,
@@ -17,6 +17,7 @@ import {
   type Money,
   type Place,
   type ProviderNote,
+  type ProviderResult,
   type SelectedHotel,
   type TransferOffer,
   type TransportOffer,
@@ -67,11 +68,19 @@ const DEFAULT_CHECK_OUT = '11:00';
 const DAY_START = '09:30';
 const LUNCH_AT = '13:00';
 const LUNCH_MINUTES = 60;
+/** The longest one transfer lookup may take before the itinerary carries on with an assumed time. */
+const TRANSFER_LOOKUP_MS = 10_000;
 const DINNER_AT = '19:30';
 const DINNER_MINUTES = 90;
 const DAY_END = '21:30';
 /** How long the check-out desk takes, and the least time left between it and setting off. */
 const CHECK_OUT_MINUTES = 20;
+
+/**
+ * Transfer lookups already made (or in flight) during one search, by request.
+ * Plans built side by side often need the same leg; it is asked for once.
+ */
+export type TransferMemo = Map<string, Promise<ProviderResult<TransferOffer[]>>>;
 
 export interface ScheduleInput {
   registry: ProviderRegistry;
@@ -85,6 +94,8 @@ export interface ScheduleInput {
   clusters: ActivityOffer[][];
   /** Per-person, per-day allowance for meals, used to cost meal items. */
   dailyMealBudget: Money | null;
+  /** Shared by every itinerary built in one search. Optional: without it every leg is asked for. */
+  transferMemo?: TransferMemo;
 }
 
 export interface ScheduleResult {
@@ -649,15 +660,7 @@ async function transferItem(
     };
   }
 
-  const res = await policy.execute(
-    {
-      provider: provider.descriptor?.id ?? 'transfers',
-      providerLabel: provider.descriptor?.label ?? 'Transfers',
-      capability: 'transfers',
-      operation: 'searchTransfers',
-    },
-    () =>
-      provider.searchTransfers({
+  const request = {
     from,
     to,
     at,
@@ -667,8 +670,30 @@ async function transferItem(
       input.profile.transport.checkedBagsPerTraveler * seatedTravelers(input.intent.travelers),
     accessibleRequired: input.profile.special.accessibility.length > 0,
     currency: input.intent.currency,
-      }),
-  );
+  };
+  // A transfer is a short lookup, and an itinerary needs several: one that
+  // hangs may not take the time the others (and the rest of the search) need.
+  const ask = () =>
+    withBudget({ ms: TRANSFER_LOOKUP_MS }, () =>
+      policy.execute(
+        {
+          provider: provider.descriptor?.id ?? 'transfers',
+          providerLabel: provider.descriptor?.label ?? 'Transfers',
+          capability: 'transfers',
+          operation: 'searchTransfers',
+        },
+        () => provider.searchTransfers(request),
+      ),
+    );
+  // Every field the answer depends on is in the key, so only a genuinely
+  // identical question shares an answer.
+  const memoKey = JSON.stringify(request);
+  let pending = input.transferMemo?.get(memoKey);
+  if (!pending) {
+    pending = ask();
+    input.transferMemo?.set(memoKey, pending);
+  }
+  const res = await pending;
 
   if (!isOk(res) || res.data.length === 0) {
     if (!isOk(res)) notes.push(noteFromFailure(res, 'transfers'));

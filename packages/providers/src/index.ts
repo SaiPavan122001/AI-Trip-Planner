@@ -9,3 +9,8 @@ export * from './adapters/amadeus.js';
 export * from './adapters/google-maps.js';
 export * from './adapters/generic-surface.js';
 export * from './adapters/self-drive.js';
+export * from './call-scope.js';
+export * from './ssrf.js';
+export * from './policy.js';
+export * from './cache.js';
+export * from './fallback.js';

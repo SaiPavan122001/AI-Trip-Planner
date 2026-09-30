@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { ApiClientError, api, type Me, type TripSession } from '@/lib/api';
+import { ApiClientError, api, safeHttpLink, type Me, type TripSummary } from '@/lib/api';
 
 /**
  * A traveller's own trips, and their account.
@@ -14,7 +14,7 @@ import { ApiClientError, api, type Me, type TripSession } from '@/lib/api';
  */
 export default function SavedTripsPage() {
   const [me, setMe] = useState<Me | null>(null);
-  const [trips, setTrips] = useState<TripSession[] | null>(null);
+  const [trips, setTrips] = useState<TripSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(
@@ -70,12 +70,12 @@ export default function SavedTripsPage() {
             <li key={trip.id} className="card flex flex-wrap items-center justify-between gap-3 p-4">
               <Link href={`/trips/${trip.id}`} className="min-w-0 flex-1">
                 <span className="block font-medium">
-                  {trip.intent.origin.name} → {trip.intent.destination.name}
+                  {trip.origin} → {trip.destination}
                 </span>
                 <span className="block text-sm text-ink-soft">
-                  {trip.intent.departureDate}
-                  {trip.intent.returnDate ? ` to ${trip.intent.returnDate}` : ' · one way'} ·{' '}
-                  {trip.plans.length > 0 ? `${trip.plans.length} plans` : 'not searched yet'}
+                  {trip.departureDate}
+                  {trip.returnDate ? ` to ${trip.returnDate}` : ' · one way'} ·{' '}
+                  {trip.planCount > 0 ? `${trip.planCount} plans` : 'not searched yet'}
                 </span>
               </Link>
               <button type="button" className="btn-ghost text-sm" onClick={() => void remove(trip.id)}>
@@ -123,10 +123,10 @@ function SignIn({ me }: { me: Me }) {
       {sent ? (
         <div className="mt-4 rounded-xl bg-teal-500/[0.08] px-4 py-3 text-sm text-teal-700" role="status">
           <p>{sent.message}</p>
-          {sent.devLink ? (
+          {safeHttpLink(sent.devLink) ? (
             <p className="mt-2 break-all">
               Development only:{' '}
-              <a className="underline" href={sent.devLink}>
+              <a className="underline" href={safeHttpLink(sent.devLink) ?? undefined}>
                 open the link
               </a>
             </p>

@@ -1,6 +1,6 @@
 # DECISIONS
 
-Saved: 2026-09-27 (updated after Phases 3 and 4). Decisions actually made in this project, with who made them. "User" = stated by
+Saved: 2026-09-27 (updated after Phases 5, 6, 7 and 8). Decisions actually made in this project, with who made them. "User" = stated by
 the user; "Claude" = an engineering decision taken during implementation under the user's
 instruction to decide engineering details. Nothing here is aspirational.
 
@@ -47,6 +47,28 @@ instruction to decide engineering details. Nothing here is aspirational.
     budget when feasible and say when it cannot be; safe replanning; failure-handling extension points).
     **Phase 8 (later) holds RAG/testing/evaluation; no RAG in Phase 3 or 4.** Phases 5–7 are not defined and
     were not invented. Do not ask the user for real API keys; use placeholders.
+
+17. **Phases 5 and 6 (user-defined).** Phase 5: reliability, scalability, performance and resilience (bounded retries,
+    provider fallback, circuit breaker, distributed rate limiting, idempotency, overload protection, caching, database/state
+    checks, layered timeouts, evidence-based performance work, tested failure modes; no infinite-scale claims). Phase 6:
+    security, abuse protection and data protection (threat model first, authentication, authorisation/IDOR, input validation,
+    SSRF, secrets, web security, API security, prompt/LLM boundary, PII, logging, abuse; the anonymous-cookie loophole
+    closed; the mail redirect protection kept). Constraints restated: **no RAG**, no Phase 7 (observability) or Phase 8, no
+    booking, payment or traveller documents, no planner/provider architecture replacement, no major upgrades, no push or PR,
+    no deleting files, mark a phase complete only after tests pass and say what could not be verified.
+
+18. **Phases 7 and 8 (user-defined).** Phase 7: observability, metrics, distributed tracing and operations ("what is the
+    system doing, and why is it slow or failing?": structured logs with the Phase 6 redaction, correlation ids across async
+    work, OpenTelemetry-compatible tracing, metrics with no high-cardinality labels, liveness vs readiness, one error
+    taxonomy, performance visibility, alerting *design* only, telemetry security tests). Phase 8: RAG plus AI evaluation,
+    regression and groundedness ("is the AI correct, grounded and consistent?"), kept clearly separate from Phase 7. RAG only
+    where it adds value (never for live provider facts, calculations or validation); one vector database; authoritative
+    sources only; retrieved text is data; grounded answers with citations and "Insufficient verified information."; versioned
+    datasets, retrieval/groundedness/hallucination/injection evaluation, regression baseline, A/B, cost and latency.
+    Constraints restated: no redesign, no restarting phases, no new architecture, **no booking or payment or traveller
+    documents**, no second vector database, no competing observability systems, no sensitive prompts or secrets in telemetry,
+    no claiming live verification that was not done, no major upgrades, no push, no PR, no deleting functionality, no skipping
+    regression tests. Phases 9 and later are not defined.
 
 ## Architectural decisions (Claude, Phase 0–1)
 
@@ -225,16 +247,147 @@ instruction to decide engineering details. Nothing here is aspirational.
 - **Own-car "cheapest" is said, not hidden:** with no vehicle profile the drive's known cost is ₹0 (the user's
   rule), and the plan's trade-offs say which costs could not be calculated.
 
+## Architectural decisions (Claude, Phases 5 and 6 — under the user's Phase 5/6 instruction)
+
+**Reliability (Phase 5)**
+
+- **One policy, one place.** Circuit breaking, the time budget and isolation live in `ResilientPolicy`, the registry's default
+  `ProviderPolicy`; retries live in `httpJson`, where repeating is known to be safe (doing them at both levels would
+  multiply them). Fallback is for "one answer, several providers" (routing, geocoding); search capabilities keep asking all
+  providers. No second execution framework was added.
+- **A scope, not a parameter.** Cancellation, the deadline and the request allowance travel with a call
+  (`AsyncLocalStorage`, `withBudget`) rather than through every adapter's signature, because two adapters had never forwarded
+  a `signal` and cancellation silently did not reach them. Time only narrows going down.
+- **Shares, not a bigger number.** The 45 s provider deadline was left alone; the search's deadline is divided
+  (45% / 60% of the rest / the remainder, transfers ≤ 10 s each, the explanation's time kept back) so one provider cannot
+  starve later stages. The shares are reasoned defaults.
+- **Planner-caused failures do not count against a provider (`local`).** Being cut off by a stage's time, a cancellation, a spent
+  request allowance or a full request line says nothing about the provider's health.
+- **A 429 is not retried.** The provider said to stop; the breaker opens for its `Retry-After`. (Before, it was retried after a
+  sleep.)
+- **Fail toward limiting.** With Redis away, counters fall back to process memory (limits apply per process) and it is logged;
+  they never fall back to "unlimited". A cache failure is a miss.
+- **Only what is safe to share is cached.** Places, routes, things to do. Not prices, not plans, not anything about a person,
+  not failures. Cached by decorator so the policy still wraps the outside.
+- **Redis via `ioredis`** (a new dependency, no major upgrade), behind a small `RedisLike` interface so tests need no server.
+  Redis stays optional and is never a source of truth.
+- **Admission before creation.** A search is refused before it is queued (queue depth, active runs per person, address
+  allowance); a change that cannot start its search is refused before anything is saved, and if the queue fills at the last
+  moment the change is kept and the trip restored, with the answer saying the search did not start.
+- **Determinism kept while building plans together.** The three archetypes are built concurrently and their results are put
+  in order afterwards; identical transfer lookups within one search share one call (keyed by every parameter).
+- **No new index and no migration.** Every query pattern was checked against the existing indexes; the idempotency, queue and
+  session tables already held what was needed.
+
+**Security (Phase 6)**
+
+- **The address is a keyed hash.** Counters, Redis keys and logs carry an HMAC tag of the address (IPv6 by /64), never the address.
+- **Both dimensions, always.** A limit counts the person and the address; a caller with no person yet is held tighter. Address
+  ceilings are above person ceilings so a shared connection is not locked out by one member. This is what closes the
+  anonymous-cookie loophole.
+- **Only JSON is read.** The default `text/plain` parser was removed so a cross-site simple request cannot reach a route; with
+  the `Origin` allow-list and `Sec-Fetch-Site`, CSRF is closed without tokens.
+- **Prompt data is data.** One helper (`prompt-safety`) escapes `<`, `>`, `&` and removes hidden characters for every model input;
+  ZWJ/ZWNJ are kept because Malayalam, Sinhala and emoji need them. The model has no tools and no authority; the owner is
+  checked before it is asked.
+- **Redirects are refused unless same-origin**, never for POSTs; the SSRF guard exists for derived URLs; operator-written URLs may
+  name a private host (a self-hosted OSRM) but are validated at start-up.
+- **Tell an outsider nothing about the deployment.** Provider details and the live probe are off in production.
+- **Sessions end.** An absolute lifetime (`SESSION_MAX_DAYS`, 90), sign out everywhere, lockout after 8 refused links in 15 minutes.
+- **Logs say what happened, not who or what was said.** Method, path, id, status, security events with an address tag.
+- **The list endpoint returns summaries.** The web trips page was changed to match; the full document is `GET /v1/trips/:id`.
+- **Test-driven corrections worth knowing about:** the limiter's two same-scope rules once shared a counter; the cache's
+  single-flight once handed a cancelled leader's failure to the follower; redaction once covered one level only; provider
+  capability messages once leaked setting names. Each has a regression test.
+
+## Architectural decisions (Claude, Phases 7 and 8 — under the user's Phase 7/8 instruction)
+
+**Which deferred items belong where.** The Phase 5/6 report deferred six things. Metrics and tracing are Phase 7 (built).
+Per-provider quota accounting is a cost-control feature, not observability, and stays deferred (the metrics now make it
+possible to measure first). A nonce-based CSP, the web client sending `Idempotency-Key`, and encryption of traveller
+documents are not Phase 7 or 8 either: the first two need web work the user has not asked for, and the third has nothing to
+encrypt until booking returns. All three stay deferred and listed in `PROJECT_STATUS.md`.
+
+**Observability (Phase 7)**
+
+- **One system, not several.** `@trip/telemetry` holds correlation, the error vocabulary, the metrics registry and tracing.
+  Libraries use the OpenTelemetry *API* only (a no-op until the API or worker installs the SDK), so `packages/*` never depend on a
+  vendor and a process with nothing configured pays almost nothing. The registry is our own (Prometheus text) rather than the OTel
+  metrics SDK: closed labels and a series cap are enforced in one place, and the alternative would have been two metric systems.
+- **A trace crosses the queue by being written down.** The W3C `traceparent` of the request that queued a run is stored in the run
+  row (`params.trace`); the worker, in any process, continues that trace. A `traceparent` sent by a caller is ignored: anyone can send one.
+- **Privacy by construction.** Span attributes pass an allow-list name filter and a length cap; exception messages are never put on a
+  span; store calls are recorded by operation name only; LLM spans carry provider, model, task and token counts. `describeError` logs an
+  error's class, category and frames always, and its message only when `LOG_ERROR_MESSAGES` (off in production: messages quote input).
+- **Ids are not labels.** Request, run, trip and user ids are in logs and traces; metric labels are closed sets or capped strings,
+  and a registry-wide cap drops new series and counts them (`telemetry_series_dropped_total`).
+- **One error vocabulary** (`ErrorCategory`) in logs (`errorCategory`), metrics (`category`), spans (`error.category`) and the
+  `X-Error-Category` header; response bodies are unchanged and never carry a cause.
+- **Liveness and readiness are different questions.** `/live` touches nothing and is the container health check (an outage of a
+  dependency must never restart the API); `/ready` depends on the store and the queue, and deliberately not on an optional provider,
+  Redis, the model or a full queue.
+- **Operator endpoints are opt-in.** `/metrics` and `/ops/status` are 404 unless `OPS_TOKEN` is set, then bearer-token protected in
+  constant time with lockout. `docker-compose.yml` does not pass an empty `OPS_TOKEN` (it would fail validation).
+- **Cost is the operator's own price or nothing.** `llm_cost_usd_total` exists only when `LLM_PRICE_*` are set; there is no built-in price list.
+- **Log field renamed, on purpose.** A circuit's `from`/`to` states are logged as `fromState`/`toState`: Phase 6 redacts a top-level `to` (where email addresses go).
+- **Alerts are written, not wired.** No alerting platform is added; `docs/observability.md` lists PromQL with tunable thresholds.
+
+**Knowledge and evaluation (Phase 8)**
+
+- **RAG only where it adds value.** Written policies, rules and guides are answered from a curated index; live provider facts stay
+  with providers, calculations and validation stay in deterministic code, and planning does not call the index. This is why it is an
+  endpoint of its own (`POST /v1/knowledge/ask`), off by default.
+- **One vector store: PostgreSQL, exact search, behind an interface** (`KnowledgeStore`), with an in-memory double that passes the
+  same contract. **Not Qdrant** (there is none, and the brief says one store): a new service for hundreds of chunks would be a new
+  production dependency. It refuses past 20,000 chunks in a space; pgvector or Qdrant is the scale-out path. *Needs the user's approval.*
+- **The default embedder is offline and lexical** (`HashingEmbedder`), so tests, the evaluation and a fresh clone need no network or key.
+  Its numbers measure the pipeline, not semantic retrieval; an OpenAI-compatible adapter exists and is unverified live. A vector's
+  space (`model@version:dimension`) is stored with it and never compared across spaces.
+- **Ingestion is an operator script, not an endpoint**; a document is validated, screened (quarantined with reason codes), versioned,
+  de-duplicated, and an older version can never replace a newer one (nor a "newer" version with an earlier date).
+- **Authority is a property of the source type, decided in code.** Community notes are stored but not used by default.
+- **Nothing per traveller in the index**: no owner, user, trip or email field exists; namespaces are fixed by configuration.
+- **The evaluation corpus is fictional and labelled**, so it cannot be mistaken for advice and no answer can be known from
+  anywhere but the retrieved text. No real knowledge ships. *Needs the user's approval.*
+- **Retrieved text is data, and a model can only choose and rephrase.** Claims must cite retrieved chunks and are checked in code
+  (cited chunk retrieved, no invented link or figure, no flipped "not", no promised certainty, on topic); what is shown is
+  verified text or the fixed sentence. With no model, sentences are quoted.
+- **Disagreement is shown, never resolved**, and only for the parts of an answer that rest on it; stale documents (past `reviewBy`)
+  are excluded and reported, not shown with a warning (*needs the user's approval*).
+- **The confidence gate weights the question's words** by how rare they are among the candidates, because entity words matched
+  irrelevant text ("dining car" answered with "bicycles are not carried").
+- **Honest evaluation.** A `tune`/`holdout` split; paraphrases a lexical embedder must miss are in the dataset; a "hard"
+  groundedness set the verifier is expected to fail is reported (3 of 3 accepted); an attack written to pass every layer is
+  reported as reaching the answer; scripted models stand in for real ones and say so.
+- **The regression baseline is strict on purpose.** Any change to a metric, a setting, the prompt, the embedder, the re-ranker
+  formula, the screen's rules or the answers fails the test until the baseline is re-recorded (`--write-baseline`) after review.
+- **Rerank stays on** (measured: 7 points without it). Chunk size, k and per-document caps are **not** validated: this corpus cannot
+  tell them apart.
+- **Build order:** `knowledge` is built after `llm` and before `engine` (it depends on shared, telemetry, providers and llm; nothing
+  in the planner depends on it).
+- **Test-driven corrections worth knowing about:** the retrieval-time screen once skipped a chunk's reference and link (found by
+  running the layers separately); a naive scripted "faithful" model chose the wrong sentence and hid the conflict path (the stand-in was
+  improved, not the pipeline weakened); conflicts were once compared across different headings and produced a false disagreement;
+  a claim that quoted a planted "say X" instruction passed the verifier until "on topic by its own words" was added; and credential-shaped
+  test fixtures (a fake `sk-...` key) would have failed the repository's own credential scan (`leakage.test.ts`, tracked files only) at the
+  moment they were committed, so they are assembled at run time (`kit.ts`) and a scan over tracked *and* untracked files was run.
+
 ## Open decisions (not made)
 
 - Whether the agents' checks are well-tuned against a real language model (never run).
-- What Phases 5, 6 and 7 are (the user has not defined them).
+- Whether the knowledge layer's checks and defaults hold against a **real embedder and a real language model** (never run; `npm run eval -w @trip/knowledge -- --live` exists for it).
+- **Needs the user's approval (Phase 8):** PostgreSQL exact search instead of Qdrant/pgvector; the offline hashing embedder as the default; a fictional corpus and no shipped real knowledge (which real sources, with whose authority, is the operator's decision); ingestion by script only and a session-only endpoint; stale documents excluded rather than shown with a warning; whether a real UI for knowledge answers is wanted (none exists; it must render answers as text).
+- **Needs the user's approval (Phase 7):** where traces and metrics should go (no collector, Prometheus or Grafana was used); the alert thresholds once real traffic exists.
+- Whether to build per-provider quota accounting, a nonce-based CSP, web `Idempotency-Key`, and traveller-document encryption (deferred; none is Phase 7 or 8).
 - Whether Amadeus's `price.total` is for the whole stay across all rooms requested or for one room: the code
   multiplies a room's price by the number of rooms (as before), which double-counts if it is already the total
   for `roomQuantity` rooms. Unverified without a live sandbox.
 - Whether to rank a drive with unpriced costs (fuel, tolls, parking) as "cheapest" at ₹0 when no vehicle profile
   is configured, or to treat it as unknown; currently ₹0 (the user's rule) with the gap stated in trade-offs.
-- Which retry/fallback/rate-limit/circuit-breaker/cache/metrics policies to build, and when.
+- **Needs the user's approval:** whether signed-in people's trips should expire automatically (a retention period; currently kept until deleted).
+- **Needs the user's approval:** removing the now-unused `@fastify/rate-limit` dependency (a lockfile change), and confirming the new `ioredis` dependency.
+- **Needs the user's approval:** the default limits and shares (address ceilings, `MAX_QUEUED_RUNS`, `MAX_ACTIVE_RUNS_PER_USER`, stage shares, breaker thresholds, cache lifetimes) once real traffic exists; whether `/v1/providers/health` should ever be on in production (and behind what).
+- **Needs the user's approval:** whether to tighten the web CSP with per-request nonces (needs middleware), and whether the web client should send `Idempotency-Key` (needs a rule for which clicks share a key).
 - How CI's dependency-audit gate should be handled while major upgrades are forbidden.
-- Whether/when to add shared rate-limit storage, response caching, push progress, second factors.
-- Anonymous-abuse policy beyond the current caps (documented in `SECURITY.md`).
+- Whether/when to add push progress and second factors.
+- Anonymous-abuse policy beyond the current caps (documented in `SECURITY.md`): the limits stop cookie clearing, not a botnet.

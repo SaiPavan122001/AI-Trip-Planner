@@ -1,14 +1,17 @@
 # PROJECT STATUS
 
-Saved: 2026-09-27 (after Phases 3 and 4). Everything below was checked against the repository and Git state at save time.
+Saved: 2026-09-27 (after Phases 5, 6, 7 and 8). Everything below was checked against the repository and Git state at save time.
 
 ## Git state
 
 - Branch: **`phase-0-hardening`** (local only; no upstream configured; nothing pushed; no PR).
-- Code HEAD at save time: `5451f24` "Phase 3 and 4: safe provider foundation, and a planner that chooses
-  for reasons". The commit after it (if present) only records these four status files.
-- 23 commits ahead of `main` with the Phase 3+4 commit included (the status-recording commit is the next
-  one). Remote `origin` = `https://github.com/SaiPavan122001/AI-Trip-Planner.git`. No stashes.
+- Phases 5, 6, 7 and 8 are the newest work and were **not committed** when this file was saved (committing was not asked
+  for): `git status` shows them as modified and untracked files on top of HEAD `4275b9d` ("Record Phase 3 and 4
+  status"), which follows `5451f24` "Phase 3 and 4: safe provider foundation, and a planner that chooses for
+  reasons". New this round: `packages/telemetry`, `packages/knowledge`, `docs/observability.md`, `docs/knowledge.md`, the knowledge
+  route/service/store/migration/script in `apps/api`. If the tree is clean when you read this, someone committed them; check
+  `git log --oneline -5`.
+- Remote `origin` = `https://github.com/SaiPavan122001/AI-Trip-Planner.git`. No stashes. Nothing pushed.
 - Phase 3+4: `5451f24`. Phase 2: `c32d650` (multi-agent architecture), `d86bee0` (contract and self-drive
   tests), `ab92923` (status files). Phase 1: `91b3d14`, `e5a4fd9`, `09683bb`. Phase 0: `ac56815` … `377cf81`
   plus `b5b193c`, `2302a8c`.
@@ -159,10 +162,147 @@ were extended, not replaced.
   (before, the Comfort plan could be built above it and shown blocked), so one Phase 1 test was rewritten to test
   the ranking invariant directly and a new one asserts the fitting behaviour.
 
+## Phase 5 — reliability, scalability, performance and resilience — implemented and verified in tests; nothing live-verified
+
+Defined by the user. Built on the Phase 3 provider architecture and the Phase 4 planner, not beside them. No RAG.
+Full design and the failure table: `docs/reliability.md`.
+
+- **Layered time model.** One search deadline (`PLANNING_TIMEOUT_MS`) is divided: the orchestrator keeps back
+  what the explanation needs; the engine gives journeys+things to do 45%, stays 60% of the rest, itineraries the
+  remainder (each transfer lookup ≤ 10 s); a provider call gets min(its ceiling, its stage's time); an HTTP attempt
+  gets min(its timeout, what the call has left). `withBudget`/`AsyncLocalStorage` scope
+  (`packages/providers/src/call-scope.ts`) carries cancellation, deadline and a request allowance to everything a
+  call starts, including adapters that never passed a `signal` on (the transfer search and the place lookup did not,
+  so cancelling a search left their requests running). A hung provider now costs its own results only.
+- **Retries** (`httpJson`): transient failures only (network, timeout, 408/500/502/503/504), safe requests only
+  (GET by default), a count, jittered exponential delay with a ceiling, the call's deadline, a per-host retry budget.
+  A 429 and other 4xx are never retried; sleeping is abortable; redirects only to the same origin.
+- **Circuit breaker** in `ResilientPolicy` (the registry's default policy): per provider and capability, states
+  CLOSED / OPEN / HALF_OPEN, configurable threshold and recovery time, `Retry-After` honoured, planner-caused
+  ("local") failures not counted, a skipped call keeps the last real failure in its message. The language model has
+  its own breaker in `TripLlm`.
+- **Fallback** (`fallback.ts`): routing (Google, then OSRM) and geocoders; the answer names the provider that
+  answered and what failed first; all-fail lists every failure; cancellation does not fall through. (Found on the
+  way: the self-drive answer had been dropping the routing provider's warnings; it now carries them and says which
+  provider measured the drive.)
+- **Caching** (`cache.ts`): places 24 h, routes 6 h, things to do 6 h; never prices or anything about a person;
+  keys hold every parameter; values are schema-checked on read; bounded; shared through Redis when configured;
+  a failing store is a miss. In-flight duplicates share one call, except a follower never inherits a cancelled
+  leader's failure (a test found that bug).
+- **Rate limiting** (`apps/api/src/security/rate-limit.ts`, `infra/counters.ts`): replaced `@fastify/rate-limit`
+  (still installed, no longer used) with a limiter that counts the person **and the address**, named per-route
+  policies, `RateLimit-*`/`Retry-After`, Redis counters (`ioredis`, new dependency) with a per-process fallback
+  rather than fail-open. Fixes the anonymous-cookie loophole (see Phase 6). A test found that two rules of one policy
+  on the same address shared a counter; fixed.
+- **Idempotency** (`security/idempotency.ts`) on create, plan, modify, consent, requirements, cancel and magic
+  link, using the existing table and store methods; 5 behaviours tested including concurrent duplicates.
+- **Overload**: bounded queue (`503 busy` + `Retry-After`), per-user active-run cap, stale queued runs dropped,
+  a ceiling on provider requests per search, 64 KB body limit, per-address anonymous search allowance.
+- **Database/state**: `deleteSession` no longer reports success when the database failed; a modify whose search
+  cannot be queued no longer leaves the trip "searching" with no run (checked before saving, restored after);
+  `GET /v1/me` counts rows instead of reading fifty trips; `GET /v1/trips` returns summaries. New store methods
+  (`countQueuedRuns`, `countActiveRunsForOwner`, `expireStaleQueued`, `countSessions`) pass the shared
+  contract on memory **and real PostgreSQL**. No index was added: every query pattern was checked against the
+  existing indexes and none was missing.
+- **Performance**: measured first (`packages/engine/scripts/measure-plan.ts`, fake providers at 150 ms/call):
+  13 calls / 1853 ms before, 9 calls / 844 ms after (−54%) by building the three plans together and sharing
+  identical transfer lookups within a search. Amadeus token requests are single-flighted.
+
+## Phase 6 — security, abuse protection and data protection — implemented and verified in tests; not penetration tested
+
+Defined by the user. Threat model first: `docs/threat-model.md`. Audit by the authors, with tests for each fix.
+
+**Audit found nothing wrong with** ownership (IDOR/BOLA: every trip route walked as a stranger and as no one,
+plus forged cookies and headers), SQL injection (Prisma; two raw queries use bound parameters), command injection
+(nothing spawns), XSS in the web app (no unsafe rendering), booking (501 for everyone), and the git history (no
+credential patterns; only the documented local dev database login).
+
+**Found and fixed:** the anonymous-cookie loophole (limits counted the person only; now person **and** address, plus a
+per-address daily cap on anonymous searches and tight per-address counting of first trips); `httpJson` followed
+redirects (SSRF): now same-origin only, and a general SSRF guard exists; the prompt data block could be closed from
+inside the text (`</tag>` survived JSON escaping) and hidden Unicode was passed through: fixed in one helper
+(`@trip/shared` `prompt-safety`) used by the agents and the change-request path; an activity name offered by a model
+did not have to be one the traveller wrote; the LLM adapter followed redirects with the key; no CSP/HSTS/Permissions-
+Policy on the web app; API answers were cacheable; the 404 echoed the request; framework error messages quoted input;
+log redaction covered only one level (top-level `email`/`token` slipped through) and the request logger wrote
+headers/cookies/addresses; `/v1/providers` named environment variables (also in per-capability messages) and
+`/v1/providers/health` made billed calls for anyone; sessions never expired while used; no "sign out everywhere";
+no lockout for guessing sign-in links; unbounded strings (place names, answers, plan ids); the default
+`text/plain` body parser allowed cross-site simple requests; configuration URLs were not validated.
+
+- **Auth:** absolute session lifetime (`SESSION_MAX_DAYS`), `POST /v1/auth/logout-all`, lockout after 8 refused
+  links in 15 minutes (counted per address; checked before the store is touched), per-recipient/person/address/day
+  limits on sign-in emails.
+- **CSRF:** only JSON bodies are read; `Origin` allow-list; `Sec-Fetch-Site: cross-site` without `Origin` refused.
+- **SSRF:** `packages/providers/src/ssrf.ts` (every address spelling; DNS re-check for names), redirect rule, start-up
+  validation of base URLs (scheme, credentials, https in production), body-size cap on provider responses.
+- **Data:** an address is only ever a keyed hash (counters, Redis keys, logs); logs hold method, path, id, status and
+  security events; hidden characters stripped from stored free text; email never copied into trips, runs or audit.
+- **Web:** CSP and the other headers in `next.config.mjs`; `safeHttpLink`; the trips list uses the summary shape;
+  the sources page copes with hidden setting names. Static tests (`web-safety.test.ts`) keep unsafe rendering out.
+- **Deployment information:** provider details and live probe off in production (`EXPOSE_PROVIDER_*`).
+
+## Phase 7 — observability, metrics, tracing and operations — implemented and verified in tests; no collector or Prometheus used
+
+Defined by the user (with Phase 8). Design: `docs/observability.md`. **One system**: the OpenTelemetry *API* in the libraries (a
+no-op until `setupTracing` installs the SDK in the API or worker), an own metrics registry (Prometheus text), one error vocabulary.
+
+- **New package `packages/telemetry`** (`context`, `errors`, `metrics`, `instruments`, `tracing`, `sdk`; 42 tests): `withSpan`,
+  `startManualSpan`, `withCorrelation`, `safeAttributes` (allow-listed names, length cap), `MetricsRegistry` with closed labels and a
+  series cap (`telemetry_series_dropped_total`), `ErrorCategory` + `categoryOfError/Http/ProviderStatus`, `describeError`
+  (class, category, frames; the message only when `LOG_ERROR_MESSAGES`).
+- **Instrumented, not redesigned:** provider policy/`httpJson`/fallback/cache (spans, calls, failures by class, latency, retries,
+  fallbacks, circuit transitions; 22 tests), `TripLlm` (span and metrics, tokens, cost only from `LLM_PRICE_*`; 9 tests), agents and
+  orchestrator stages, `plans.ts` stages, run service (`planning.run` span, duration, queue wait, outcome), worker, and every store
+  operation through a proxy (`instrument-store.ts`: operation name only, never an argument).
+- **Correlation across the queue:** the request's W3C `traceparent` and request id are stored in the run row (`params.trace`); the worker
+  (in any process) continues the trace. An inbound `traceparent` from a caller is ignored.
+- **API:** request span, `X-Request-Id`, `X-Error-Category`; `/live` (touches nothing; the Docker health check), `/ready` (store, queue,
+  geocoder configured; not an optional provider), token-protected `/metrics` and `/ops/status` (404 without `OPS_TOKEN`, constant-time
+  compare, lockout); worker can serve `/live` and `/metrics` on `WORKER_METRICS_PORT`.
+- **Tests:** 110 new (telemetry 42, providers 22, llm 9, api `observability.test.ts` 37), including planted secrets searched for in every
+  span, metric and log line, correlation through the queue, retry/fallback/circuit/planning-duration/queue-wait metrics, error
+  classification, readiness, and label-cardinality. **Mutation checks run this session:** request span outside the correlation
+  scope, run not storing its `traceparent`, span attribute filter removed → the matching tests fail (killed).
+- **Not verified:** no OTLP collector, Prometheus, Grafana or alert manager was used (spans go to an in-memory exporter in tests;
+  alerts are documented PromQL with unmeasured thresholds); the worker's own `/metrics` server was tested, not run in a container.
+
+## Phase 8 — knowledge (RAG), evaluation, regression and groundedness — implemented and verified offline; no real embedder or model used
+
+Defined by the user (with Phase 7). Design, numbers and limits: `docs/knowledge.md`. RAG is used **only** for written policies, rules and guides;
+live provider facts, calculations and validation keep their owners and **planning does not call it**.
+
+- **New package `packages/knowledge` (`@trip/knowledge`, 156 tests):** document schema and authority by source type; `scan.ts` (instruction-like
+  text, role markers, tag boundaries, exfiltration, hidden characters, look-alike letters, base64/hex/rot13, secrets, personal data);
+  `validate.ts` (strict schema, source-link check, never fetched); `chunker.ts`; `embedder.ts` (`HashingEmbedder` offline and lexical;
+  `OpenAiEmbedder` unverified live; named vector spaces); `store.ts` (`KnowledgeStore`, in-memory store, shared exact `rankChunks`);
+  `ingest.ts` (versions, dates, duplicates, quarantine, atomic swap); `retrieve.ts` (filters, weighted confidence gate, staleness,
+  re-screen, lexical rerank, disagreement); `verify.ts`; `answer.ts` (grounded answers, citations, fixed insufficient sentence);
+  `env.ts`; `testing/` (store contract, scripted models); `eval/` (corpus, datasets, harness, groundedness, hallucination, injection,
+  regression report, A/B, latency, CLI, live script).
+- **API and storage:** additive migration `20260401000000_phase8_knowledge` (2 tables + a partial unique index), `PrismaKnowledgeStore`
+  (`apps/api/src/repository/knowledge-prisma.ts`), `KnowledgeService`, `POST /v1/knowledge/ask` (off unless `KNOWLEDGE_ENABLED`; session; strict
+  body; owner-only `tripId`; `knowledge.ask` limits; fixed 503), `/ops/status` knowledge block, `apps/api/scripts/ingest-knowledge.mjs`
+  (`npm run ingest:knowledge`). Build order: `knowledge` after `llm`; Dockerfile, CI and root build updated.
+- **Tests:** 156 in the package, 29 API (`knowledge.test.ts`), 10 against PostgreSQL 16 (store contract + a parity test asking all 43
+  questions of both stores, requiring identical answers), 6 new smoke checks (built ingestion script → PostgreSQL → HTTP). **19 mutation
+  checks** (verification removed, off-topic check, conflict handling, staleness, retrieval screen, authority filter, relevance threshold,
+  coverage gate, space isolation, namespace isolation, version rule, duplicate rule, quarantine, screen rules, link check, prompt escaping,
+  session requirement, trip ownership, rate limit): all failed the tests, none survived.
+- **Baseline results** (offline, deterministic; committed in `packages/knowledge/eval/baseline.json`): retrieval Recall@3 0.917, Precision@3 0.361,
+  MRR 0.938, hit rate 0.917; answers (quoting path) pass 0.837 (holdout 0.733); groundedness accuracy 1.0 with 0 false accepts on 23 pairs but
+  **3 of 3 "hard" recombinations accepted**; hallucination 0 leaks in 70 runs; injection 21 of 21 attacks blocked by the pipeline, **19 of 21 by
+  the verifier alone**, and the 1 attack written to pass every layer **reaches the answer**. Latency: knowledge pipeline ~2.5 ms mean (offline stand-ins)
+  against ~800 ms for a synthetic planning search; prompt ~524 tokens on average.
+- **Not verified:** no real embedder or language model has run through it (the live evaluation script exists and has never been run);
+  the corpus is 15 fictional documents and 43 questions (one case moves a rate by 2 points, and the authors wrote both the pipeline and the
+  dataset); the scanner is a tripwire; the verifier is lexical; chunk size, k and per-document caps cannot be told apart on this corpus;
+  exact search has been run on 27 chunks; the evaluation numbers measure the pipeline with a lexical embedder, not semantic retrieval.
+
 ## Currently being worked on
 
-Nothing is in progress. Phases 3 and 4 are implemented, verified as listed below, and committed. **Phases 5–7 are
-not defined; do not invent or start them. Phase 8 (RAG/testing/evaluation) is later; no RAG exists.**
+Nothing is in progress. Phases 3–8 are implemented and verified as listed below. **Phases 9 and later are not defined by the
+user; do not invent or start them.** Nothing is committed (see "Git state").
 
 ## Tests and checks completed (all executed after the final code change)
 
@@ -171,11 +311,16 @@ not defined; do not invent or start them. Phase 8 (RAG/testing/evaluation) is la
 | `npm run build` (all workspaces incl. web) | exit 0 |
 | `npm run lint` | exit 0; 0 errors; 1 pre-existing warning (`no-page-custom-font`, `apps/web/app/layout.tsx`) |
 | `npm run typecheck` | exit 0 |
-| `npm test` | agents 140, engine 263, llm 33, providers 137, shared 58, api 226 = **857 passed** (Phase 2 baseline 650) |
-| `npm run test:integration` (embedded PostgreSQL 16) | 43 passed (includes the new run-ordering test) |
-| `node apps/api/scripts/smoke.mjs` and `… --split` | both passed (19 checks each, unchanged) |
-| RAG/vector/embedding scan of the Phase 3/4 diff and manifests | nothing found; no dependency or lockfile change |
-| Secret scan of the diff | nothing found (tests use `placeholder-*` values) |
+| `npm test` | agents 140, engine 273, knowledge 156, llm 71, providers 315, shared 89, telemetry 42, api 539 = **1625 passed** (Phase 5/6 baseline 1330) |
+| `npm run test:integration` (embedded PostgreSQL 16) | 58 passed (was 48): +10 for the knowledge store (contract, and a parity test: all 43 evaluation questions answered identically by the PostgreSQL and in-memory stores) |
+| `node apps/api/scripts/smoke.mjs` and `… --split` | both passed, **25 checks each** (was 19; +6 knowledge steps through the built ingestion script, PostgreSQL and HTTP) |
+| `npm run eval -w @trip/knowledge` (built) | "Identical to the baseline." exit 0 (30 metrics, fingerprint and digest equal); also run as tests |
+| Mutation checks (Phase 8: 19, Phase 7: 3 this session) | every mutation killed by the tests, none survived (list in the Phase 7 and 8 sections) |
+| Credential-pattern scan (the repository's own patterns) over tracked **and untracked** files, 357 files | 0 hits, after four Phase 8 test fixtures that would have failed `leakage.test.ts` once committed were rebuilt at run time |
+| Invisible-character scan of every changed and new file | none, apart from two intentional zero-width joiners in a Phase 6 test |
+| New dependencies this round | OpenTelemetry API/SDK packages (Phase 7, in `packages/telemetry`); `@trip/knowledge` is a workspace, no external package added; no major upgrade |
+| Secret scan (tracked files by a test; all 25 commits of history by pattern) | nothing found apart from the documented local dev database login |
+| Mutation checks (change the code, see the tests fail) | ownership check removed → 13 failures; address rule removed → cookie-rotation test fails; `Sec-Fetch-Site` rule removed → 3; `.strict()` removed → 1; retry-429 / retry budget / retry deadline / redirect rule → the matching tests fail |
 
 New tests, by what they hold to: **providers** — every adapter through success / empty / refused / rate limited /
 5xx / hang / network failure / not JSON / wrong shape / one bad row, from fixtures, no network; the isolating
@@ -222,38 +367,59 @@ with a reason, agents re-run on re-plan.
   built; "safety" is only what timing and published reviews can show (no destination data, by design); free-text
   "anything else" is never interpreted; a drive with no vehicle profile ranks as ₹0 (the user's rule) with the gap
   stated; a 4-seat car per taxi, and more than five people in one own car only warns.
-- **Not built, by design of the phase boundary:** retries, provider fallback, shared rate limiting, circuit breaking,
-  caching, metrics/tracing. The `ProviderPolicy` port is the extension point; nothing claims these are solved.
+- **Phase 5/6 were built and tested only against stand-ins.** Redis (counters, cache) against an in-memory fake that
+  implements the commands used; nothing against a real Redis, live provider, Docker, CI or a managed PostgreSQL. The
+  stage shares, breaker thresholds, retry budget, cache lifetimes, queue and per-user limits are reasoned defaults, each a
+  setting, not tuned on real traffic. While Redis is away the limits are per process (up to N× with N instances).
+- **Phase 7/8 were built and tested without external services.** No OTLP collector, Prometheus, Grafana or alerting was used; no real
+  embedder or language model has run through the knowledge layer (the `--live` evaluation exists and has never been run); the
+  `OpenAiEmbedder` is tested with a stubbed `fetch`. The knowledge evaluation is on 15 fictional documents and 43 questions written by the
+  same authors as the pipeline (see `docs/knowledge.md` section 13 for the limits: a lexical verifier that accepts recombinations, a
+  scanner that is a tripwire, an attack written to pass every layer that reaches the answer, chunk-size settings the corpus cannot tell
+  apart, exact search measured on 27 chunks). There is no web UI for knowledge answers.
+- **Not built:** per-provider daily quota accounting; a nonce-based CSP for the web app (Next's
+  inline scripts need `'unsafe-inline'`); the web client does not send `Idempotency-Key` yet; automatic expiry of a
+  signed-in person's trips (a product decision, see `DECISIONS.md`); encryption of traveller documents (none are stored);
+  a second sign-in factor; a session list.
+- **The Phase 6 audit was by the authors.** It is not a penetration test. See `SECURITY.md` and `docs/threat-model.md`.
+- **`@fastify/rate-limit` is still in `apps/api/package.json`** but no longer used (replaced by the shared limiter).
+  Removing it is a lockfile change left for the user to approve.
 - Validation does not re-check accessibility (the engine enforces it) or that items lie inside the trip
   window.
 - **`npm audit` fails at baseline**; the fix needs Next 16 / Vitest 5 majors, which the user forbade.
 - **Latent:** fixtures with 2026-11-10 dates will hit `departure_in_past` after that date; the agents'
   tests use 2030 dates and a fixed `TODAY`.
-- **Documented security limits** (`SECURITY.md`): anonymous session churn restarts daily counts (bounded
-  by per-address limits); rate-limit counters are per instance; sign-in is an emailed link only;
-  pre-accounts trips are unreachable; `/v1/providers/health` is public (5/min).
+- **Documented security limits** (`SECURITY.md`): a botnet or an IPv6 allocation larger than one /64 defeats
+  address counting (put a CDN/WAF in front); per-process counters while Redis is away; sign-in is an emailed link only;
+  pre-accounts trips are unreachable.
 - **Observed, not investigated (Phase 1):** a self-drive-only plan with no hotel provider shows a ₹0
   counted total with the unpriced costs listed as not included. (The Flights/Hotels note merge was fixed in
   Phase 3.)
-- The user asked that the old npm cache on C: **not** be deleted; it was not. C: had 2.5 GB free at the
-  last check (it had dropped to 345 MB during Phase 1, for reasons outside this project).
-- Redis is unused; booking remains disabled; migration drift (schema vs SQL) is not checked
-  automatically.
+- The user asked that the old npm cache on C: **not** be deleted; it was not. C: had 6.7 GB free at the start of
+  Phase 5/6 work and 5.8 GB at the end; the difference was not traced to this project (everything ran with the
+  `.devcache` environment; one empty scratch file that a command created under C:'s temp folder by mistake was removed).
+- Booking remains disabled; migration drift (schema vs SQL) is not checked automatically. Phase 5/6 added **no
+  migration** (the queue/idempotency/session tables already had what was needed).
 
 ## Exact next step when a new session starts
 
 1. Read `CLAUDE.md`, this file, `PHASE_PLAN.md`, `DECISIONS.md` (and `SECURITY.md`, `README.md`, `docs/` when the
    work touches them). Do not ask the user to paste them.
 2. `source "/h/Projects/Mutli Agent AI Trip Planner/.devcache/env.sh"`, then `git status` and
-   `git log --oneline -5`; confirm branch `phase-0-hardening` and that `5451f24` is in the history (the newest
-   commit may be the one that records these status files). Check C: free space.
+   `git log --oneline -5`; confirm branch `phase-0-hardening` and that `5451f24` (Phase 3+4) is in the history. Phases 5–8 may still be
+   uncommitted (see "Git state"). Check C: free space (5.4 GB free at the end of Phase 8, 5.8 GB at the end of Phase 6; the difference was
+   not traced to this project: no project-named file was found on C:).
 3. If the tree is not clean, find out why before touching anything.
-4. **Do not start Phases 5–7 or any new scope on your own** (they are not defined), and **do not introduce RAG**
-   (Phase 8, later). Tell the user Phases 3 and 4 are complete with the caveats above and ask what they want
-   next. The most useful single next actions, if the user has no other priority, are (a) run the adapters against
-   the real services with the user's own credentials placed in the environment by the user (never ask for them in
-   chat), record real responses over the hand-written fixtures and see which schemas need to change, and (b) run
-   the agents against a real language model and measure how the checks treat real output.
+4. **Do not start any new scope on your own** (Phases 9 and later are not defined). Tell the user Phases 3–8 are complete with
+   the caveats above and ask what they want next. The
+   most useful single next actions, if the user has no other priority, are (a) run the adapters against the real
+   services, and Redis, with the user's own credentials placed in the environment by the user (never ask for them in
+   chat), record real responses over the hand-written fixtures and see which schemas and which defaults (stage shares,
+   breaker thresholds, cache lifetimes) need to change, (b) run the agents against a real language model and measure
+   how the checks treat real output, **including the knowledge layer: run `npm run eval -w @trip/knowledge -- --live` with a real embedder and
+   model and compare with the offline baseline**, (c) an independent security review, since Phase 6 was an audit by the authors, and (d) stand up an OTLP
+   collector and Prometheus and check the traces, metrics and alerts in `docs/observability.md` against a real run.
+   The decisions waiting for the user are in `DECISIONS.md` under "Open decisions".
 5. Whatever is done next: run lint, typecheck, build and tests (and `test:integration` if storage or the API
    changed, and both smoke topologies if the request path changed), never claim a pass that was not executed, and
    do not push.

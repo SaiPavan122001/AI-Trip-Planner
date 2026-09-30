@@ -19,7 +19,8 @@ import type {
   TripIntent,
   TripPlan,
 } from '@trip/shared';
-import { nightsBetween } from '@trip/shared';
+import { nightsBetween, type Deadline } from '@trip/shared';
+import { metrics, withSpan } from '@trip/telemetry';
 import type { AgentContext, AgentError, AgentMeta, AgentOutcome } from './contract.js';
 import { runAccommodationAgent } from './guidance/accommodation.js';
 import { runActivityAgent } from './guidance/activity.js';
@@ -90,6 +91,15 @@ export interface OrchestratorInput {
   /** Pins that could not be kept and why, for the explanation. */
   pinsReleased?: Array<{ component: string; reason: string }>;
   signal?: AbortSignal;
+  /**
+   * When the whole search must be finished. The provider searches are given
+   * what is left of it minus what the last two stages (checking, and the
+   * explanation, which may call a model) need, so a slow provider cannot leave
+   * the search with no time to finish.
+   */
+  deadline?: Deadline;
+  /** The most HTTP requests the search may make to providers. */
+  maxProviderRequests?: number;
   onProgress?: (progress: PlanProgress) => void;
 }
 
@@ -136,6 +146,19 @@ const traceOf = (
   warnings: (meta?.warnings ?? []).slice(0, 10),
   rejected: (meta?.rejected ?? []).slice(0, 20),
 });
+
+/**
+ * One stage of the workflow, as a span (`planning.stage`) and a duration
+ * metric, so "which stage is slow" is an answer from the data and not a guess.
+ */
+async function stageOf<T>(stage: 'guidance' | 'plan_search' | 'validation' | 'synthesis', work: () => Promise<T> | T): Promise<T> {
+  const started = performance.now();
+  try {
+    return await withSpan('planning.stage', { 'planning.stage': stage }, work);
+  } finally {
+    metrics.stageDuration.observe({ stage }, (performance.now() - started) / 1000);
+  }
+}
 
 export class PlanningOrchestrator {
   constructor(private readonly deps: OrchestratorDeps) {}
@@ -199,11 +222,13 @@ export class PlanningOrchestrator {
       return { status: 'impossible', search: null, plans: [], narrative, guidance, applied: null, trace, error, notes: [], validation: null };
     }
 
-    const [transportOutcome, accommodationOutcome, activityOutcome] = await Promise.all([
-      runTransportAgent(transportInput, ctx),
-      runAccommodationAgent({ nights, travelers: intent.travelers, stated }, ctx),
-      runActivityAgent({ days: Math.max(0, nights - 1), stated }, ctx),
-    ]);
+    const [transportOutcome, accommodationOutcome, activityOutcome] = await stageOf('guidance', () =>
+      Promise.all([
+        runTransportAgent(transportInput, ctx),
+        runAccommodationAgent({ nights, travelers: intent.travelers, stated }, ctx),
+        runActivityAgent({ days: Math.max(0, nights - 1), stated }, ctx),
+      ]),
+    );
     checkpoint();
 
     if (transportOutcome.ok) guidance.transport = transportOutcome.data;
@@ -223,16 +248,24 @@ export class PlanningOrchestrator {
 
     // ---- 3. the deterministic search -------------------------------------------
     const started = now();
-    const search = await this.services.buildPlans({
-      registry: this.deps.registry,
-      intent,
-      profile: applied.profile,
-      constraints: input.constraints,
-      ...(input.keep ? { keep: input.keep } : {}),
-      activityGuidance: applied.activityGuidance,
-      ...(input.signal ? { signal: input.signal } : {}),
-      onProgress: (p) => input.onProgress?.(p),
-    });
+    // What the explanation may take (one model call, bounded by the agent
+    // timeout) is kept back from the providers; checking plans is arithmetic.
+    const reserveMs = (this.deps.agents.timeoutMs ?? 15_000) + 2_000;
+    const providerDeadline = input.deadline?.leaving(reserveMs);
+    const search = await stageOf('plan_search', () =>
+      this.services.buildPlans({
+        registry: this.deps.registry,
+        intent,
+        profile: applied.profile,
+        constraints: input.constraints,
+        ...(input.keep ? { keep: input.keep } : {}),
+        activityGuidance: applied.activityGuidance,
+        ...(providerDeadline ? { deadline: providerDeadline } : {}),
+        ...(input.maxProviderRequests === undefined ? {} : { maxProviderRequests: input.maxProviderRequests }),
+        ...(input.signal ? { signal: input.signal } : {}),
+        onProgress: (p) => input.onProgress?.(p),
+      }),
+    );
     checkpoint();
     trace.push(
       traceOf('plan_search', 'service', search.plans.length > 0 ? 'ok' : 'degraded',
@@ -243,13 +276,15 @@ export class PlanningOrchestrator {
     // ---- 4. validation: the last gate --------------------------------------------
     emit({ step: 'validate', label: 'Checking every plan', percent: 96 });
     const validationStart = now();
-    const validation = validatePlans({
-      intent,
-      profile: applied.profile,
-      constraints: input.constraints,
-      plans: search.plans,
-      ...(input.keep ? { kept: input.keep } : {}),
-    });
+    const validation = await stageOf('validation', () =>
+      validatePlans({
+        intent,
+        profile: applied.profile,
+        constraints: input.constraints,
+        plans: search.plans,
+        ...(input.keep ? { kept: input.keep } : {}),
+      }),
+    );
     const blocked = validation.results.filter((r) => !r.valid).length;
     trace.push(
       traceOf('validation', 'service', blocked === 0 ? 'ok' : 'degraded',
@@ -273,7 +308,7 @@ export class PlanningOrchestrator {
       providerNotes: notes,
       feasibility: search.feasibility,
     });
-    const synthesis: AgentOutcome<Narrative> = await runSynthesisAgent(facts, ctx);
+    const synthesis: AgentOutcome<Narrative> = await stageOf('synthesis', () => runSynthesisAgent(facts, ctx));
     checkpoint();
     const narrative = synthesis.ok ? synthesis.data : { ...templateNarrative(facts), summary: summaryText(facts) };
     trace.push(this.agentTrace('synthesis_agent', synthesis, narrative.source === 'template' ? 'Explanation written from the facts.' : 'Explanation written and checked against the facts.'));

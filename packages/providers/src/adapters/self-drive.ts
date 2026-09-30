@@ -125,7 +125,10 @@ export class SelfDriveProvider implements BaseProvider {
     // operator's configured vehicle profile, as labelled estimates; tolls and
     // parking have no data source, so they are named as not calculated
     // rather than counted as zero.
-    const warnings: string[] = [];
+    // What the routing source said about itself comes first: which provider
+    // measured the drive, and (when a preferred one failed and another answered)
+    // what went wrong, so a degraded answer is never presented as an ordinary one.
+    const warnings: string[] = [`Distance and time come from ${route.provenance.providerLabel}.`, ...route.warnings];
     const itemisedFees: TransportOffer['itemisedFees'] = [];
     const unpricedCosts: string[] = [];
     if (profile) {

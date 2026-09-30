@@ -3,6 +3,7 @@ import { ZodError, z } from 'zod';
 import { dedupeProviderNotes, fail, isOk, noteFromFailure, ok, statusClass, statusLabel } from '@trip/shared';
 import { InvalidResponseError, NetworkError, TimeoutError, toProviderFailure } from '../http.js';
 import { IsolatingPolicy, readItems, readResponse, type ProviderCall } from '../guard.js';
+import { ResilientPolicy } from '../policy.js';
 import { ProviderRegistry } from '../registry.js';
 import { loadProvidersEnv } from '../config.js';
 
@@ -155,7 +156,9 @@ describe('a note says what it is about', () => {
   });
 
   it('has a policy on the registry that every call can go through', () => {
-    expect(registry().policy).toBeInstanceOf(IsolatingPolicy);
+    // Phase 5: the default is the resilient policy (isolation, time budget and
+    // circuit breaking); the isolation behaviour itself is still tested below.
+    expect(registry().policy).toBeInstanceOf(ResilientPolicy);
   });
 
   it('reads the call deadline from the environment and refuses nonsense', () => {

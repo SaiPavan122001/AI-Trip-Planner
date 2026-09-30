@@ -202,11 +202,29 @@ describe('stopping a search', () => {
 });
 
 describe('when a search goes wrong', () => {
-  it('fails a search that takes too long, and says so in words', async () => {
-    const { app, ctx } = await withTravel({ PLANNING_TIMEOUT_MS: '150' }, async (req) => {
+  it('a provider that hangs costs its own results, not the search: the run finishes and the trip says that source timed out', async () => {
+    const { app, ctx } = await withTravel({ PLANNING_TIMEOUT_MS: '2500', AGENT_TIMEOUT_MS: '1000' }, async (req) => {
       await new Promise((_, reject) => req.signal?.addEventListener('abort', () => reject(req.signal?.reason)));
       return undefined;
     });
+    const started = (await plan(app)).json().run as { id: string };
+    const began = Date.now();
+    await ctx.worker.drain();
+
+    const finished = (await run(app, started.id)).json().run;
+    expect(finished.status).toBe('succeeded');
+    // Cut off by its stage's share of the time, well inside the search's own limit.
+    expect(Date.now() - began).toBeLessThan(2500);
+    const saved = (await trip(app)).json().trip;
+    expect(saved.providerNotes).toEqual(
+      expect.arrayContaining([expect.objectContaining({ capability: 'flights', status: 'timeout' })]),
+    );
+  });
+
+  it('still fails a search whose own work will not finish, and says so in words', async () => {
+    const hangs = { buildPlans: (deps: { signal?: AbortSignal }) => new Promise<never>((_, reject) => deps.signal?.addEventListener('abort', () => reject(deps.signal?.reason))) };
+    const travel = fakeTravelRegistry({});
+    const { app, ctx } = await buildTestApp({ registry: travel.registry, envVars: { PLANNING_TIMEOUT_MS: '150' }, planningServices: hangs as never });
     const started = (await plan(app)).json().run as { id: string };
     await ctx.worker.drain();
 

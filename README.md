@@ -35,7 +35,9 @@ journey and the stay together, so a hotel that suits you counts as much as a goo
 
 **Not simply the cheapest.** The planner chooses among real options for reasons it can state. Three readings of "best" (cheapest known cost; fewest changes and shortest time; the best fit for what you ranked) are built from the same search; your travel style moves the balanced pick (a luxury trip is not scored on price alone); rooms are chosen for what you asked (breakfast, room type, sleeping the whole party) before price; and every plan carries a "why this plan" list of what it chose and passed over. A firm budget is kept whenever any combination fits it, and when none does the planner says by how much and what to raise, without loosening it for you.
 
-**One provider failing does not fail the search.** Sources are asked at the same time, each behind a deadline; one that throws, hangs, is rate limited, finds nothing or sends data that does not match its documented shape costs that source's results and adds a note saying which of those it was, for which of flights, hotels, trains and so on. You still get the plans that can be built.
+**One provider failing does not fail the search.** Sources are asked at the same time, each behind a deadline; one that throws, hangs, is rate limited, finds nothing or sends data that does not match its documented shape costs that source's results and adds a note saying which of those it was, for which of flights, hotels, trains and so on. You still get the plans that can be built. Each source has its share of the search's time, safe requests are retried a bounded number of times, a source that keeps failing is left alone for a while, and the drive between two places falls back to a second routing source when the first fails ([details](docs/reliability.md)). The service says `503 busy` rather than accept more searches than it can run, and limits are counted per person and per address, so clearing cookies does not restart them.
+
+**It says when it does not know.** Questions whose answer is written down (a cancellation policy, a permit rule) can be answered from a curated index, with citations, in words that were checked against the source, or with "Insufficient verified information." Prices, timetables and availability are never taken from that index: they come from providers, live ([details, evidence and limits](docs/knowledge.md)). Off unless you switch it on.
 
 **Total cost, not sticker price.** A room ₹1,000 cheaper that adds ₹2,500 a day in taxis is priced
 with the taxis. Accommodation is chosen on what the whole stay costs.
@@ -159,6 +161,9 @@ packages/
   engine/      The planner. Classification, questioning, scoring, search
                orchestration, scheduling, costing, validation.
   llm/         Pluggable LLM boundary with a deterministic fallback.
+  telemetry/   Logs, metrics and traces: one system, no vendor lock-in (Phase 7).
+  knowledge/   Answers from a curated index with citations, and the evaluation
+               harness that measures it (Phase 8). Not used by planning.
   agents/      The planning agents, deterministic services and the orchestrator
                that coordinates them. Agent output is untrusted and checked.
 apps/
@@ -182,6 +187,8 @@ npm run dev:worker     # a search worker on its own (see RUN_WORKER in .env.exam
 npm test               # all workspace tests (needs nothing installed or running)
 npm run test:integration   # the store contract and request path against a real PostgreSQL
 npm run smoke          # the built API + worker end to end on a throwaway PostgreSQL
+npm run eval -w @trip/knowledge   # knowledge evaluation vs the committed baseline (build first; offline)
+npm run ingest:knowledge -w @trip/api -- ./docs.json   # put curated documents in the knowledge index
 npm run lint           # ESLint, all workspaces
 npm run typecheck      # all workspaces
 npm run build          # full build in dependency order
@@ -229,7 +236,11 @@ See [docs/booking.md](docs/booking.md).
 - [Providers](docs/providers.md) — the interfaces, and the contract for your own rail or bus adapter
 - [API reference](docs/api.md) — every endpoint, with request and response shapes
 - [Booking](docs/booking.md) — the state machine and its guarantees
-- [Security](SECURITY.md) — threat model, data handling, reporting a vulnerability
+- [Reliability](docs/reliability.md) — time budgets, retries, circuit breakers, fallback, caching, rate limits, idempotency, overload, and what is not verified
+- [Observability](docs/observability.md) — logs, correlation ids, traces, metrics, health and readiness, the telemetry data policy, alerts
+- [Knowledge and evaluation](docs/knowledge.md) — answers with citations from a curated index, the boundary with live provider facts, prompt-injection defence, and the measured results and limits
+- [Security](SECURITY.md) — what is protected and what is not, data handling, reporting a vulnerability
+- [Threat model](docs/threat-model.md) — what an attacker could realistically do, what stood in the way, what was fixed
 - [Contributing](CONTRIBUTING.md)
 
 ---

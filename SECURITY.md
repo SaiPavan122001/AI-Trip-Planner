@@ -20,8 +20,12 @@ book, pay for or ticket anything; every booking endpoint answers `501` and store
 [docs/booking.md](docs/booking.md)). That removes the most dangerous surface, and it also means several
 protections below are described as *not yet built* rather than assumed.
 
-**It is not ready to run publicly for other people as it stands.** There is no authentication. Read
-"Known limitations" before deploying it anywhere reachable from the internet.
+People use it with a private session (an `HttpOnly` cookie) from the moment they plan, and can sign in by an
+emailed link to keep their trips across devices. Phase 6 audited the code against the threat model in
+[docs/threat-model.md](docs/threat-model.md) and fixed what it found; **that is an audit by the people who wrote
+the code, not an independent penetration test**, and nothing here has been run against live providers, a real
+Redis, a managed database or a real mail service. Read "Known limitations" before deploying it anywhere
+reachable from the internet, and put the usual perimeter (TLS, a CDN or WAF for volumetric attacks) in front.
 
 ## What this system handles
 
@@ -29,86 +33,144 @@ protections below are described as *not yet built* rather than assumed.
 |---|---|---|
 | Trip intent, preferences, itineraries | low to moderate: reveals when and where someone will be away | `trips.session` (JSON) |
 | Free text the traveller types (a location preference, a change request) | moderate | the trip; change requests are also in the decision log |
-| Provider API credentials | secret | environment only |
+| Email address (only for someone who signed in) | personal data | `users.email`; never copied into a trip, run or audit event |
+| Provider API credentials, `SESSION_SECRET`, mail webhook token | secret | environment only |
+| A caller's address | personal data | **never stored**: only a keyed hash, in memory or Redis, for the length of a rate-limit window, and in security log lines |
+| Curated knowledge documents (policies, rules, guides) and their vectors | public content, but a poisoned one misleads | `knowledge_documents`, `knowledge_chunks`; **shared, and holds nothing about a traveller** (no owner, user, trip or email field exists) |
+| Telemetry: logs, metrics, traces | must carry no secret and no traveller's words | stdout, `/metrics` (token), the operator's OTLP collector; ids are in logs and traces, never in metric labels |
 | Traveller names, dates of birth, passport numbers | sensitive | **not collected in this release** |
 | Payment card data | — | **never handled**; there is no field for it |
+
+Retention: trips and their searches are kept until the person deletes them (or their account); an abandoned
+anonymous account with nothing in it, expired sessions and links, idempotency answers (24 h) and finished
+searches (a week) are swept every ten minutes. There is no automatic expiry of a signed-in person's trips: that
+is a product decision, listed in `DECISIONS.md`.
 
 ---
 
 ## Controls in place
 
-**Secrets** live only in the environment. `.env` is git-ignored, `.env.example` contains no real
-values, and CI fails if a `.env` file is ever tracked or if gitleaks finds a credential anywhere in
-history — a key that was committed and then removed is still a leaked key.
+**Secrets** live only in the environment. `.env` is git-ignored, `.env.example` holds no values for any key,
+secret, token or password (a test checks), and CI fails if a `.env` file is ever tracked or if gitleaks finds a
+credential anywhere in history. Phase 6 also scanned the tracked files and the whole of git history for
+credential patterns (AWS, Google, provider secret keys, Slack and GitHub tokens, private keys, connection
+strings with passwords): none, apart from the documented local development database login. Start-up refuses
+configuration that could leak or be steered: a base URL or webhook that is not plain http(s), that carries
+credentials, or is not https in production (unless it names the operator's own network); a malformed
+`CORS_ORIGINS`. Configuration errors name the setting and never repeat its value.
 
-**Input validation** happens at the API boundary with Zod: request bodies, and every questionnaire
-answer against the question as it was asked (options, limits, currency, applicability). A rejected
-answer never reaches storage. Both stores validate a trip against the schema before writing it, and
-the PostgreSQL store validates again when reading, so a malformed value cannot make a trip permanently
-unreadable. **Every provider response** (Amadeus, OSRM, Nominatim, Google, and the rail/bus contract) is
-validated against a schema of the fields the adapter reads before it is mapped: a response that does
-not match, or a body that is not JSON, is reported as `invalid_response` and discarded, and one bad row
-in a list is dropped without discarding its neighbours. Those schemas were written from vendor
-documentation and checked against hand-written fixtures, **not against live responses** (see below).
-Anything a provider's adapter throws is turned into a failure for that provider, so one provider cannot
-end a search or leak its error text.
+**Input validation** happens at the API boundary with Zod: request bodies (strict: a field nobody asked for is an
+error, not something quietly assigned), query and path parameters (ids are UUIDs), and every questionnaire
+answer against the question as it was asked. Every string has a maximum; bodies are limited to 64 KB
+(`MAX_BODY_BYTES`) and refused before they are parsed; only `application/json` is read; free text from a person
+has hidden characters (control characters, zero-width and direction-override characters, the invisible Unicode
+"tag" block) removed before it is stored. A rejected answer never reaches storage. Both stores validate a trip
+against the schema before writing it, and the PostgreSQL store validates again when reading. **Every provider
+response** is validated against a schema before it is mapped; a body that does not match, or is not JSON, is
+reported as `invalid_response` and discarded, and one bad row in a list is dropped without discarding its
+neighbours. Anything a provider's adapter throws becomes a failure for that provider.
 
-**Language-model output is untrusted.** The only thing a model does is classify a change request. Its
-parameters are checked field by field against domain rules and invalid ones are dropped and logged;
-the engine validates the request again before applying it; the text shown to the traveller is written
-from the validated request and never taken from the model; and the traveller's message is
-JSON-escaped inside a delimited block with an instruction that it is data. Nothing a model says can
-set a price, skip a hard constraint or become traveller-visible text. This reduces prompt injection; it
-does not make it impossible, and the design depends on the model having so little authority that
-manipulating it gains an attacker almost nothing. Model calls have a timeout (`LLM_TIMEOUT_MS`).
+**Language-model output is untrusted, and so is what goes into a model.** Four kinds of thing are kept apart:
+instructions (written by us, containing nothing a person wrote), application state, what the traveller wrote,
+and what providers supplied. The last two go to a model only as JSON inside a tag the instructions name as
+data; since Phase 6 `<`, `>` and `&` are escaped inside that block (plain JSON escaping does not escape `<`, so
+text could close its own tag) and hidden characters are removed. The model has no tools. Its output is parsed
+into a closed set of intents, every parameter is checked field by field against domain rules (a name it offers
+must be one the traveller actually wrote), the engine validates the request again, and the text shown to the
+traveller is written from the validated request and never taken from the model. Ownership, consent, pins and
+budget rules are applied in code and the owner is checked *before* a model is asked, so a model that has been
+persuaded of anything can affect nothing outside what a form could. This reduces prompt injection; it does not
+make it impossible, and the design depends on the model having so little authority that persuading it gains
+an attacker almost nothing. Model calls have a timeout (`LLM_TIMEOUT_MS`, `AGENT_TIMEOUT_MS`) and a circuit
+breaker, and the OpenAI-compatible adapter refuses redirects.
 
-**Logging** redacts by path: `authorization` and `cookie` headers, `*.apiKey`, `*.clientSecret`,
-`*.password`, `*.document` and `travelers[*].document`. That list does **not** cover names, email
-addresses, phone numbers or dates of birth, which matters if traveller data is ever collected. Vendor
-error bodies are never logged or returned verbatim. The public `/health` and `/ready` endpoints return
-a fixed message when the database is down; the underlying error is logged, not returned.
+**Identity and sessions**: a trip belongs to the person who made it, and someone else's trip is reported as "not
+found", exactly as one that does not exist, so ids cannot be probed; a test walks every trip route as a
+stranger and as no one (`authorization.test.ts`). The session cookie is 256 random bits in an `HttpOnly`,
+`SameSite=Lax` (`Secure` in production) cookie; only an HMAC of it, keyed with `SESSION_SECRET`, is stored, so a
+copy of the database cannot be used to sign in. A session ends `SESSION_MAX_DAYS` (90) after it began however
+often it was used, can be ended on every device (`POST /v1/auth/logout-all`), and every sign-in issues a fresh
+one. Signing in is by an emailed single-use link with a short life; the token is exchanged by POST (a mail
+scanner's prefetch cannot use it up), consumed atomically, and answers identically whatever was wrong with it. A
+run of refused links locks an address out (8 in 15 minutes), so guessing costs the service nothing. The link
+request answers the same for known and unknown addresses. `GET /v1/me/export` and `DELETE /v1/me` let a person
+take or erase their data.
 
-**Transport hardening**: helmet, an explicit CORS allowlist (`CORS_ORIGINS`), a 1 MB body limit,
-per-request timeouts on every outbound call, bounded retries with jittered backoff, and per-provider
-request pacing. A search runs in the background and is bounded by `PLANNING_TIMEOUT_MS`; when it times
-out or is cancelled, the provider calls it has in flight are aborted and it never retries them.
+**Cross-site requests**: only JSON bodies are read (a cross-site form or `text/plain` post cannot reach a route);
+a request that changes something and names an `Origin` outside `CORS_ORIGINS` is refused; so is one that names
+no `Origin` but is marked `Sec-Fetch-Site: cross-site`; the cookie is `SameSite=Lax`.
 
-**Identity and sessions**: a trip belongs to the person who made it, and someone else's trip is
-reported as "not found", exactly as one that does not exist, so ids cannot be probed. Everyone who plans
-gets a private session in an `HttpOnly`, `SameSite=Lax` cookie (`Secure` in production); the cookie is 256
-random bits and only an HMAC of it, keyed with `SESSION_SECRET`, is stored, so a copy of the database
-cannot be used to sign in. Signing in is by an emailed single-use link with a short life; the token is
-exchanged by POST (so a mail scanner's prefetch cannot use it up), is consumed atomically (two requests
-cannot both use it), and every sign-in issues a fresh session. The link is never returned by the API
-(except as a development convenience with `MAILER=console`, which production refuses). A request that
-changes something and names an `Origin` outside `CORS_ORIGINS` is refused. `GET /v1/me/export` and
-`DELETE /v1/me` let a person take or erase their data; deletion removes their trips, runs, audit events and
-sessions together.
+**Abuse and cost controls**: every request is counted per person **and per address**, so clearing cookies does
+not restart a limit; expensive routes have named policies (searches, changes, reading words, place lookups,
+sign-in emails per person, address, day and recipient, account export); anonymous searches are also capped per
+address per day; a person may have only a few searches running; the queue is bounded (`503 busy` with
+`Retry-After`, nothing queued to fail later) and stale queued searches are dropped; a search has a deadline and a
+ceiling on provider requests. Counters are in Redis when configured (shared across instances) and fall back to
+each process's memory when it is not answering, never to "unlimited". `TRUST_PROXY` is off by default: an
+`X-Forwarded-For` header is only believed if the operator says which proxies to trust. See
+[docs/reliability.md](docs/reliability.md).
 
-**Planning agents**: agents are untrusted logic boundaries. The Requirements Agent's output is checked against the traveller's own message (every item needs a real quote; dates, amounts and counts are re-read from the quote, not taken from the model), the guidance agents' output is reduced to closed vocabularies and may only fill preferences the traveller left empty, and the Synthesis Agent's prose is checked against the plan's facts (no invented figure, link, or claim of booking). What an agent proposes reaches a trip only as ordinary answers, through the same validation, ownership and consent rules as a click; an agent cannot write to a store, call a provider, set a price, or touch a secret (its package has no access to any). Text from a traveller, a provider (a hotel's name, a note) or a destination reaches a model only as JSON-escaped data inside a delimited block, never in the instructions. This establishes the boundaries; it is not a complete defence against prompt injection.
+**Outbound requests (SSRF)**: no API input is used as a URL or host. Redirects from a provider are followed only
+to the same origin and scheme (never for a POST), at most three, and never to an address the guard refuses; the
+guard (`packages/providers/src/ssrf.ts`) blocks non-http(s) schemes, credentials in URLs, loopback, private,
+link-local (including cloud metadata), carrier-grade NAT, multicast and reserved addresses in every spelling
+(decimal, hex, octal, IPv4-mapped IPv6, NAT64, 6to4), and names that resolve to them. An operator may point a
+provider at their own network; that is allowed for URLs the operator wrote and refused for anything derived from
+a response. Every outbound call has a timeout, a retry budget and a size limit on what is read. The mail
+webhook refuses redirects (its body carries a sign-in link).
 
-**Cost controls**: each search calls paid provider APIs, so a person may start a limited number a day
-(lower until they sign in), a trip can have at most one active search, the expensive routes have their
-own tight rate limits, and the rate limiter keys on the person where there is one and on the client
-address otherwise. `TRUST_PROXY` is off by default: `X-Forwarded-For` is only believed if the operator
-says which proxies to trust.
+**Web application**: React escapes everything it renders; the source has no `dangerouslySetInnerHTML`,
+`innerHTML`, `eval` or `document.write` (a test searches for them); the one link built from API data is checked
+to be http(s). Every page carries a content security policy (own scripts, connections only to this site and the
+configured API, no framing, no plugins, no changing where forms post), `X-Content-Type-Options`,
+`Referrer-Policy`, `X-Frame-Options`, `Cross-Origin-Opener-Policy`, `Permissions-Policy` (no camera, microphone,
+location or payment) and, in production, HSTS. The policy allows inline scripts because Next.js inlines its own;
+a per-request nonce would tighten that. The API returns JSON with a `default-src 'none'` policy,
+`Cache-Control: no-store` and `nosniff` on every answer.
 
-**Data handling**: a provider's revalidation token (the key to re-pricing an offer) is stored with the
-trip but blanked in every response except the owner's own export. Every store write is checked for the
-version that was read (optimistic locking), so two changes cannot silently overwrite each other, and a
-search's plans are only saved if the trip still has the inputs the search started with.
+**Errors and logs**: errors are a fixed vocabulary; framework messages (which quote input) are replaced by fixed
+sentences; the 404 no longer echoes the request; an unexpected failure is a fixed sentence and a request id. The
+log records a request's method, path (never the query string), id and status, and nothing else about it: not
+headers, body, cookies or address. Redaction (a second line of defence) covers credentials, tokens, sign-in
+links and email fields at the top level and one level down. Security events (`bad_origin`, `rate_limited`,
+`sign_in_failed`, `sign_in_locked`, `quota_exceeded`, `overloaded`, `idempotency_conflict`, `sessions_revoked`,
+...) are structured lines carrying an address *tag* and, if signed in, a user id. The public `/health` and
+`/ready` endpoints return a fixed message when the database is down. Vendor error bodies are never logged or
+returned verbatim.
 
-**Booking safeguards, kept for when booking returns**: the state machine, the rule that a client can
-never send a payment or provider event, atomic per-user idempotency, and a state check so a transition
-applies at most once. They are tested, and unreachable over HTTP today.
+**Deployment information**: `/v1/providers` does not name the environment variables that would enable a missing
+source, and `/v1/providers/health` (live, some billed) is off, in production; both are on in development.
+
+**Data handling**: a provider's revalidation token is stored with the trip but blanked in every response except
+the owner's own export. Every store write is checked for the version that was read (optimistic locking), so two
+changes cannot silently overwrite each other; a request that can be repeated safely can carry an
+`Idempotency-Key`. Only places, routes and things to do are cached, keyed by every parameter and validated on the
+way out; nothing about a person is cached.
+
+**Telemetry (Phase 7)**: one logging system (the redaction above applies), one error vocabulary, correlation ids
+carried from the request into the queued run and the worker. Spans carry an allow-listed, length-capped set of
+attributes, never an exception message, a store argument, a prompt or an answer; metric labels are closed sets
+or capped strings and never an id; an inbound `traceparent` is ignored. `/metrics` and `/ops/status` answer 404
+unless `OPS_TOKEN` is set, then need a bearer token compared in constant time, with lockout. Planted secrets are
+searched for in every span, metric and log line by tests. See [docs/observability.md](docs/observability.md).
+
+**Knowledge answers (Phase 8)**: `POST /v1/knowledge/ask` needs a session, is rate limited per person and per
+address, cannot name an index, treats a `tripId` as owner-only, and never states more about a failure than that
+it is unavailable. The index is curated by an operator script (there is no ingestion endpoint): documents are
+validated, screened for instruction-like text, encoded payloads, hidden characters, secrets and personal data
+(held in quarantine with reason codes, never searchable), versioned (an older document never replaces a newer one)
+and de-duplicated; source links are checked and never fetched. Retrieved text reaches a model only as escaped data;
+a model's claims must cite retrieved chunks and are checked against them in code, and what a traveller reads is
+that, or "Insufficient verified information.". See [docs/knowledge.md](docs/knowledge.md).
+
+**Booking safeguards, kept for when booking returns**: the state machine, the rule that a client can never send a
+payment or provider event, atomic per-user idempotency, and a state check so a transition applies at most once.
+They are tested, and unreachable over HTTP today.
 
 **Production refusals**: the service will not start in production without `SESSION_SECRET` (minimum 32
 characters; `JWT_SECRET` is read as its old name) or without `DATABASE_URL`, and refuses `MAILER=console`.
-Starting with the in-memory store in production would lose every trip on deploy, and a secret that is
-public in the source would protect nothing.
 
-**Containers** run as an unprivileged user and contain only production dependencies and compiled
-output.
+**Containers** run as an unprivileged user and contain only production dependencies and compiled output.
 
 ---
 
@@ -116,64 +178,66 @@ output.
 
 These are real. Treat them as prerequisites before running this for other people.
 
-- **The agents have only been exercised against scripted models.** Their boundaries (quotes, closed vocabularies, fact-check, template fallbacks) are tested with models that return garbage, obey injected instructions, and fail; no real language model has been run through them, and how a real one behaves against these checks (how often a good answer is dropped for want of a quote, say) is unmeasured. The rule-based fallback is deliberately narrow: it reads plainly stated facts and leaves the rest unread.
-- **A hard requirement stated in words can be missed, but not invented.** The checks err toward dropping: a real requirement whose quote does not use the words that say it is required is dropped and, where relevant, reported as dropped. The traveller can always state it through the interview or a change.
-- **Later words do not withdraw earlier hard requirements they do not mention.** The latest statement about a kind replaces the earlier one, but a requirement of a kind not mentioned stays until changed through the interview.
-- **Anonymous sessions are cheap to make.** Anyone can get a fresh session, and each has its own daily
-  search allowance, so clearing cookies restarts the count. What bounds it is the per-address limit on
-  creating a first trip (30 an hour) and the general per-address rate limit, both of which are only as
-  good as `TRUST_PROXY`. An operator worried about their provider bill should also set provider-side
-  quotas; there is no per-address daily cap on searches.
-- **Rate-limit counters live in each API process.** With several API instances each counts separately,
-  so the effective limit is the configured one times the number of instances. The daily search
-  allowance is in the database and is exact.
-- **Sign-in is an emailed link only.** There is no second factor, no session list or "sign out
-  everywhere" endpoint (the store supports it), and no account recovery beyond a new link to the same
-  address. Whoever controls the mailbox controls the account.
-- **A trip with no owner is unreachable.** Rows created before accounts existed have no owner and cannot
-  be opened by anyone; they are not migrated to anyone.
-- **`/v1/providers/health` is public and calls billed APIs**, including a real Google Places request.
-  It is limited to 5 a minute per caller, which bounds the cost but does not stop it.
-  `/v1/providers` reveals which providers are missing and the names of the environment variables that
-  would enable them. Restrict both.
-- **A search that is cancelled or times out stops calling providers it has not reached yet and aborts
-  the calls in flight, but a provider may already have counted a request it received.** A worker that
-  is killed outright leaves its search to lapse (30 seconds by default) before another takes it up.
-- **Provider response schemas are unverified against live vendors.** Every adapter validates what it
-  reads, but the schemas come from documentation, and no live credentials have ever been used here. A
-  vendor field that differs in practice makes results *unusable* (reported as such), never wrong; the
-  first live run is where that would show.
-- **The mail webhook is unverified against a real mail service**, and has no retry: a failed delivery
-  is reported to the traveller, who can ask again. Redirects from it are refused so a sign-in link
-  cannot be forwarded to a host the operator did not configure.
-- **Free text is stored and shown back.** It is bounded and single-line, and rendered as text (not
-  HTML), but any future feature that puts stored text into a prompt or a page must treat it as
-  hostile.
-- **Traveller documents are not encrypted by the application**, and nothing stores them in this
-  release. The schema carries `encrypted` and `nonce` columns and the repository is shaped for it, but
-  the implementation stores the serialised record. Implement encryption before booking is enabled.
-- **The audit trail is thin.** Trip creation, consent answers, pin changes and search start/finish are
-  recorded, and sign-ins are; reads are not. Trips are kept until deleted. Housekeeping (in each worker,
-  every ten minutes) removes expired sessions, sign-in links, idempotency claims, finished runs older than
-  a week and abandoned anonymous accounts.
-- **Compose publishes PostgreSQL and Redis on the host** with a default password. It is a local
-  development convenience; do not use it as a deployment.
-- **Redis is not used** by the application. It runs in compose and `REDIS_URL` is accepted, for a caching
-  and queueing phase that has not happened.
-- **The PostgreSQL tests use a throwaway local server, not a managed one.** The store contract, the
-  migrations and the request path run against real PostgreSQL 16 (embedded, or the CI service), which is
-  what found that the original init migration could not apply. Behaviour under a managed provider's
-  connection pooler, replicas or a different collation has not been tested.
+- **This has not been penetration tested, and no external service has been used live.** The audit was by the
+  authors, with tests. Provider response schemas come from documentation and hand-written fixtures; Redis,
+  PostgreSQL behind a pooler, Docker, CI and the mail webhook were not exercised live.
+- **The agents have only been exercised against scripted models.** Their boundaries are tested with models that
+  return garbage, obey injected instructions and fail; no real language model has been run through them, and how
+  a real one behaves against these checks is unmeasured. Prompt injection is reduced, not eliminated.
+- **Knowledge answers are only as good as the index, and only as safe as who may write to it.** A plausible,
+  screen-clean document that states an attacker's falsehood in plain words passes every layer (reproduced in the
+  evaluation as a known limitation); ingestion is trusted by design. The screen is a tripwire: a phrasing it has
+  never seen passes it. The answer verifier is lexical: it stops an invented figure, source, link, promise or reversed
+  "not", but accepts a sentence that recombines a source's own words and figures into something it does not say
+  (measured: 3 of 3 such cases). **No real embedder and no real language model has run through this layer**; the
+  evaluation uses an offline embedder that matches shared words, not meaning, and scripted models. Exact search is
+  measured on 27 chunks. Details and numbers: [docs/knowledge.md](docs/knowledge.md).
+- **Observability was built and tested without a collector, a Prometheus server or Grafana.** The alerts are written
+  down, not wired. A worker running without the API serves its own `/metrics` only when `WORKER_METRICS_PORT` and
+  `OPS_TOKEN` are set. Traces go to whatever OTLP endpoint the operator configures; what leaves the process is the
+  allow-listed attributes above.
+- **A hard requirement stated in words can be missed, but not invented**, and later words do not withdraw earlier
+  hard requirements they do not mention.
+- **Anonymous sessions are cheap to make, but an address is bounded.** Each anonymous person has an allowance;
+  what stops a new one restarting it is the per-address counting (the limits above), which is only as good as
+  `TRUST_PROXY` (behind a proxy that is not configured, everyone shares one address; with too much trust, callers
+  choose their own). Someone with many addresses (a botnet, a large IPv6 allocation beyond one /64) is not
+  stopped by any of it: put a CDN or WAF in front for that, and set provider-side quotas.
+- **Per-process fallback multiplies limits.** While Redis is unreachable each API process counts for itself, so the
+  effective limit is up to the number of instances times the configured one.
+- **Sign-in is an emailed link only.** No second factor; whoever controls the mailbox controls the account.
+  There is no session list (only sign out here / everywhere) and no account recovery beyond a new link.
+- **The inline-script allowance in the web CSP** is Next.js's; a nonce per request needs middleware this app does
+  not have. The web client does not yet send `Idempotency-Key`. The Google Fonts stylesheet is a third-party
+  request.
+- **A trip with no owner is unreachable.** Rows created before accounts existed cannot be opened by anyone.
+- **A search that is cancelled or times out stops calling providers it has not reached and aborts calls in flight,
+  but a provider may already have counted a request it received.**
+- **The mail webhook is unverified against a real mail service** and has no retry: a failed delivery is reported
+  to the traveller, who can ask again.
+- **Free text is stored and shown back.** It is bounded, single-line, stripped of hidden characters and rendered
+  as text, but any future feature that puts stored text into a prompt or a page must treat it as hostile.
+- **Traveller documents are not encrypted by the application**, and nothing stores them in this release. The
+  schema carries `encrypted` and `nonce` columns and the repository is shaped for it, but the implementation
+  stores the serialised record. Implement encryption before booking is enabled.
+- **The audit trail is thin.** Trip creation, consent answers, pin changes, search start/finish and sign-ins
+  are recorded; reads are not. It records that things happened, not what was said.
+- **Logs contain user ids and address tags**, which identify a person to anyone who also has the database and the
+  secret. They contain no email address, cookie, token, query string or free text; ship them accordingly.
+- **Compose publishes PostgreSQL and Redis on the host** with a default password (and Redis with none). It is a
+  local development convenience; do not use it as a deployment.
+- **The PostgreSQL tests use a throwaway local server, not a managed one.**
+- **`npm audit` fails at baseline**; the fix needs Next 16 / Vitest 5 majors, which are forbidden here.
 
 ---
 
 ## Reporting scope
 
-In scope: authentication and authorisation flaws once they exist, injection, SSRF through provider
-configuration, secret leakage, anything letting a client set a booking state a provider or payment
-processor alone should set, idempotency bypasses, prompt-injection paths that change what a plan says
-or does, and anything causing the system to present fabricated travel data as real.
+In scope: authentication and authorisation flaws, injection, SSRF, secret leakage, anything letting a client set a
+booking state a provider or payment processor alone should set, idempotency and rate-limit bypasses,
+prompt-injection paths that change what a plan says or does, and anything causing the system to present
+fabricated travel data as real.
 
-Out of scope: the known limitations above (already documented), vulnerabilities in third-party
-provider APIs, findings that require a malicious operator with environment access, and rate limiting on
-a deployment that has disabled it.
+Out of scope: the known limitations above (already documented), vulnerabilities in third-party provider APIs,
+findings that require a malicious operator with environment access, volumetric denial of service, and rate
+limiting on a deployment that has disabled it.

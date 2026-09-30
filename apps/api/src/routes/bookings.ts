@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { AppContext } from '../context.js';
-import type { ApiErrorBody } from '../errors.js';
+import { labelled, type ApiErrorBody } from '../errors.js';
 
 /**
  * Booking is not part of this release.
@@ -39,7 +39,7 @@ function bookingUnavailable(reply: FastifyReply): FastifyReply {
   const body: ApiErrorBody = {
     error: { code: 'booking_unavailable', message: BOOKING_UNAVAILABLE_MESSAGE },
   };
-  return reply.status(501).send(body);
+  return labelled(reply, 501, 'booking_unavailable').status(501).send(body);
 }
 
 export function registerBookingRoutes(app: FastifyInstance, _ctx: AppContext): void {

@@ -8,7 +8,7 @@ import { hashToken, newToken } from '../auth/tokens.js';
 import { InMemoryRepository } from '../repository/memory.js';
 import type { Store } from '../repository/store.js';
 import { loadEnv, type Env } from '../env.js';
-import type { AppContext } from '../context.js';
+import type { AppContext, ContextOverrides } from '../context.js';
 
 /** Shared fixtures for the API tests. Real places, no personal data. */
 
@@ -159,7 +159,7 @@ export interface TestApp {
  * The fixture trip belongs to `owner`, and `app` is signed in as them.
  */
 export async function buildTestApp(
-  overrides: Partial<AppContext> & {
+  overrides: ContextOverrides & {
     seedTrip?: boolean;
     envVars?: Record<string, string>;
     /** Give the server a place lookup that knows Hyderabad, Bengaluru and Mysuru. */

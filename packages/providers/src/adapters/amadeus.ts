@@ -1,4 +1,5 @@
 import {
+  SingleFlight,
   fail,
   money,
   ok,
@@ -65,6 +66,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
   private readonly baseUrl: string;
   private readonly pacer: RequestPacer;
   private token: { value: string; expiresAt: number } | null = null;
+  private readonly tokenFlight = new SingleFlight<string>();
 
   constructor(private readonly config: AmadeusConfig) {
     this.descriptor = FLIGHT_DESCRIPTOR(config.environment);
@@ -552,8 +554,17 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
 
   // ------------------------------------------------------------- transport
 
-  private async accessToken(): Promise<string> {
-    if (this.token && this.token.expiresAt > Date.now() + 30_000) return this.token.value;
+  /**
+   * One token request at a time: a search asks for a token from every call it
+   * makes in parallel, and each fetching its own would be a burst of identical
+   * requests to an endpoint that is itself rate limited.
+   */
+  private accessToken(): Promise<string> {
+    if (this.token && this.token.expiresAt > Date.now() + 30_000) return Promise.resolve(this.token.value);
+    return this.tokenFlight.run('token', () => this.fetchToken());
+  }
+
+  private async fetchToken(): Promise<string> {
     const res = readResponse(
       AmadeusToken,
       await httpJson<unknown>(`${this.baseUrl}/v1/security/oauth2/token`, {

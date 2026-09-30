@@ -103,6 +103,10 @@ export class InMemoryRepository implements Store {
       .map((s) => structuredClone(s));
   }
 
+  async countSessions(ownerId: string): Promise<number> {
+    return [...this.sessions.values()].filter((s) => s.ownerId === ownerId).length;
+  }
+
   async deleteSession(id: string): Promise<void> {
     this.removeTrip(id);
   }
@@ -316,6 +320,28 @@ export class InMemoryRepository implements Store {
   async countRunsSince(ownerId: string, since: Date): Promise<number> {
     return [...this.runs.values()].filter((r) => r.ownerId === ownerId && Date.parse(r.createdAt) >= since.getTime())
       .length;
+  }
+  async countQueuedRuns(): Promise<number> {
+    return [...this.runs.values()].filter((r) => r.status === 'queued').length;
+  }
+  async countActiveRunsForOwner(ownerId: string): Promise<number> {
+    return [...this.runs.values()].filter((r) => r.ownerId === ownerId && (r.status === 'queued' || r.status === 'running'))
+      .length;
+  }
+  async expireStaleQueued(maxWaitMs: number): Promise<number> {
+    const cutoff = this.now() - maxWaitMs;
+    let expired = 0;
+    for (const run of this.runs.values()) {
+      if (run.status !== 'queued' || Date.parse(run.createdAt) >= cutoff) continue;
+      run.status = 'failed';
+      run.error = {
+        code: 'queue_timeout',
+        message: 'The search waited too long for its turn and was dropped. Please try again.',
+      };
+      run.finishedAt = this.iso();
+      expired += 1;
+    }
+    return expired;
   }
 
   // ------------------------------------------------------------- identity

@@ -1,5 +1,7 @@
-import type { ProviderRegistry } from '@trip/providers';
+import { withBudget, type ProviderRegistry } from '@trip/providers';
+import { metrics, withSpan } from '@trip/telemetry';
 import {
+  Deadline,
   add,
   compare,
   formatMoney,
@@ -35,7 +37,7 @@ import { budgetOvershootFactor, combinePlanScore, rankPlans } from './plan-score
 import { searchHotels, modelLocalTransport, type HotelSearchResult } from './hotels.js';
 import { explainStay, explainTransport, rankStays, rankTransport, withEffectivePriorities, type StayChoice } from './optimize.js';
 import { knownTransportCost } from './pricing.js';
-import { buildItinerary } from './schedule.js';
+import { buildItinerary, type TransferMemo } from './schedule.js';
 import { scoreTransportOffers } from './scoring.js';
 import { searchTransport, type TransportSearchResult } from './transport.js';
 import { validateItinerary } from './validate.js';
@@ -73,6 +75,16 @@ export interface PlanGenerationDeps {
    * signal's reason, and no partial plans are returned.
    */
   signal?: AbortSignal;
+  /**
+   * When the provider searches must be finished. The search divides what is left
+   * between its stages (finding journeys and things to do, then places to stay,
+   * then building itineraries), so a slow provider costs its own results and
+   * cannot use up the time the later stages need. Without one, only each call's
+   * own limit applies.
+   */
+  deadline?: Deadline;
+  /** The most HTTP requests the whole search may make to providers; a ceiling against runaway work. */
+  maxProviderRequests?: number;
   /** Told where the search is, in words a traveller can read. */
   onProgress?: (progress: PlanProgress) => void;
 }
@@ -112,8 +124,36 @@ const ARCHETYPE_LABEL: Record<PlanArchetype, string> = {
   custom: 'Your plan',
 };
 
-export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGenerationResult> {
+export function generatePlans(deps: PlanGenerationDeps): Promise<PlanGenerationResult> {
+  // Everything the search asks of a provider inherits this: cancellation, the
+  // deadline, and the allowance of requests.
+  return withBudget(
+    {
+      signal: deps.signal,
+      ms: deps.deadline ? deps.deadline.remainingMs() : Number.POSITIVE_INFINITY,
+      ...(deps.maxProviderRequests === undefined ? {} : { maxRequests: deps.maxProviderRequests }),
+    },
+    () => planWithinBudget(deps),
+  );
+}
+
+/** Shares of the time that is left, taken by each stage when it starts. */
+const STAGE_SHARE = { search: 0.45, hotels: 0.6 };
+
+async function planWithinBudget(deps: PlanGenerationDeps): Promise<PlanGenerationResult> {
   const { registry, intent, profile, constraints, signal } = deps;
+  /** Runs a stage with its share of the time left; the last stage simply gets what remains. */
+  const stage = <T>(share: number, work: () => Promise<T>): Promise<T> =>
+    deps.deadline ? withBudget({ signal, ms: deps.deadline.share(share).remainingMs() }, work) : work();
+  /** A stage of the search as a span and a duration, so the slow one can be named from the data. */
+  const observed = async <T>(name: 'search' | 'hotels' | 'assemble', work: () => Promise<T>): Promise<T> => {
+    const started = performance.now();
+    try {
+      return await withSpan('planning.stage', { 'planning.stage': name }, work);
+    } finally {
+      metrics.stageDuration.observe({ stage: name }, (performance.now() - started) / 1000);
+    }
+  };
   const kept = deps.keep ?? {};
   // Checked between steps, so a cancelled search stops at the next boundary
   // even where a provider ignores the signal.
@@ -144,7 +184,7 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
   // to where it makes sense to sleep.
   const activityDays = Math.max(0, nights - 1);
   progress({ step: 'search', label: 'Searching how to get there and what to do', percent: 15 });
-  const [outbound, inbound, activities] = await Promise.all([
+  const [outbound, inbound, activities] = await observed('search', () => stage(STAGE_SHARE.search, () => Promise.all([
     kept.outbound
       ? Promise.resolve(keptTransport('outbound', intent.departureDate, kept.outbound, profile))
       : searchTransport({ registry, intent, classification, profile, constraints, ...(signal ? { signal } : {}) }, 'outbound'),
@@ -168,7 +208,7 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
           signal,
           deps.activityGuidance,
         ),
-  ]);
+  ])));
   checkpoint();
 
   const searchedModes = outbound.modes.filter((m) => m.offers.length > 0);
@@ -185,6 +225,9 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
   );
 
   const localTransportPerKm = perKmRate(registry, intent.currency);
+  // The plans are built side by side and often ask for the same transfer (the
+  // airport to the same hotel); it is asked for once per search.
+  const transferMemo: TransferMemo = new Map();
 
   /** Builds one complete plan from one combination of options: itinerary, cost, checks, score, explanation. */
   const assemble = async (combo: Combination, archetype: PlanArchetype): Promise<PlanDraft> => {
@@ -202,6 +245,7 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
       hotel,
       clusters: activities.clusters,
       dailyMealBudget: constraints.budget.dailySpend,
+      transferMemo,
     });
 
     const cost = computeCost({
@@ -274,15 +318,19 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
   progress({ step: 'hotels', label: 'Finding places to stay', percent: 55 });
   const hotels = kept.hotel
     ? keptHotel(kept.hotel)
-    : await searchHotels({
-        registry,
-        intent,
-        profile,
-        constraints,
-        activities: activities.activities,
-        localTransportPerKm,
-        ...(signal ? { signal } : {}),
-      });
+    : await observed('hotels', () =>
+        stage(STAGE_SHARE.hotels, () =>
+          searchHotels({
+            registry,
+            intent,
+            profile,
+            constraints,
+            activities: activities.activities,
+            localTransportPerKm,
+            ...(signal ? { signal } : {}),
+          }),
+        ),
+      );
   checkpoint();
   note(
     'hotel_search',
@@ -334,7 +382,10 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
     );
   }
 
-  for (const [index, archetype] of ARCHETYPES.entries()) {
+  // The three plans are independent of each other, so they are built together.
+  // Their results are put in order afterwards, so the outcome is the same as
+  // building them one after another: only the waiting overlaps.
+  const built = await observed('assemble', () => Promise.all(ARCHETYPES.map(async (archetype, index): Promise<PlanDraft | null> => {
     progress({
       step: 'assemble',
       label: 'Putting your plans together',
@@ -396,7 +447,7 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
     // validator, rather than showing nothing or quietly loosening the limit.
     if (!chosen && closest) chosen = closest;
     if (!chosen && cheapestFloor) chosen = await assemble(cheapestFloor.combo, archetype);
-    if (!chosen) continue;
+    if (!chosen) return null;
 
     if (firmTotal && skippedForPrice + overBudget > 0) {
       chosen.choices.push({
@@ -407,6 +458,11 @@ export async function generatePlans(deps: PlanGenerationDeps): Promise<PlanGener
       });
     }
 
+    return chosen;
+  })));
+  for (const [index, chosen] of built.entries()) {
+    if (!chosen) continue;
+    const archetype = ARCHETYPES[index]!;
     const signature = `${chosen.outbound?.id ?? 'none'}|${chosen.inbound?.id ?? 'none'}|${chosen.hotel?.hotel.id ?? 'none'}|${chosen.hotel?.room.id ?? 'none'}`;
     if (seen.has(signature)) continue;
     seen.add(signature);

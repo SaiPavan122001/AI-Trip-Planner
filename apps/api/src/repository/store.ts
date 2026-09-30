@@ -97,6 +97,16 @@ export interface RunRepository {
   reapRuns(maxAttempts: number): Promise<number>;
   /** How many runs this person has started since `since`, for daily quotas. */
   countRunsSince(ownerId: string, since: Date): Promise<number>;
+  /** How many runs are waiting for a worker right now: the depth of the queue. */
+  countQueuedRuns(): Promise<number>;
+  /** How many of this person's runs are queued or running: what they are already costing. */
+  countActiveRunsForOwner(ownerId: string): Promise<number>;
+  /**
+   * Fails queued runs that have waited longer than `maxWaitMs` for a worker, so
+   * a backlog is shed rather than served long after anyone is still watching.
+   * Returns how many were failed.
+   */
+  expireStaleQueued(maxWaitMs: number): Promise<number>;
 }
 
 // ------------------------------------------------------------- identity

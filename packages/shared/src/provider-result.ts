@@ -65,6 +65,13 @@ export type ProviderFailure = {
   message: string;
   /** Present when the adapter can say when a retry might help. */
   retryAfterSeconds?: number;
+  /**
+   * True when this planner's own limits caused the failure (its time budget, a
+   * cancelled search, a spent allowance of requests, a full line), not the
+   * provider. It says nothing about the provider's health, so a circuit breaker
+   * does not count it.
+   */
+  local?: boolean;
   occurredAt: string;
 };
 

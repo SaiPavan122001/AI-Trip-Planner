@@ -54,6 +54,9 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     try {
       response = await fetch(`${this.config.baseUrl}/chat/completions`, {
         method: 'POST',
+        // The request carries the API key and the traveller's words: it goes to the
+        // address the operator configured and nowhere else.
+        redirect: 'error',
         headers: {
           'Content-Type': 'application/json',
           ...(this.config.apiKey ? { Authorization: `Bearer ${this.config.apiKey}` } : {}),

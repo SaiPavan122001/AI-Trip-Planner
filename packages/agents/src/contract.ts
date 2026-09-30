@@ -1,5 +1,7 @@
 import type { z } from 'zod';
 import { LlmInvalidOutputError, LlmUnavailableError, type TripLlm } from '@trip/llm';
+import { promptData } from '@trip/shared';
+import { markSpanError, metrics, withSpan } from '@trip/telemetry';
 
 /**
  * What an agent is.
@@ -103,7 +105,9 @@ export interface AgentSpec<Raw, In, Out> {
  * an instruction, however it is phrased.
  */
 export function asData(tag: string, value: unknown): string {
-  return `<${tag}>${JSON.stringify(value)}</${tag}>`;
+  // Also free of `<`, `>`, `&` and characters a person cannot see, so the text
+  // cannot close the tag it is in (see `@trip/shared` prompt-safety).
+  return promptData(tag, value);
 }
 
 /** The sentence every agent's system prompt ends with. */
@@ -125,7 +129,30 @@ const meta = (
   ...extra,
 });
 
+/**
+ * Runs an agent inside a span (`agent.<name>`) and records how it went: who
+ * answered (the model or the rules), whether it produced anything, and how long
+ * it took. Nothing the agent read or produced is recorded.
+ */
 export async function runAgent<Raw, In, Out>(
+  spec: AgentSpec<Raw, In, Out>,
+  input: In,
+  ctx: AgentContext,
+): Promise<AgentOutcome<Out>> {
+  return withSpan(`agent.${spec.name}`, { 'agent.name': spec.name }, async (span) => {
+    const outcome = await runAgentUnobserved(spec, input, ctx);
+    const source = outcome.meta.source === 'model' ? 'model' : 'rules';
+    metrics.agentRuns.inc({ agent: spec.name, source, outcome: outcome.ok ? 'ok' : 'failed' });
+    metrics.agentDuration.observe({ agent: spec.name, source }, outcome.meta.durationMs / 1000);
+    span.setAttribute('agent.source', source);
+    span.setAttribute('agent.ok', outcome.ok);
+    span.setAttribute('agent.rejected_count', outcome.meta.rejected.length);
+    if (!outcome.ok) markSpanError(span, outcome.error.code === 'aborted' ? 'cancelled' : 'internal_error', outcome.error.code === 'aborted');
+    return outcome;
+  });
+}
+
+async function runAgentUnobserved<Raw, In, Out>(
   spec: AgentSpec<Raw, In, Out>,
   input: In,
   ctx: AgentContext,

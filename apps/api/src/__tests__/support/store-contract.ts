@@ -328,6 +328,71 @@ export function describeStoreContract(name: string, open: () => Promise<StoreHar
         expect(await store.countRunsSince(user.id, hours(1))).toBe(0);
         expect(await store.countRunsSince(randomUUID(), hours(-1))).toBe(0);
       });
+
+      // Overload protection (Phase 5.6): the store can say how deep the queue is,
+      // what one person is already costing, and shed runs that waited too long.
+      it('counts a person’s trips without reading them, and no one else’s', async () => {
+        const [me, other] = [await newUser(), await newUser()];
+        await newTrip(me.id);
+        await newTrip(me.id);
+        await newTrip(other.id);
+        expect(await store.countSessions(me.id)).toBe(2);
+        expect(await store.countSessions(other.id)).toBe(1);
+        expect(await store.countSessions(randomUUID())).toBe(0);
+      });
+
+      it('counts the runs waiting for a worker, and only those', async () => {
+        const [a, b, c] = [await newTrip(null), await newTrip(null), await newTrip(null)];
+        await enqueued(a.id);
+        await enqueued(b.id);
+        expect(await store.countQueuedRuns()).toBe(2);
+        await store.claimRun('w1', 60_000, 3); // one is now running, not waiting
+        expect(await store.countQueuedRuns()).toBe(1);
+        const third = await enqueued(c.id);
+        await store.requestCancel(third.id); // cancelled before it started
+        expect(await store.countQueuedRuns()).toBe(1);
+      });
+
+      it('counts one person’s queued and running runs, not finished ones and not anyone else’s', async () => {
+        const [me, other] = [await newUser(), await newUser()];
+        const [t1, t2, t3, t4] = [await newTrip(me.id), await newTrip(me.id), await newTrip(me.id), await newTrip(other.id)];
+        const first = await enqueued(t1.id, me.id);
+        await enqueued(t2.id, me.id);
+        await enqueued(t4.id, other.id);
+        expect(await store.countActiveRunsForOwner(me.id)).toBe(2);
+        const done = await store.claimRun('w1', 60_000, 3);
+        expect(done?.id).toBe(first.id);
+        expect(await store.countActiveRunsForOwner(me.id)).toBe(2); // running still counts
+        await store.finishRun(first.id, 'w1', 'succeeded');
+        expect(await store.countActiveRunsForOwner(me.id)).toBe(1);
+        const cancelled = await enqueued(t3.id, me.id);
+        await store.requestCancel(cancelled.id);
+        expect(await store.countActiveRunsForOwner(me.id)).toBe(1);
+        expect(await store.countActiveRunsForOwner(randomUUID())).toBe(0);
+      });
+
+      it('drops queued runs that waited too long, leaves the rest, and tells the traveller why', async () => {
+        const [a, b] = [await newTrip(null), await newTrip(null)];
+        const old = await enqueued(a.id);
+        await sleep(150);
+        const fresh = await enqueued(b.id);
+        expect(await store.expireStaleQueued(100)).toBe(1);
+        expect(await store.getRun(old.id)).toMatchObject({ status: 'failed', error: { code: 'queue_timeout' } });
+        expect((await store.getRun(old.id))?.finishedAt).not.toBeNull();
+        expect((await store.getRun(fresh.id))?.status).toBe('queued');
+        // Nothing left to drop; and a dropped run frees its trip for a new search.
+        expect(await store.expireStaleQueued(100)).toBe(0);
+        expect(await store.activeRunForTrip(a.id)).toBeNull();
+      });
+
+      it('never drops a run a worker already has', async () => {
+        const trip = await newTrip(null);
+        const queued = await enqueued(trip.id);
+        await store.claimRun('w1', 60_000, 3);
+        await sleep(60);
+        expect(await store.expireStaleQueued(10)).toBe(0);
+        expect((await store.getRun(queued.id))?.status).toBe('running');
+      });
     });
 
     // ---------------------------------------------------------- identity

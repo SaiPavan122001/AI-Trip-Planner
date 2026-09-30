@@ -68,6 +68,13 @@ export class AuthService {
     const now = this.now();
     const found = await this.deps.store.findAuthSession(this.hash(token), now);
     if (!found) return null;
+    // Renewal keeps an active session alive, which on its own means a stolen
+    // cookie that is used often enough never stops working. A session also ends
+    // a fixed time after it began, and the person signs in again.
+    if (now.getTime() - Date.parse(found.session.createdAt) > this.deps.env.SESSION_MAX_DAYS * DAY_MS) {
+      await this.deps.store.revokeAuthSession(found.session.id);
+      return null;
+    }
 
     let renewedUntil: Date | null = null;
     if (now.getTime() - Date.parse(found.session.lastSeenAt) > REFRESH_AFTER_MS) {
@@ -208,6 +215,12 @@ export class AuthService {
 
   async logout(principal: Principal): Promise<void> {
     await this.deps.store.revokeAuthSession(principal.sessionId);
+  }
+
+  /** Ends every session this person has, on every device, including this one. */
+  async logoutEverywhere(principal: Principal): Promise<void> {
+    await this.deps.store.revokeSessionsForUser(principal.userId);
+    await this.deps.store.recordAudit({ tripId: null, kind: 'auth.signed_out_everywhere', actor: principal.userId, detail: {} });
   }
 
   /** Removes the person and everything they made. */

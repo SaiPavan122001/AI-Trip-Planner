@@ -75,23 +75,43 @@ identically and were merged into one.
 ## One provider's bad day does not end the search
 
 Everything the planner asks of a provider goes through `registry.policy` (`ProviderPolicy`, in
-`packages/providers/src/guard.ts`). The default, `IsolatingPolicy`:
+`packages/providers/src/guard.ts`). The default since Phase 5 is `ResilientPolicy`
+(`packages/providers/src/policy.ts`; `IsolatingPolicy` remains for callers that want isolation only):
 
 - turns anything a provider throws into a `ProviderFailure` (a mapping error on bad data is
   `invalid_response`, not "could not be reached");
-- puts a deadline on the call (`PROVIDER_CALL_TIMEOUT_MS`, default 45 s) on top of the adapter's own
-  timeouts, and reports a call that has not answered as `timeout`;
-- tags the failure with the capability being asked for.
+- gives the call the smaller of its own ceiling (`PROVIDER_CALL_TIMEOUT_MS`, default 45 s) and what the
+  stage of the search it belongs to has left, with a signal that fires on either that or cancellation, and
+  which every HTTP request inside the call inherits (see [reliability.md](reliability.md));
+- keeps a **circuit breaker** per provider and capability: after `PROVIDER_CIRCUIT_FAILURE_THRESHOLD`
+  consecutive failures the provider is not called for `PROVIDER_CIRCUIT_RECOVERY_MS`, then one probe decides;
+  a skipped call says so and repeats the last real failure;
+- tags the failure with the capability being asked for, and marks failures caused by the planner's own limits
+  (`local`: cancelled, out of stage time, request allowance spent) so they never count against a provider.
 
 The engine asks every provider of one capability **at once** (`sweepProviders`), keeps what the ones that
 answered returned, and keeps *one note per provider that failed* (it used to keep only the last). If
 some options came back, the mode has results and a note about the source that did not answer; if none
 did, the note that explains most wins (a source that broke outranks one that found nothing).
 
-**What this does not do, and where it goes.** No retry beyond `httpJson`'s bounded transient retries, no
-fallback from one provider to another, no shared rate limiter, no circuit breaker, no response cache, no
-metrics or tracing. Each is a different `ProviderPolicy` handed to `new ProviderRegistry(env, policy)`;
-nothing that calls a provider needs to change. They are later-phase work, and they are not claimed here.
+**Retries** are in `httpJson` (`packages/providers/src/http.ts`), where it is known that repeating is safe: only
+GETs by default; only a network failure, a timeout, or a 408/500/502/503/504; never a 429 or another 4xx; bounded
+by a count, a jittered exponential delay with a ceiling, the call's deadline and a per-host retry budget.
+Redirects are followed only to the same origin and scheme (never for a POST), at most three, and never to an
+address the SSRF rules refuse.
+
+**Fallback** is for capabilities where one answer is wanted and several providers can give it: a drive is measured
+by Google when it is connected and by OSRM when Google fails, and the answer names the provider that measured it
+and what went wrong with the one before (`packages/providers/src/fallback.ts`). Search capabilities still ask
+every provider and keep every answer.
+
+**Caching** wraps the place lookup, routing and things-to-do providers (`cache.ts`): entries expire, are keyed by
+every parameter, are checked against a schema on the way out, and are shared through Redis when it is configured.
+Flights, hotels, rail and bus are never cached. Config: `CACHE_*`, `PROVIDER_*` in `.env.example`.
+
+**Observed (Phase 7):** every provider call is a span and is counted (`provider_calls_total`, failures by class, latency,
+retries, fallbacks, circuit transitions); see [observability.md](observability.md). **Not built:** per-provider daily quota
+accounting, and any live verification of the above against a real provider.
 
 ---
 

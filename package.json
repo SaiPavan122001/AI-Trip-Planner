@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "npm run build -w @trip/shared && npm run build -w @trip/providers && npm run build -w @trip/llm && npm run build -w @trip/engine && npm run build -w @trip/agents && npm run build -w @trip/api && npm run build -w @trip/web",
+    "build": "npm run build -w @trip/shared && npm run build -w @trip/telemetry && npm run build -w @trip/providers && npm run build -w @trip/llm && npm run build -w @trip/knowledge && npm run build -w @trip/engine && npm run build -w @trip/agents && npm run build -w @trip/api && npm run build -w @trip/web",
     "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @trip/api\" \"npm run dev -w @trip/web\"",
     "dev:api": "npm run dev -w @trip/api",
     "dev:web": "npm run dev -w @trip/web",

@@ -48,6 +48,11 @@ const DB_NOW = Prisma.sql`(NOW() AT TIME ZONE 'UTC')`;
 export class PrismaRepository implements Store {
   constructor(private readonly prisma: PrismaClient) {}
 
+  /** The connection pool, shared with the knowledge index so there is one. */
+  get client(): PrismaClient {
+    return this.prisma;
+  }
+
   static fromUrl(databaseUrl: string): PrismaRepository {
     return new PrismaRepository(
       new PrismaClient({ datasources: { db: { url: databaseUrl } } }),
@@ -93,8 +98,17 @@ export class PrismaRepository implements Store {
     return rows.map((r) => this.fromRow(r));
   }
 
+  async countSessions(ownerId: string): Promise<number> {
+    return this.prisma.trip.count({ where: { ownerId } });
+  }
+
   async deleteSession(id: string): Promise<void> {
-    await this.prisma.trip.delete({ where: { id } }).catch(() => undefined);
+    // Deleting what is already gone is fine (a double click, a second tab). Any
+    // other failure (the database is unreachable) must not be reported as done.
+    await this.prisma.trip.delete({ where: { id } }).catch((err: unknown) => {
+      if (isRecordNotFound(err)) return;
+      throw err;
+    });
   }
 
   async createBooking(booking: BookingRecord): Promise<BookingRecord> {
@@ -385,6 +399,27 @@ export class PrismaRepository implements Store {
     return this.prisma.planningRun.count({ where: { ownerId, createdAt: { gte: since } } });
   }
 
+  async countQueuedRuns(): Promise<number> {
+    return this.prisma.planningRun.count({ where: { status: 'queued' } });
+  }
+
+  async countActiveRunsForOwner(ownerId: string): Promise<number> {
+    return this.prisma.planningRun.count({ where: { ownerId, status: { in: ['queued', 'running'] } } });
+  }
+
+  async expireStaleQueued(maxWaitMs: number): Promise<number> {
+    // One statement against the database's own clock, so several API processes
+    // and workers agree on what "too long" is, and a run a worker claims at the
+    // same moment is either taken or dropped, never both.
+    return this.prisma.$executeRaw`
+      UPDATE "planning_runs"
+      SET "status" = 'failed',
+          "error" = '{"code":"queue_timeout","message":"The search waited too long for its turn and was dropped. Please try again."}'::jsonb,
+          "finishedAt" = ${DB_NOW}
+      WHERE "status" = 'queued'
+        AND "createdAt" < ${DB_NOW} - make_interval(secs => ${maxWaitMs / 1000}::float8)`;
+  }
+
   // ------------------------------------------------------------- identity
 
   async createUser(input: { email: string | null }): Promise<UserRecord> {
@@ -624,6 +659,11 @@ export class PrismaRepository implements Store {
 /** PostgreSQL's unique-violation, as Prisma reports it (P2002). */
 function isUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2002';
+}
+
+/** Prisma's "record to delete does not exist". */
+function isRecordNotFound(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2025';
 }
 
 /** What a claim row stores in its JSON column. */

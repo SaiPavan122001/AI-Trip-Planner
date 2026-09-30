@@ -4,7 +4,12 @@ import {
   type ProviderFailure,
   type ProviderResult,
 } from '@trip/shared';
-import { IsolatingPolicy, type ProviderPolicy } from './guard.js';
+import { MemoryCache, type AsyncCache } from '@trip/shared';
+import { CachedActivityProvider, CachedGeocodingProvider, CachedRoutingProvider, ResponseCache } from './cache.js';
+import { FallbackRoutingProvider } from './fallback.js';
+import { type ProviderPolicy } from './guard.js';
+import { configureHttp } from './http.js';
+import { ResilientPolicy, type PolicyEvent } from './policy.js';
 import { AmadeusProvider } from './adapters/amadeus.js';
 import { GenericBusProvider, GenericRailProvider } from './adapters/generic-surface.js';
 import { GooglePlacesProvider, GoogleRoutesProvider } from './adapters/google-maps.js';
@@ -44,6 +49,15 @@ export interface DisabledProvider {
   capabilities: Partial<Record<ProviderCapability, string>>;
 }
 
+/** What a host process may supply: a shared cache (Redis), and a way to hear about circuit changes. */
+export interface RegistryExtras {
+  /** A ready-made cache. */
+  cache?: ResponseCache;
+  /** Or only where to keep entries (Redis, shared between instances); the time to live and the limits come from the environment. */
+  cacheStore?: AsyncCache;
+  onPolicyEvent?: (event: PolicyEvent) => void;
+}
+
 export class ProviderRegistry {
   readonly geocoding: GeocodingProvider[] = [];
   readonly flights: FlightProvider[] = [];
@@ -63,16 +77,33 @@ export class ProviderRegistry {
   readonly taxiTariffs: ProvidersEnv['taxiTariffs'];
   /**
    * Every provider call the planner makes goes through this. The default
-   * isolates failures and enforces a deadline; retries, fallback, rate
-   * limiting, circuit breaking, caching and metrics are policies to supply here.
+   * isolates failures, enforces the call's share of the search's time, and
+   * keeps a circuit breaker per provider and capability (`policy.ts`).
    */
   readonly policy: ProviderPolicy;
+  /** The cache behind the place, route and things-to-do lookups; null when caching is off. */
+  readonly cache: ResponseCache | null;
 
-  constructor(env: ProvidersEnv, policy?: ProviderPolicy) {
+  constructor(env: ProvidersEnv, policy?: ProviderPolicy, extras: RegistryExtras = {}) {
     this.taxiTariffs = env.taxiTariffs;
-    this.policy = policy ?? new IsolatingPolicy({ deadlineMs: env.policy.callTimeoutMs });
+    configureHttp({ maxRetries: env.policy.maxRetries, maxRetryDelayMs: env.policy.retryMaxDelayMs });
+    this.policy =
+      policy ??
+      new ResilientPolicy({
+        deadlineMs: env.policy.callTimeoutMs,
+        circuit: { failureThreshold: env.policy.circuitFailureThreshold, recoveryTimeoutMs: env.policy.circuitRecoveryMs },
+        ...(extras.onPolicyEvent ? { onEvent: extras.onPolicyEvent } : {}),
+      });
+    this.cache = !env.cache.enabled
+      ? null
+      : (extras.cache ??
+        new ResponseCache({
+          store: extras.cacheStore ?? new MemoryCache({ maxEntries: env.cache.maxEntries }),
+          ttls: { geocodingMs: env.cache.geocodingTtlMs, routingMs: env.cache.routingTtlMs, activitiesMs: env.cache.activitiesTtlMs },
+        }));
+    const cache = this.cache;
     const nominatim = new NominatimProvider(env.nominatim);
-    if (nominatim.isConfigured()) this.geocoding.push(nominatim);
+    if (nominatim.isConfigured()) this.geocoding.push(cache ? new CachedGeocodingProvider(nominatim, cache) : nominatim);
     else
       this.disable(
         'nominatim',
@@ -83,7 +114,8 @@ export class ProviderRegistry {
       );
 
     if (env.osrm) {
-      const osrmRouting = new OsrmRoutingProvider(env.osrm);
+      const rawOsrm = new OsrmRoutingProvider(env.osrm);
+      const osrmRouting = cache ? new CachedRoutingProvider(rawOsrm, cache) : rawOsrm;
       this.routing.push(osrmRouting);
       this.groundTransport.push(new OsrmTransferProvider(osrmRouting, env.taxiTariffs));
     } else {
@@ -101,11 +133,13 @@ export class ProviderRegistry {
     }
 
     if (env.google) {
-      const googleRouting = new GoogleRoutesProvider(env.google);
+      const rawGoogle = new GoogleRoutesProvider(env.google);
+      const googleRouting = cache ? new CachedRoutingProvider(rawGoogle, cache) : rawGoogle;
       // Google goes first when present: traffic-aware durations are the
       // difference between a transfer that works and one that misses a flight.
       this.routing.unshift(googleRouting);
-      this.activities.push(new GooglePlacesProvider(env.google));
+      const places = new GooglePlacesProvider(env.google);
+      this.activities.push(cache ? new CachedActivityProvider(places, cache) : places);
     } else {
       this.disable(
         'google-maps',
@@ -174,14 +208,16 @@ export class ProviderRegistry {
       );
     }
 
-    const primaryRouting = this.routing[0];
+    // With more than one routing provider, a drive is measured by the preferred
+    // one and falls back to the next, and says so when it does.
+    const primaryRouting = this.routing.length > 1 ? new FallbackRoutingProvider(this.routing, this.policy) : this.routing[0];
     if (primaryRouting) {
       this.selfDrive = new SelfDriveProvider(primaryRouting, env.selfDriveProfile);
     }
   }
 
-  static fromEnv(env: NodeJS.ProcessEnv = process.env): ProviderRegistry {
-    return new ProviderRegistry(loadProvidersEnv(env));
+  static fromEnv(env: NodeJS.ProcessEnv = process.env, extras: RegistryExtras = {}): ProviderRegistry {
+    return new ProviderRegistry(loadProvidersEnv(env), undefined, extras);
   }
 
   private disable(

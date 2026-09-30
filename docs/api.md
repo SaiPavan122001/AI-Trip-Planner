@@ -29,15 +29,25 @@ failures; `provider` appears when a travel provider was the cause.
 | `validation_failed` | 400 | Request body did not match the schema |
 | `bad_request` | 400 | Valid shape, invalid request |
 | `unauthorized` | 401 | Needs a session (account export and deletion) |
-| `bad_origin` | 403 | A change came from a site that is not in `CORS_ORIGINS` |
+| `bad_origin` | 403 | A change came from a site that is not in `CORS_ORIGINS` (or a browser said the request was cross-site) |
+| `invalid_json` | 400 | The body was not JSON (a fixed sentence: the parser's own complaint is never returned) |
+| `payload_too_large` | 413 | The body is larger than `MAX_BODY_BYTES` (64 KB by default) |
+| `unsupported_media_type` | 415 | Only `application/json` bodies are read |
 | `not_found` | 404 | No such trip, run or plan. **Also** a trip that belongs to somebody else: the two are indistinguishable on purpose |
 | `conflict` | 409 | Invalid state transition |
 | `trip_changed` | 409 | Another request changed the trip first; nothing was applied. Reload and retry |
 | `run_in_progress` | 409 | The trip is being searched; `details.run` is that search. Wait for it or stop it |
 | `consent_stale` | 409 | The question is no longer pending |
 | `unprocessable` | 422 | Understood, but preconditions unmet |
+| `rate_limited` | 429 | Too many requests from this person or address just now; `Retry-After` and `details.retryAfterSeconds` say how long |
 | `daily_search_limit` | 429 | The person has used today's searches (`details.limit`) |
+| `daily_search_limit_address` | 429 | This connection has started its share of searches today without signing in |
+| `too_many_active_searches` | 429 | The person already has `MAX_ACTIVE_RUNS_PER_USER` searches going |
 | `too_many_sign_in_emails` | 429 | Too many links were requested for one address this hour |
+| `too_many_failed_sign_ins` | 429 | Too many sign-in links were refused from this address; wait (`Retry-After`) and ask for a new link |
+| `busy` | 503 | Every search slot is taken; nothing was queued. Try again after `Retry-After` |
+| `idempotency_in_progress` | 409 | A request with this `Idempotency-Key` is still running; ask again after `Retry-After` |
+| `idempotency_key_reused` | 422 | This `Idempotency-Key` was used for a different request |
 | `invalid_link` | 400 | A sign-in link is unknown, expired or already used (all three look the same) |
 | `email_sign_in_unavailable` | 503 | Email is not configured on this server |
 | `email_delivery_failed` | 503 | The link could not be sent; the reason is logged, not returned |
@@ -59,12 +69,38 @@ A search that fails does not fail a request: it ends its **run** in `failed` wit
   refused with `403 bad_origin`. Requests with no `Origin` (curl, servers) are not browsers acting on
   someone's behalf and are allowed; they still need the cookie.
 - There is no `X-User-Id`. It was an unauthenticated label and has been removed.
-- `Idempotency-Key` — used by booking, which is not available in this release.
+- Only `application/json` request bodies are read, so a cross-site form post cannot reach a route. A
+  request that changes something and names no `Origin` but carries `Sec-Fetch-Site: cross-site` is
+  refused too.
 
-**Rate limiting** — `RATE_LIMIT_MAX` requests per `RATE_LIMIT_WINDOW`, per signed-in person, or per
-client address for someone with no session. The address is only as trustworthy as `TRUST_PROXY`
-(see `.env.example`). Expensive routes have their own tighter limits (`plan`, `modify`, `places`, sign-in),
-and each person may start `PLAN_RUNS_PER_DAY_ANONYMOUS` / `PLAN_RUNS_PER_DAY_SIGNED_IN` searches a day.
+**Idempotency** — `Idempotency-Key: <8–128 characters of A–Z a–z 0–9 _ . : ->` on `POST /v1/trips`,
+`/plan`, `/modify`, `/modify/consent`, `/requirements`, `/runs/:runId/cancel` and `/v1/auth/magic-link`.
+The first request with a key does the work and its answer is kept for 24 hours; the same key with the same
+request again returns that answer with `Idempotent-Replay: true` and does nothing; the same key while the
+first is running is `409 idempotency_in_progress`; the same key with a different request is
+`422 idempotency_key_reused`. A request that fails releases its key. A key belongs to the person, the route
+and the trip: it can never replay, block or reveal anyone else's. Reads ignore it. A client that retries
+must reuse the key of the request it is retrying.
+
+**Rate limiting** — every request is counted twice, and both must have room: for the person
+(`RATE_LIMIT_MAX` per `RATE_LIMIT_WINDOW`) and for the address it came from whoever the person says they are
+(`RATE_LIMIT_ADDRESS_MAX`, higher, because addresses are shared). Clearing the cookie gives a new anonymous
+person but not a new address, so it does not restart a limit. The address is only as trustworthy as
+`TRUST_PROXY` (see `.env.example`); IPv6 counts by /64; an address is only ever a keyed hash. Expensive routes
+have named per-route policies on top (searches, changes, reading words, place lookups, creating trips,
+sign-in emails and attempts, account export and deletion: see `apps/api/src/security/rate-limit.ts`). Every
+answer carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`; a 429 carries `Retry-After`.
+Each person may start `PLAN_RUNS_PER_DAY_ANONYMOUS` / `PLAN_RUNS_PER_DAY_SIGNED_IN` searches a day, and an
+address `PLAN_RUNS_PER_DAY_PER_ADDRESS` through anonymous sessions. Counters are shared through Redis when
+`REDIS_URL` is set; see [reliability.md](reliability.md).
+
+**Overload** — a search is turned away with `503 busy` (and `Retry-After`) when `MAX_QUEUED_RUNS` are already
+waiting, and with `429 too_many_active_searches` past `MAX_ACTIVE_RUNS_PER_USER` per person. Nothing is queued
+to fail later. Every answer also carries `Cache-Control: no-store` and an `X-Request-Id` (the id that appears in
+the service's logs and traces for that request; quote it when reporting a problem). An error answer carries
+`X-Error-Category` (`validation`, `not_found`, `authentication`, `rate_limited`, `dependency_unavailable`,
+`internal_error`, ...: the same vocabulary as the logs and metrics), so a client or a proxy log can tell a bad request from
+an outage without parsing the body. The body itself never carries a stack trace or the cause of a failure.
 
 **Concurrency** — every trip carries a `version`, bumped on each save. A save made from an out-of-date
 read is refused (`409 trip_changed`) rather than overwriting the other change. Simple changes (an
@@ -116,8 +152,9 @@ the mode comparison from the latest search (`outbound`, `inbound`, `hotelsConsid
 
 ### `GET /v1/trips`
 
-The caller's own trips, newest first. Query: `limit` (1–50, default 20). `{ "trips": [] }` for someone
-with no session.
+The caller's own trips, newest first, as **summaries**: `{ id, stage, origin, destination, departureDate,
+returnDate, planCount, updatedAt }`. Query: `limit` (1–50, default 20; anything else is `400`). Read a whole
+trip with `GET /v1/trips/:id`. `{ "trips": [] }` for someone with no session.
 
 ### `GET /v1/trips/:id/question`
 
@@ -438,19 +475,28 @@ call never creates one).
 `{ "email": "you@example.com" }` → `202`. Emails a single-use link (valid `MAGIC_LINK_TTL_MINUTES`) that
 points at `WEB_BASE_URL/auth/verify?token=…`. The answer is the same for an address with an account and
 one without. In development with `MAILER=console` the response also carries `devLink`. Limited per
-address per hour (`MAGIC_LINK_MAX_PER_HOUR`) and per caller.
+recipient per hour (`MAGIC_LINK_MAX_PER_HOUR`, however many callers ask), and per person, per address and per
+day. Accepts `Idempotency-Key`: a retried request sends one email.
 
 ### `POST /v1/auth/verify`
 
 `{ "token": "…" }` → `200` with `{ user, tripsMoved }` and a fresh session cookie. This is a POST rather
 than a GET on the link, so a mail scanner or browser pre-fetching the link cannot use it up. A link works
-once; a second use (even at the same instant) is `400 invalid_link`. The trips planned in this browser
+once; a second use (even at the same instant) is `400 invalid_link`, whatever was wrong with it. Eight
+refused links from one address lock that address out for fifteen minutes (`429 too_many_failed_sign_ins`).
+The trips planned in this browser
 before signing in come along: the anonymous account gains the email, or, if the email already has an
 account, its trips move there (`tripsMoved`).
 
 ### `POST /v1/auth/logout`
 
 `204`. Ends this session and clears the cookie.
+
+### `POST /v1/auth/logout-all`
+
+`204`. Ends every session the person has, on every device, including this one (a lost phone, a cookie that may
+have leaked). Needs a session. A session also ends `SESSION_MAX_DAYS` (90) after it began, however often it
+was used.
 
 ### `GET /v1/me/export`
 
@@ -460,6 +506,63 @@ Everything held about the caller, as a JSON download: the account, every trip, a
 
 `{ "confirm": "delete my account" }` → `204`. Deletes the account and every trip, run, audit event and
 session belonging to it. Without the confirmation it is `400` and nothing happens.
+
+---
+
+## Knowledge
+
+### `POST /v1/knowledge/ask`
+
+Answers a question from the curated knowledge index (policies, rules, guides), with citations, or says
+**"Insufficient verified information."**. **Off unless `KNOWLEDGE_ENABLED=true`** (`404` as if it did not exist).
+It answers only what is *written down*: never a price, fare, timetable, availability, weather or the state of a booking
+(those come from providers). It changes nothing (no trip, plan or booking), so it needs no `Idempotency-Key`. Design and
+evidence: [knowledge.md](knowledge.md).
+
+```json
+{ "question": "How long does a refund take to reach my payment method?", "destination": "Bengaluru", "tripId": "<uuid>" }
+```
+
+Strict: `question` is required (1 to 500 characters after cleaning: hidden characters removed, one line); `destination`
+(80) and `tripId` are optional; any other field, including anything that looks like an index name or an owner, is a `400`.
+Needs a session (`401` without one). A `tripId` must be the caller's own trip (someone else's is `404`, byte-identical to
+one that does not exist); it only supplies the destination to prefer when none is given. Which index is read is the
+operator's configuration; a request cannot name one.
+
+```json
+{
+  "answer": {
+    "status": "answered",
+    "answer": "Approved refunds are returned to the original payment method within 7 to 10 working days.",
+    "claims": [{ "text": "Approved refunds are ...", "sources": ["refund-policy@v1#0"] }],
+    "citations": [{
+      "chunkId": "refund-policy@v1#0", "docId": "refund-policy", "title": "Refund policy", "heading": "Refunds > Timeline",
+      "url": "https://example.com/refunds", "reference": "Example Co. Refund Policy v1",
+      "sourceType": "operator_policy", "version": 1, "effectiveDate": "2026-01-01"
+    }],
+    "conflicts": [],
+    "notes": [],
+    "mode": "extractive",
+    "insufficientReason": null
+  }
+}
+```
+
+- `status`: `answered` or `insufficient`. When `insufficient`, `answer` is exactly `Insufficient verified information.`,
+  `claims` and `citations` are empty, and `insufficientReason` is one of `empty_query`, `no_index`, `below_threshold`,
+  `low_coverage`, `only_outdated`, `model_declined`, `unverifiable`. **It is a normal answer, not an error (`200`).**
+- `mode`: `extractive` (sentences quoted from the sources) or `model` (a model's sentences, each checked against the
+  sources it cites). What is shown is always one of those two, or the fixed sentence.
+- `citations` list only sources a shown claim relies on.
+- `conflicts` is non-empty when two sources on one topic disagree; both sides appear in `answer` with their version and
+  date, and `notes` says so. The service does not choose between them.
+- `notes` are plain sentences written by the service, for example that a matching source is past its review date and was
+  not used.
+- Limits: `knowledge.ask` (10 a minute and 200 a day per person; 30 a minute and 500 a day per address): `429` with
+  `Retry-After`. A failing index or embedder is `503 knowledge_unavailable`, a fixed sentence, `X-Error-Category:
+  dependency_unavailable`, and nothing about the cause.
+
+Documents are added by an operator script (`npm run ingest:knowledge -w @trip/api`), never through the API.
 
 ---
 
@@ -497,17 +600,34 @@ what exists in the code for the release that adds booking.
 `200` or `503`. Reports the store in use, including whether it is in-memory and therefore volatile. When
 the database is unreachable it says so in fixed words; the underlying error is logged, never returned.
 
+### `GET /live`
+
+`200 { status, uptimeSeconds }` while the process runs and answers. Touches nothing (no database, no provider): an
+orchestrator restarts a container that fails this, and an outage of a dependency must never be a reason to.
+
 ### `GET /ready`
 
-`200` only when the store is reachable and a geocoder is configured.
+`200 { ready, store, geocoding }` only when the store is reachable, the queue can be read, and a geocoder is configured;
+`503` with fixed words otherwise. It does **not** depend on an optional provider, Redis, the language model, or the queue
+being full. For load balancers to route by.
+
+### `GET /metrics` and `GET /ops/status` (operator)
+
+`404` unless `OPS_TOKEN` is set; then they need `Authorization: Bearer <token>` (`401` otherwise; an address is locked out
+after 10 wrong tokens in 15 minutes). `/metrics` is Prometheus text; `/ops/status` is a compact JSON view (store, queue
+depth and capacity, Redis state, provider circuits, LLM, cache, telemetry, knowledge). Neither carries a secret, an address,
+a person, a trip or anything a traveller wrote. See [observability.md](observability.md).
 
 ### `GET /v1/providers`
 
-What is connected, what is not, why, and which env vars each missing one needs. Also reports whether
-an LLM is configured, and the data policy string the UI displays.
+What is connected, what is not, and what a missing source would add. Also reports whether an LLM is
+configured, and the data policy string the UI displays. Which environment variable would enable a missing
+source, and why it is off, are returned only when `EXPOSE_PROVIDER_DETAILS` is on (the default outside
+production): they describe the deployment.
 
 ### `GET /v1/providers/health`
 
-Live probe of each connected provider. `207` if any is degraded. **Unauthenticated (limited to 5 a
-minute), and some probes call billed APIs** (Google Places and Routes make a real request), so do not expose it publicly without
-authentication or a network restriction.
+Live probe of each connected provider. `207` if any is degraded. **Off in production** (`403`) unless
+`EXPOSE_PROVIDER_HEALTH=true`, because some probes call billed APIs (Google Places and Routes make a real
+request) and it says which providers are down. Limited to 5 a minute per address, and shared: everyone who
+asks within thirty seconds gets the same round of probes.

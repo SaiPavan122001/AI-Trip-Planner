@@ -105,6 +105,8 @@ export interface TripRepository {
   updateSession(session: PlanningSession): Promise<PlanningSession>;
   /** A person's own trips, newest first. */
   listSessions(ownerId: string, limit: number): Promise<PlanningSession[]>;
+  /** How many trips a person has, without reading them: every page load asks. */
+  countSessions(ownerId: string): Promise<number>;
   deleteSession(id: string): Promise<void>;
 
   createBooking(booking: BookingRecord): Promise<BookingRecord>;

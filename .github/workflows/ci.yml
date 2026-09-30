@@ -42,8 +42,10 @@ jobs:
       - name: Build packages
         run: |
           npm run build -w @trip/shared
+          npm run build -w @trip/telemetry
           npm run build -w @trip/providers
           npm run build -w @trip/llm
+          npm run build -w @trip/knowledge
           npm run build -w @trip/engine
           npm run build -w @trip/agents
 
@@ -106,8 +108,10 @@ jobs:
       - name: Build packages
         run: |
           npm run build -w @trip/shared
+          npm run build -w @trip/telemetry
           npm run build -w @trip/providers
           npm run build -w @trip/llm
+          npm run build -w @trip/knowledge
           npm run build -w @trip/engine
           npm run build -w @trip/agents
 

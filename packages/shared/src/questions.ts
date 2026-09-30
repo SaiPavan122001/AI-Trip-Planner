@@ -60,13 +60,15 @@ export type Question = z.infer<typeof Question>;
 export type QuestionInput = z.input<typeof Question>;
 
 export const Answer = z.object({
-  key: z.string(),
+  key: z.string().min(1).max(100),
+  // Every shape has a ceiling: an answer is a choice, a number, a sum of money
+  // or a sentence, never a document.
   value: z.union([
-    z.string(),
-    z.number(),
+    z.string().max(10_000),
+    z.number().finite(),
     z.boolean(),
-    z.array(z.string()),
-    z.object({ amount: z.number().int(), currency: z.string() }),
+    z.array(z.string().max(400)).max(50),
+    z.object({ amount: z.number().int().max(1_000_000_000_000), currency: z.string().max(8) }),
     z.null(),
   ]),
   /** True when the traveller chose to skip rather than answer. */

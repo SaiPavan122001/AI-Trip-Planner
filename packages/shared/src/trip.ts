@@ -27,8 +27,9 @@ export type LocalTime = z.infer<typeof LocalTime>;
  * these five facts exist, because every later question depends on them.
  */
 export const TripIntentInput = z.object({
-  originQuery: z.string().min(1),
-  destinationQuery: z.string().min(1),
+  // Typed by a person and sent to a place lookup: bounded, so a request cannot make it carry a novel.
+  originQuery: z.string().trim().min(1).max(200),
+  destinationQuery: z.string().trim().min(1).max(200),
   departureDate: IsoDate,
   returnDate: IsoDate.nullable().default(null),
   travelers: z.object({

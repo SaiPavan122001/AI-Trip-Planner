@@ -237,3 +237,77 @@ model PlanningRun {
   @@index([ownerId, createdAt])
   @@map("planning_runs")
 }
+
+/// Phase 8: the knowledge index, a curated body of documents (policies, rules,
+/// guides) that questions are answered from. It is shared and holds nothing
+/// that belongs to one traveller: there is no owner column, on purpose.
+///
+/// A document has one active row per (namespace, docId), enforced by a partial
+/// unique index in the migration (Prisma cannot express it); a quarantined
+/// attempt is a row of its own and never has chunks.
+model KnowledgeDocument {
+  rowId             String   @id @default(uuid())
+  namespace         String
+  docId             String
+  title             String
+  url               String?
+  reference         String
+  sourceType        String
+  authority         Int
+  version           Int
+  effectiveDate     String
+  reviewBy          String?
+  topic             String?
+  destination       String?
+  /// SHA-256 of the cleaned text.
+  contentHash       String
+  /// active | quarantined
+  status            String
+  quarantineReasons Json     @default("[]")
+  chunkCount        Int
+  previousVersions  Json     @default("[]")
+  /// The embedding space its chunks live in (model@version:dimension).
+  embeddingSpace    String?
+  ingestedAt        DateTime
+
+  chunks KnowledgeChunk[]
+
+  @@unique([namespace, docId, version, contentHash])
+  @@index([namespace, status])
+  @@index([namespace, contentHash])
+  @@map("knowledge_documents")
+}
+
+/// A searchable piece of a document, with its vector (little-endian float32)
+/// and the document facts retrieval filters on, copied so a search reads one
+/// table. Vectors are only ever compared within one (namespace, space).
+model KnowledgeChunk {
+  namespace     String
+  id            String
+  docRowId      String
+  doc           KnowledgeDocument @relation(fields: [docRowId], references: [rowId], onDelete: Cascade)
+  docId         String
+  version       Int
+  position      Int
+  heading       String
+  text          String
+  startChar     Int
+  endChar       Int
+  hash          String
+  space         String
+  vector        Bytes
+  title         String
+  url           String?
+  reference     String
+  sourceType    String
+  authority     Int
+  effectiveDate String
+  reviewBy      String?
+  topic         String?
+  destination   String?
+
+  @@id([namespace, id])
+  @@index([namespace, space])
+  @@index([docRowId])
+  @@map("knowledge_chunks")
+}

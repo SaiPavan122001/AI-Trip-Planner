@@ -134,7 +134,7 @@ export class OsrmTransferProvider implements GroundTransportProvider {
   readonly descriptor = TRANSFER_DESCRIPTOR;
 
   constructor(
-    private readonly routing: OsrmRoutingProvider,
+    private readonly routing: RoutingProvider,
     private readonly tariffs: Record<string, TaxiTariff>,
   ) {}
 

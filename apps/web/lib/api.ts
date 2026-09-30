@@ -97,7 +97,8 @@ export const api = {
   /** The trip, and its latest background search (which may have finished, failed or still be going). */
   getTrip: (id: string) => request<{ trip: TripSession; run: PlanningRun | null }>(`/v1/trips/${id}`),
 
-  listTrips: () => request<{ trips: TripSession[] }>('/v1/trips'),
+  /** Summaries, enough to recognise a trip and open it; `getTrip` has the whole document. */
+  listTrips: () => request<{ trips: TripSummary[] }>('/v1/trips'),
 
   /**
    * Tell the planner more, in your own words. What is understood is checked and
@@ -219,6 +220,32 @@ export interface PlanningRun {
 
 export const isActiveRun = (run: PlanningRun | null | undefined): boolean =>
   run?.status === 'queued' || run?.status === 'running';
+
+/** A trip as the list shows it. */
+export interface TripSummary {
+  id: string;
+  stage: string;
+  origin: string;
+  destination: string;
+  departureDate: string;
+  returnDate: string | null;
+  planCount: number;
+  updatedAt: string;
+}
+
+/**
+ * A link the API sent us, as something safe to put in an href: http(s) only.
+ * Anything else (a script URL, say) is not a link, whatever sent it.
+ */
+export function safeHttpLink(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface TripSession {
   id: string;

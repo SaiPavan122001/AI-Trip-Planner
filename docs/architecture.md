@@ -287,8 +287,11 @@ Every provider call goes through the registry's `ProviderPolicy`, and every capa
 its providers at once. A provider that throws, hangs, is rate limited, answers with nothing, or answers
 with data that does not match its schema costs the search *that provider's results* and adds a note
 that says which of those it was, for which capability. The search still returns the plans it can build,
-and the run fails only when something the planner itself owns breaks. Retry, fallback, rate limiting,
-circuit breaking, caching and metrics are policies to supply later; see [providers](providers.md).
+and the run fails only when something the planner itself owns breaks. Since Phase 5 the policy also gives
+each call a share of the search's time, retries safe requests within it, opens a circuit breaker on a
+provider that keeps failing, falls back between providers that can answer the same question, and caches the
+answers that are safe to keep; see [reliability.md](reliability.md) and [providers](providers.md). Metrics
+and tracing are Phase 7.
 
 ## Never fabricating data
 
@@ -375,7 +378,11 @@ vehicle profile makes them calculable; comparisons use the fare plus every cost 
         ├──► BookingService  — the state machine (kept, not reachable: booking is off)
         ├──► TripRepository  — Prisma (PostgreSQL) or in-memory
         ├──► ProviderRegistry — the only thing that knows which adapters exist
-        └──► TripLlm         — the model boundary
+        ├──► TripLlm         — the model boundary
+        └──► KnowledgeService — answers from a curated index, with citations (Phase 8; off unless enabled;
+                                 nothing in planning depends on it)
+
+  @trip/telemetry — logs, metrics and traces for all of the above (Phase 7), one system
 ```
 
 `TripRepository` is an interface with two implementations. The in-memory one makes a fresh clone run
@@ -418,6 +425,31 @@ providers rather than merely being ignored.
 Pins are stored on the trip. Before a search uses one it is checked against the trip (dates, group);
 one that no longer fits is released with a reason and reported to the traveller.
 
+### Observability (Phase 7)
+
+`packages/telemetry` is the one place that knows how the system reports on itself, and the libraries use it without
+depending on any vendor: the OpenTelemetry **API** (a no-op until the API or worker installs the SDK), a small metrics
+registry with cardinality guards that renders Prometheus text, one error vocabulary (`ErrorCategory`) used in logs, metrics,
+spans and the `X-Error-Category` header, and correlation context (request id, run id, trace id) carried by
+`AsyncLocalStorage`. A request's trace context is stored in the run row (`params.trace`), so the worker (in any process)
+continues the same trace: HTTP request, run, orchestrator, each agent, each provider call, each model call and each store
+operation are spans of one trace. Spans and metrics carry closed labels and allow-listed attributes only: never a prompt,
+what a traveller wrote, a cookie or a store argument. Liveness (`/live`) touches nothing; readiness (`/ready`) depends on the
+store and the queue and not on an optional provider. See [observability.md](observability.md).
+
+### Knowledge answers (Phase 8)
+
+`packages/knowledge` answers a question whose answer is *written down* (a policy, a rule, a guide) from an operator-curated
+index, with citations, or says "Insufficient verified information.". It is **not** used for anything live (fares, rooms,
+timetables, weather, routing, booking state: providers), nor for anything the engine computes (totals, dates, constraints,
+ranking, consent: deterministic code), and planning does not call it. The pipeline is source, ingestion (validate, screen,
+version, de-duplicate), chunking, embedding (a named vector space), one vector store (PostgreSQL, exact search, behind
+`KnowledgeStore`), retrieval (filters, threshold, confidence gate, staleness, disagreement), lexical re-ranking, an
+optional model that proposes claims citing retrieved chunks (retrieved text is escaped **data**), a code-level verifier, and
+citation. The layer ships with an evaluation harness (datasets, retrieval, groundedness, hallucination and injection
+metrics, a committed baseline with automatic regression detection, A/B comparison, latency and cost). All of it, with the
+numbers and the limits: [knowledge.md](knowledge.md).
+
 ---
 
 ## What is deliberately not built
@@ -426,8 +458,13 @@ one that no longer fits is released with a reason and reported to the traveller.
   The endpoints answer 501 and store nothing.
 - **Passwords, second factors and social sign-in.** Sign-in is an emailed link only. See
   [SECURITY.md](../SECURITY.md).
-- **Caching.** Provider responses are not cached. `REDIS_URL` is accepted and Redis runs in the compose
-  file, but nothing uses it: the queue lives in PostgreSQL, and progress is polled rather than pushed.
+- **Caching of anything about a person, and of prices.** Only places, routes and things to do are cached
+  (see [reliability.md](reliability.md)). Redis holds rate-limit counters and that cache when `REDIS_URL` is set,
+  and nothing else: the queue lives in PostgreSQL, and progress is polled rather than pushed.
+- **RAG over live facts.** The knowledge index holds written policies and guides only; no price, fare, timetable, availability,
+  weather or booking state is ever retrieved from it (see [knowledge.md](knowledge.md)).
+- **A second vector database, or an agent framework.** One store (PostgreSQL) behind an interface; pgvector or Qdrant is the
+  scale-out path, not a second system today.
 - **Adding or removing individual places to visit.** A request to do so says so and changes nothing.
 - **Multi-city and open-jaw routing.** The model supports the shape; the search orchestration
   assumes one outbound and one return leg.

@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.js';
 import { corsOrigins } from '../env.js';
 import { ApiError, sendError } from '../errors.js';
+import { securityEvent } from '../security/events.js';
 import { AuthService, type IssuedSession, type Principal } from './service.js';
 
 declare module 'fastify' {
@@ -30,11 +31,26 @@ export async function registerAuth(app: FastifyInstance, ctx: AppContext, auth: 
     // the rest, for browsers and setups where it does not. Requests with no
     // Origin header (curl, servers) are not browsers acting for a victim.
     const origin = req.headers.origin;
-    if (!SAFE_METHODS.has(req.method) && typeof origin === 'string' && !allowedOrigins.has(origin)) {
-      return sendError(
-        reply,
-        ApiError.forbidden('bad_origin', 'This request came from a site that is not allowed to use this service.'),
-      );
+    const where = { route: req.routeOptions?.url ?? 'unmatched', method: req.method, address: req.addressTag };
+    if (!SAFE_METHODS.has(req.method)) {
+      if (typeof origin === 'string') {
+        if (!allowedOrigins.has(origin)) {
+          securityEvent(ctx.logger, 'bad_origin', where);
+          return sendError(
+            reply,
+            ApiError.forbidden('bad_origin', 'This request came from a site that is not allowed to use this service.'),
+          );
+        }
+      } else if (req.headers['sec-fetch-site'] === 'cross-site') {
+        // A browser that names the request as cross-site but sent no Origin (some
+        // older ones do not on a form post) is still not our web app. A request
+        // with neither header is not a browser acting for someone (curl, servers).
+        securityEvent(ctx.logger, 'cross_site_blocked', where);
+        return sendError(
+          reply,
+          ApiError.forbidden('bad_origin', 'This request came from a site that is not allowed to use this service.'),
+        );
+      }
     }
 
     const token = req.cookies[ctx.env.COOKIE_NAME];

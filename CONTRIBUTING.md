@@ -83,6 +83,18 @@ behaviour needs a test; the ones worth writing here assert a *guarantee* rather 
 `packages/engine/src/__tests__/fixtures.ts` has real places with real coordinates and timezones. Use
 them rather than inventing convenient geography.
 
+**Knowledge and evaluation** (`packages/knowledge`, [docs/knowledge.md](docs/knowledge.md)). Its tests include an evaluation
+that is compared, exactly, with a committed baseline (`packages/knowledge/eval/baseline.json`). If you change the chunker, a
+retrieval setting, the system prompt, the embedder, the screen's rules, the verifier or the evaluation data, that test fails by
+design and names what changed. Look at the numbers (`npm run build && npm run eval -w @trip/knowledge`), decide whether the change
+is an improvement you can defend (the `holdout` split is the honest check), and only then record it with `-- --write-baseline` in
+the same commit. Never edit the baseline by hand, and never delete a dataset case to make a number better. A new store must pass
+`describeKnowledgeStore` from `@trip/knowledge/testing`. Nothing about a traveller may go in the knowledge index, and evaluation
+corpus text must stay fictional.
+
+Telemetry has its own rule: a new span, metric or log field uses closed labels and no id, prompt, cookie or traveller's words;
+add the leakage check to `apps/api/src/__tests__/observability.test.ts` ([docs/observability.md](docs/observability.md)).
+
 ## Adding a provider
 
 See [docs/providers.md](docs/providers.md). In short: implement the interface, declare a descriptor,
