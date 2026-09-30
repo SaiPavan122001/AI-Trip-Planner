@@ -1,29 +1,53 @@
 import { randomUUID } from 'node:crypto';
 import {
+  AnswerValidationError,
+  checkPins,
+  componentsOf,
+  selectedPlanOf,
   applyAnswer,
-  buildConstraints,
-  classifyJourney,
-  generatePlans,
-  questionnaireState,
   applyModification,
+  classifyJourney,
+  questionnaireState,
+  rebuildConstraints,
+  statedBudget,
   type BudgetAnswers,
-  type PlanGenerationResult,
+  type KeptComponents,
+  type ValidatedAnswer,
 } from '@trip/engine';
-import type { ProviderRegistry } from '@trip/providers';
+import {
+  mergeRequirements,
+  requirementsToAnswers,
+  runRequirementsAgent,
+  toTripInput,
+  type AgentContext,
+} from '@trip/agents';
+import { passthroughPolicy, withBudget, type ProviderRegistry } from '@trip/providers';
 import type { TripLlm } from '@trip/llm';
 import {
   Answer,
+  TripComponent,
   TripIntentInput,
+  cleanUntrustedText,
   emptyConstraintSet,
   emptyTravelerProfile,
   isOk,
+  localParts,
   type Money,
+  type PendingModification,
   type Place,
+  type PlanningRunView,
   type PlanningSession,
-  type ProviderNote,
+  type ProposedChange,
+  type ProviderFailure,
+  type ProviderResult,
+  type RequirementsState,
+  type TravelerProfile,
+  type TripPlan,
 } from '@trip/shared';
 import { ApiError } from '../errors.js';
-import type { TripRepository } from '../repository/types.js';
+import type { RunRecord, Store } from '../repository/store.js';
+import { TripChangedError } from '../repository/types.js';
+import { runView, type Actor, type RunService } from './run-service.js';
 
 /**
  * Trip planning use cases.
@@ -32,24 +56,112 @@ import type { TripRepository } from '../repository/types.js';
  * product: resolve where the traveller means, decide what kind of journey it
  * is, interview them, then plan. Each step persists the session, so a
  * traveller can close the tab and come back.
+ *
+ * Every method takes the person acting, and a trip that is not theirs is
+ * reported as not found, the same as one that does not exist, so ids cannot
+ * be probed for.
  */
 
 export interface TripServiceDeps {
   registry: ProviderRegistry;
   llm: TripLlm;
-  repository: TripRepository;
-  defaultCurrency: string;
+  repository: Store;
+  runs: RunService;
+  /** Ceiling on one language-model call made by an agent, in ms. */
+  agentTimeoutMs?: number;
+}
+
+/** The longest a person is made to wait on one place lookup while filling in a form. */
+const LOOKUP_BUDGET_MS = 12_000;
+
+/** Today where a trip starts, for reading dates a traveller wrote without a year. */
+const today = (timezone: string) => localParts(new Date().toISOString(), timezone).date;
+
+export interface RequirementsReading {
+  requirements: RequirementsState;
+  /** Who read it: the model's name, or `rules`. */
+  understoodBy: string;
+  /** How many proposals failed a check and were dropped. */
+  droppedCount: number;
+  /** Notes on how it was read (model unavailable, message truncated…). Written in code. */
+  notes: string[];
+}
+
+export interface RequirementsApplied extends RequirementsReading {
+  session: PlanningSession;
+  /** Answer keys that were applied to the trip, through the ordinary answer path. */
+  applied: string[];
+  /** Answers the trip refused (a question that does not apply, a value out of range), with why. */
+  rejected: Array<{ key: string; reason: string }>;
+  /** Said and understood, but nothing carries it yet. */
+  unmapped: Array<{ item: string; reason: string }>;
+  /** Said, and used by the planning agents at the next search. */
+  keptForPlanning: string[];
+  /** Things said about the trip itself that differ from the trip. Changing them is a change that needs consent. */
+  differences: Array<{ field: string; said: string; current: string }>;
 }
 
 export class TripService {
   constructor(private readonly deps: TripServiceDeps) {}
 
+  private get store(): Store {
+    return this.deps.repository;
+  }
+
+  // ------------------------------------------------------------ ownership
+
+  private async owned(id: string, actor: Actor): Promise<PlanningSession> {
+    const session = await this.store.getSession(id);
+    if (!session || session.ownerId !== actor.userId) throw ApiError.notFound('That trip');
+    return session;
+  }
+
+  /**
+   * Reads, changes and saves a trip. If another request saved it in between,
+   * the whole thing is done again on what it saved: right for changes that are
+   * worked out afresh from the trip each time (an answer, a pin, a selection),
+   * where losing a race should not cost the traveller a retry.
+   */
+  private async mutate(
+    id: string,
+    actor: Actor,
+    change: (session: PlanningSession) => PlanningSession | Promise<PlanningSession>,
+  ): Promise<PlanningSession> {
+    for (let attempt = 0; ; attempt += 1) {
+      const session = await this.owned(id, actor);
+      try {
+        return await this.store.updateSession(await change(session));
+      } catch (err) {
+        if (!(err instanceof TripChangedError) || attempt >= 3) throw err;
+      }
+    }
+  }
+
+  private async audit(tripId: string, actor: Actor, kind: string, detail: Record<string, unknown>): Promise<void> {
+    try {
+      await this.store.recordAudit({ tripId, kind, actor: actor.userId, detail });
+    } catch {
+      // The trail is a record, not a gate.
+    }
+  }
+
+  // ---------------------------------------------------------------- trips
+
   /**
    * Step one of the funnel, and the only step with required questions:
    * where from, where to, when, and how many people.
    */
-  async createTrip(input: unknown, ownerId: string | null): Promise<PlanningSession> {
-    const intent = TripIntentInput.parse(input);
+  async createTrip(input: unknown, actor: Actor): Promise<PlanningSession> {
+    const parsed = TripIntentInput.parse(input);
+    // What a person typed is stored and sent to a place lookup: no hidden characters, one line.
+    const intent = {
+      ...parsed,
+      originQuery: cleanUntrustedText(parsed.originQuery, { maxLength: 200 }),
+      destinationQuery: cleanUntrustedText(parsed.destinationQuery, { maxLength: 200 }),
+    };
+    if (!intent.originQuery || !intent.destinationQuery) {
+      throw ApiError.badRequest('Say where you are travelling from and to.');
+    }
 
     if (intent.returnDate && intent.returnDate < intent.departureDate) {
       throw ApiError.badRequest('The return date is before the departure date.');
@@ -66,12 +178,24 @@ export class TripService {
       );
     }
 
+    // "Today" where the trip starts, not where the server runs.
+    const today = localParts(new Date().toISOString(), origin.timezone).date;
+    if (intent.departureDate < today) {
+      throw ApiError.badRequest(`The departure date ${intent.departureDate} has already passed.`);
+    }
+
     const classification = classifyJourney(origin, destination);
     const now = new Date().toISOString();
 
     const session: PlanningSession = {
       id: randomUUID(),
-      ownerId,
+      ownerId: actor.userId,
+      version: 0,
+      pins: [],
+      lastSearch: null,
+      statedRequirements: null,
+      narrative: null,
+      agentTrace: [],
       stage: 'profiling',
       intent: { ...intent, origin, destination },
       classification,
@@ -80,6 +204,7 @@ export class TripService {
       questionnaire: null,
       plans: [],
       selectedPlanId: null,
+      pendingModification: null,
       providerNotes: [],
       decisionLog: [
         {
@@ -98,58 +223,271 @@ export class TripService {
       profile: session.profile,
     });
 
-    return this.deps.repository.createSession(session);
+    const created = await this.store.createSession(session);
+    await this.audit(created.id, actor, 'trip.created', {});
+    return created;
   }
 
-  async getTrip(id: string): Promise<PlanningSession> {
-    const session = await this.deps.repository.getSession(id);
-    if (!session) throw ApiError.notFound('That trip');
-    return session;
+  async getTrip(id: string, actor: Actor): Promise<PlanningSession> {
+    return this.owned(id, actor);
   }
+
+  /** The trip with the state of its latest background search, which is what a screen needs. */
+  async getTripWithRun(id: string, actor: Actor): Promise<{ session: PlanningSession; run: PlanningRunView | null }> {
+    const session = await this.owned(id, actor);
+    const run = await this.store.latestRunForTrip(id);
+    return { session, run: run ? runView(run) : null };
+  }
+
+  async listTrips(actor: Actor, limit: number): Promise<PlanningSession[]> {
+    return this.store.listSessions(actor.userId, limit);
+  }
+
+  async deleteTrip(id: string, actor: Actor): Promise<void> {
+    await this.owned(id, actor);
+    // Its runs go with it; a worker in the middle of one finds its lease gone and stops.
+    await this.store.deleteSession(id);
+  }
+
+  // --------------------------------------------------------- requirements
+
+  private agentContext(): AgentContext {
+    return {
+      llm: this.deps.llm,
+      ...(this.deps.agentTimeoutMs ? { timeoutMs: this.deps.agentTimeoutMs } : {}),
+    };
+  }
+
+  /**
+   * Reads what a traveller wrote and reports what it understood and what is
+   * still missing. Nothing is stored and no trip is made: this is reading,
+   * not acting. When everything a trip needs is present, `tripInput` is the
+   * body for creating it; the caller still goes through `createTrip`, which
+   * resolves places and checks dates like any other request.
+   */
+  async interpretRequirements(message: string): Promise<RequirementsReading & { tripInput: ReturnType<typeof toTripInput> }> {
+    const reading = await this.readRequirements(message, today('Asia/Kolkata'), {});
+    return { ...reading, tripInput: toTripInput(reading.requirements) };
+  }
+
+  private async readRequirements(
+    message: string,
+    onDate: string,
+    known: Parameters<typeof runRequirementsAgent>[0]['known'],
+  ): Promise<RequirementsReading> {
+    const outcome = await runRequirementsAgent({ message, today: onDate, ...(known ? { known } : {}) }, this.agentContext());
+    if (!outcome.ok) {
+      // Whatever the code, the traveller is told in words; nothing internal leaves.
+      throw outcome.error.code === 'missing_data'
+        ? ApiError.badRequest(outcome.error.message)
+        : ApiError.unprocessable(outcome.error.message);
+    }
+    return {
+      requirements: outcome.data,
+      understoodBy: outcome.meta.source === 'model' ? this.deps.llm.label : 'rules',
+      droppedCount: outcome.meta.rejected.length,
+      notes: outcome.meta.warnings,
+    };
+  }
+
+  /**
+   * Applies what a traveller said, in words, to a trip they own.
+   *
+   * The agent's reading is untrusted, and it enters the trip only through the
+   * same door as a click: each thing said is turned into the answer the
+   * interview would have collected, and applied one at a time by `answer`,
+   * which checks it against the question as asked for this trip and refuses
+   * what does not apply. Nothing here changes the trip's dates, places or
+   * party (those need the consent flow); differences are reported instead.
+   * If the requirements contradict each other, nothing is applied.
+   */
+  async applyRequirements(id: string, actor: Actor, message: string): Promise<RequirementsApplied> {
+    const before = await this.owned(id, actor);
+    const { intent } = before;
+    const reading = await this.readRequirements(message, today(intent.origin.timezone), {
+      origin: intent.origin.name,
+      destination: intent.destination.name,
+      departureDate: intent.departureDate,
+      returnDate: intent.returnDate,
+      adults: intent.travelers.adults,
+    });
+    const { requirements } = reading;
+
+    const differences: RequirementsApplied['differences'] = [];
+    const said = requirements.trip;
+    const differ = (field: string, saidValue: string | null, current: string | null) => {
+      if (saidValue && current !== saidValue && saidValue.toLowerCase() !== (current ?? '').toLowerCase()) {
+        differences.push({ field, said: saidValue, current: current ?? 'not set' });
+      }
+    };
+    differ('origin', said.origin, intent.origin.name);
+    differ('destination', said.destination, intent.destination.name);
+    differ('departure date', said.departureDate, intent.departureDate);
+    differ('return date', said.returnDate, intent.returnDate);
+    differ('adults', said.travelers ? String(said.travelers.adults) : null, String(intent.travelers.adults));
+
+    const applied: string[] = [];
+    const rejected: RequirementsApplied['rejected'] = [];
+    let mapped: ReturnType<typeof requirementsToAnswers> = { answers: [], unmapped: [], keptForPlanning: [] };
+
+    if (requirements.conflicts.length === 0) {
+      mapped = requirementsToAnswers(requirements, { eligibleModes: before.classification.eligibleModes });
+      for (const answer of mapped.answers) {
+        try {
+          await this.answer(id, actor, answer);
+          applied.push(answer.key);
+        } catch (err) {
+          if (err instanceof ApiError && err.statusCode === 400) rejected.push({ key: answer.key, reason: err.message });
+          else throw err;
+        }
+      }
+    }
+
+    // What was said is kept for the planning agents. The latest word on each
+    // kind of requirement replaces the earlier one.
+    const session = await this.mutate(id, actor, (current) => ({
+      ...current,
+      statedRequirements: mergeRequirements(current.statedRequirements, requirements),
+      updatedAt: new Date().toISOString(),
+    }));
+    await this.audit(id, actor, 'requirements.applied', {
+      applied: applied.length,
+      rejected: rejected.length,
+      understoodBy: reading.understoodBy,
+    });
+
+    return { ...reading, session, applied, rejected, unmapped: mapped.unmapped, keptForPlanning: mapped.keptForPlanning, differences };
+  }
+
+  // -------------------------------------------------------------- answers
 
   /**
    * Records one answer and returns the next question. Budget answers are the
    * one case where the answer becomes a constraint rather than a preference,
    * so they are routed to the constraint builder.
    */
-  async answer(id: string, raw: unknown): Promise<PlanningSession> {
-    const session = await this.getTrip(id);
-    const answer = Answer.parse(raw);
-
-    let profile = session.profile;
-    try {
-      profile = applyAnswer(session.profile, answer);
-    } catch (err) {
-      throw ApiError.badRequest(
-        err instanceof Error ? err.message : 'That answer could not be applied.',
-      );
-    }
-
-    const budget = this.budgetFrom(session, answer);
-    const constraints = buildConstraints(session.intent, profile, budget);
-
-    const updated: PlanningSession = {
-      ...session,
-      profile,
-      constraints,
-      questionnaire: questionnaireState({
-        intent: session.intent,
-        classification: session.classification,
-        profile,
-      }),
-      updatedAt: new Date().toISOString(),
+  async answer(id: string, actor: Actor, raw: unknown): Promise<PlanningSession> {
+    const answered = Answer.parse(raw);
+    // Free text is stored and shown back: hidden characters out, one line.
+    const parsed = {
+      ...answered,
+      value:
+        typeof answered.value === 'string'
+          ? cleanUntrustedText(answered.value, { maxLength: 2000 })
+          : Array.isArray(answered.value)
+            ? answered.value.map((v) => cleanUntrustedText(v, { maxLength: 200 }))
+            : answered.value,
     };
+    return this.mutate(id, actor, (session) => {
+      let profile: TravelerProfile;
+      let answer: ValidatedAnswer;
+      try {
+        ({ profile, answer } = applyAnswer(
+          { intent: session.intent, classification: session.classification, profile: session.profile },
+          parsed,
+        ));
+      } catch (err) {
+        // Only a rejected answer is the caller's fault. Anything else is a bug
+        // here, and reporting it as a 400 would hide it.
+        if (err instanceof AnswerValidationError) {
+          throw ApiError.badRequest(err.message, { key: err.key });
+        }
+        throw err;
+      }
 
-    return this.deps.repository.updateSession(updated);
+      let constraints = rebuildConstraints(
+        session.intent,
+        profile,
+        session.constraints,
+        this.budgetFrom(session, profile, answer),
+      );
+      // A new total budget replaces any earlier agreement to go over the old one.
+      if (answer.key === 'budget.total') {
+        constraints = { ...constraints, waivers: constraints.waivers.filter((w) => w.kind !== 'max_total_budget') };
+      }
+
+      return {
+        ...session,
+        profile,
+        constraints,
+        questionnaire: questionnaireState({
+          intent: session.intent,
+          classification: session.classification,
+          profile,
+        }),
+        // A pending modification is a snapshot of the trip before this answer;
+        // accepting it later would silently undo the answer, so it lapses.
+        ...withdrawPending(session, 'the trip was changed by answering a question'),
+        updatedAt: new Date().toISOString(),
+      };
+    });
   }
 
+  // ---------------------------------------------------------------- pins
+
   /**
-   * Runs the full pipeline. Provider failures are attached to the session
-   * rather than thrown, because "no trains are searchable" is information the
-   * traveller needs, not an error that should lose their whole session.
+   * Sets which parts of the selected plan the traveller wants kept. Only
+   * parts the plan actually has can be pinned, and the answer says which
+   * were refused and why.
    */
-  async plan(id: string): Promise<{ session: PlanningSession; result: PlanGenerationResult }> {
-    const session = await this.getTrip(id);
+  async setPins(
+    id: string,
+    actor: Actor,
+    requested: TripComponent[],
+  ): Promise<{ session: PlanningSession; refused: Array<{ component: TripComponent; reason: string }> }> {
+    const refused: Array<{ component: TripComponent; reason: string }> = [];
+    const session = await this.mutate(id, actor, (current) => {
+      refused.length = 0;
+      const plan = selectedPlanOf(current);
+      const available = new Set(componentsOf(plan));
+      const pins: TripComponent[] = [];
+      for (const component of new Set(requested)) {
+        if (component === 'transfers') {
+          refused.push({ component, reason: 'Transfers are recalculated whenever the journey or hotel changes.' });
+        } else if (!available.has(component)) {
+          refused.push({ component, reason: 'The selected plan has nothing of that kind to keep.' });
+        } else pins.push(component);
+      }
+      return {
+        ...current,
+        pins,
+        decisionLog: [
+          ...current.decisionLog,
+          {
+            at: new Date().toISOString(),
+            step: 'pins',
+            detail: pins.length ? `Kept as the traveller asked: ${pins.join(', ')}.` : 'No parts are being kept.',
+          },
+        ],
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    await this.audit(id, actor, 'pins.changed', { pins: session.pins });
+    return { session, refused };
+  }
+
+  // ------------------------------------------------------------- planning
+
+  /**
+   * Starts a search. It returns at once with the run, which a worker carries
+   * out; the traveller watches it. Provider failures are attached to the
+   * session rather than thrown, because "no trains are searchable" is
+   * information the traveller needs, not an error that should lose their
+   * whole session.
+   *
+   * Anything the traveller pinned is kept exactly, if it still fits the trip.
+   * A pin that no longer fits is released and reported, not quietly kept.
+   */
+  async plan(
+    id: string,
+    actor: Actor,
+  ): Promise<{
+    session: PlanningSession;
+    run: RunRecord;
+    reused: boolean;
+    pinsReleased: Array<{ component: TripComponent; reason: string }>;
+  }> {
+    let session = await this.owned(id, actor);
     if (session.questionnaire && !session.questionnaire.canPlan) {
       throw ApiError.unprocessable(
         'Some required answers are still missing, so a plan cannot be built yet.',
@@ -157,139 +495,336 @@ export class TripService {
       );
     }
 
-    const result = await generatePlans({
-      registry: this.deps.registry,
-      intent: session.intent,
-      profile: session.profile,
-      constraints: session.constraints,
+    const check = checkPins(session);
+    const withdrawn = withdrawPending(session, 'new plans were requested');
+    if (check.released.length > 0 || withdrawn.pendingModification !== undefined) {
+      const now = new Date().toISOString();
+      session = await this.store.updateSession({
+        ...session,
+        ...withdrawn,
+        pins: check.keep,
+        decisionLog: [
+          ...(withdrawn.decisionLog ?? session.decisionLog),
+          ...check.released.map((r) => ({ at: now, step: 'pins', detail: `Released ${r.component}: ${r.reason}` })),
+        ],
+        updatedAt: now,
+      });
+    }
+
+    const { run, reused } = await this.deps.runs.enqueue(session, actor, {
+      kind: session.plans.length > 0 ? 'replan' : 'plan',
+      keep: keptFrom(selectedPlanOf(session), check.keep),
+      reason: 'The traveller asked for plans.',
+      pinsReleased: check.released,
     });
-
-    const updated: PlanningSession = {
-      ...session,
-      stage: result.plans.length > 0 ? 'planned' : 'searching',
-      plans: result.plans,
-      selectedPlanId: result.plans[0]?.id ?? null,
-      providerNotes: dedupeNotes([...session.providerNotes, ...result.notes]),
-      decisionLog: [...session.decisionLog, ...result.decisionLog],
-      updatedAt: new Date().toISOString(),
-    };
-
-    await this.deps.repository.updateSession(updated);
-    return { session: updated, result };
+    return { session, run, reused, pinsReleased: check.released };
   }
+
+  async getRun(id: string, actor: Actor, runId: string): Promise<PlanningRunView> {
+    await this.owned(id, actor);
+    const run = await this.store.getRun(runId);
+    if (!run || run.tripId !== id) throw ApiError.notFound('That search');
+    return runView(run);
+  }
+
+  async cancelRun(id: string, actor: Actor, runId: string): Promise<PlanningRunView> {
+    await this.getRun(id, actor, runId);
+    const run = await this.deps.runs.cancel(runId);
+    if (!run) throw ApiError.notFound('That search');
+    await this.audit(id, actor, 'run.cancel_requested', { runId });
+    return runView(run);
+  }
+
+  // --------------------------------------------------------- modification
 
   /**
    * Conversational modification. The model only classifies what was asked;
-   * the engine decides what that means and what has to be searched again.
+   * the engine works out, in full, what that means for this trip. A change
+   * that needs the traveller's say-so is stored and asked about; everything
+   * else is applied, keeping pinned parts of the plan exactly as they were.
    */
-  async modify(
-    id: string,
-    utterance: string,
-  ): Promise<{
-    session: PlanningSession;
-    interpretation: string;
-    reSearch: string[];
-    preserved: string[];
-    requiresConsent: { constraint: string; question: string } | null;
-    understoodBy: string;
-    result: PlanGenerationResult | null;
-  }> {
-    const session = await this.getTrip(id);
-    const selected = session.plans.find((p) => p.id === session.selectedPlanId) ?? session.plans[0];
+  async modify(id: string, actor: Actor, utterance: string): Promise<ModificationResult> {
+    const session = await this.owned(id, actor);
+    await this.refuseWhileSearching(id);
+    const selected = selectedPlanOf(session);
 
-    const { request, interpretation, fromFallback } = await this.deps.llm.interpretModification(
-      utterance,
+    const interpreted = await this.deps.llm.interpretModification(utterance, {
+      hasHotel: Boolean(selected?.hotels.length),
+      modes: session.classification.eligibleModes,
+    });
+    const common = {
+      understoodBy: interpreted.fromFallback ? 'rules' : this.deps.llm.label,
+      diagnostics: {
+        llmFallbackReason: interpreted.fallbackReason,
+        rejectedParameters: interpreted.rejectedParameters,
+      },
+    };
+
+    // What the traveller said to keep, and what they had already pinned.
+    const pinned = [...new Set([...session.pins, ...interpreted.request.pinnedComponents])];
+    const outcome = applyModification(
+      { ...interpreted.request, pinnedComponents: pinned },
       {
-        hasHotel: Boolean(selected?.hotels.length),
-        modes: session.classification.eligibleModes,
+        intent: session.intent,
+        classification: session.classification,
+        profile: session.profile,
+        constraints: session.constraints,
+        planComponents: componentsOf(selected),
       },
     );
 
-    const outcome = applyModification(request, session.intent, session.profile, session.constraints);
+    // A new request replaces any question still waiting for an answer.
+    const base = { ...session, ...withdrawPending(session, 'a new change was requested') };
 
-    // Nothing was understood well enough to act on, so nothing is changed and
-    // the traveller is told exactly that.
-    if (request.intent === 'unknown' || outcome.reSearch.length === 0) {
+    if (outcome.status === 'no_change') {
+      const saved =
+        base.pendingModification !== session.pendingModification
+          ? await this.store.updateSession({ ...base, updatedAt: new Date().toISOString() })
+          : base;
       return {
-        session,
+        ...common,
+        session: saved,
+        status: 'no_change',
         interpretation: outcome.summary,
-        reSearch: [],
-        preserved: outcome.preserved,
-        requiresConsent: outcome.requiresConsent,
-        understoodBy: fromFallback ? 'rules' : this.deps.llm.label,
-        result: null,
+        reSearched: [],
+        kept: [],
+        released: [],
+        consent: null,
+        run: null,
       };
     }
 
-    // A change that would breach a hard constraint waits for explicit consent.
-    if (outcome.requiresConsent) {
-      const staged: PlanningSession = {
-        ...session,
+    if (outcome.status === 'needs_consent') {
+      const pending: PendingModification = {
+        id: randomUUID(),
+        utterance,
+        intent: interpreted.request.intent,
+        question: outcome.question,
+        acceptLabel: outcome.acceptLabel,
+        declineLabel: outcome.declineLabel,
+        accept: outcome.accept,
+        decline: outcome.decline,
+        createdAt: new Date().toISOString(),
+      };
+      const staged = await this.store.updateSession({
+        ...base,
         stage: 'modifying',
-        updatedAt: new Date().toISOString(),
-      };
-      await this.deps.repository.updateSession(staged);
+        pendingModification: pending,
+        decisionLog: [
+          ...base.decisionLog,
+          { at: pending.createdAt, step: 'modify', detail: `Asked before changing: ${outcome.question}` },
+        ],
+        updatedAt: pending.createdAt,
+      });
       return {
+        ...common,
         session: staged,
-        interpretation: `${interpretation} ${outcome.summary}`,
-        reSearch: outcome.reSearch,
-        preserved: outcome.preserved,
-        requiresConsent: outcome.requiresConsent,
-        understoodBy: fromFallback ? 'rules' : this.deps.llm.label,
-        result: null,
+        status: 'needs_consent',
+        interpretation: interpreted.interpretation,
+        reSearched: [],
+        kept: [],
+        released: [],
+        consent: {
+          id: pending.id,
+          question: pending.question,
+          acceptLabel: pending.acceptLabel,
+          declineLabel: pending.declineLabel,
+        },
+        run: null,
       };
     }
 
-    const result = await generatePlans({
-      registry: this.deps.registry,
-      intent: session.intent,
-      profile: outcome.profile,
-      constraints: outcome.constraints,
-    });
+    return {
+      ...common,
+      ...(await this.commit(base, actor, pinned, outcome.change, `"${utterance}" → ${interpreted.request.intent}.`)),
+    };
+  }
 
-    const updated: PlanningSession = {
+  /**
+   * The traveller's answer to a pending modification. Both answers were
+   * worked out when the question was asked, so the answer applies exactly
+   * what the question described. An answer to a question that is no longer
+   * pending (already answered, or replaced by a later change) is refused.
+   */
+  async consent(
+    id: string,
+    actor: Actor,
+    pendingId: string,
+    accept: boolean,
+  ): Promise<Omit<ModificationResult, 'understoodBy' | 'diagnostics'>> {
+    const session = await this.owned(id, actor);
+    const pending = session.pendingModification;
+    if (!pending || pending.id !== pendingId) {
+      throw ApiError.conflict(
+        'That change is no longer waiting for an answer. Ask for it again if you still want it.',
+        'consent_stale',
+      );
+    }
+    await this.refuseWhileSearching(id);
+
+    const change = accept ? pending.accept : pending.decline;
+    const cleared: PlanningSession = {
       ...session,
-      stage: 'planned',
-      profile: outcome.profile,
-      constraints: outcome.constraints,
-      plans: result.plans,
-      selectedPlanId: result.plans[0]?.id ?? null,
-      providerNotes: dedupeNotes([...session.providerNotes, ...result.notes]),
+      pendingModification: null,
+      stage: session.plans.length > 0 ? 'planned' : 'profiling',
       decisionLog: [
         ...session.decisionLog,
-        {
-          at: new Date().toISOString(),
-          step: 'modify',
-          detail: `"${utterance}" → ${request.intent}. ${outcome.summary}`,
-        },
-        ...result.decisionLog,
+        { at: new Date().toISOString(), step: 'consent', detail: `${accept ? 'Accepted' : 'Declined'}: ${pending.question}` },
       ],
-      updatedAt: new Date().toISOString(),
     };
+    await this.audit(id, actor, accept ? 'consent.accepted' : 'consent.declined', {
+      intent: pending.intent,
+      question: pending.question,
+    });
 
-    await this.deps.repository.updateSession(updated);
+    if (!change) {
+      const saved = await this.store.updateSession({ ...cleared, updatedAt: new Date().toISOString() });
+      return {
+        session: saved,
+        status: 'no_change',
+        interpretation: 'Nothing has changed.',
+        reSearched: [],
+        kept: [],
+        released: [],
+        consent: null,
+        run: null,
+      };
+    }
+    return this.commit(cleared, actor, session.pins, change, `${accept ? 'Accepted' : 'Declined'} "${pending.utterance}".`);
+  }
+
+  /** A change while a search is running would be made against plans about to be replaced. */
+  private async refuseWhileSearching(id: string): Promise<void> {
+    const active = await this.store.activeRunForTrip(id);
+    if (active) {
+      throw ApiError.conflict(
+        'Your plans are still being built. Wait for them to finish, or stop the search, before changing the trip.',
+        'run_in_progress',
+        { run: runView(active) },
+      );
+    }
+  }
+
+  /**
+   * Applies a worked-out change: the new trip facts, preferences and
+   * constraints are saved, the parts the change keeps are taken from the
+   * selected plan exactly as they are, and only the rest is searched again,
+   * in the background.
+   *
+   * Pins the change could not honour are released, and reported, so the
+   * traveller is told rather than left believing a part was kept.
+   */
+  private async commit(
+    session: PlanningSession,
+    actor: Actor,
+    pinnedBefore: TripComponent[],
+    change: ProposedChange,
+    detail: string,
+  ): Promise<Omit<ModificationResult, 'understoodBy' | 'diagnostics'>> {
+    const now = new Date().toISOString();
+    const selected = selectedPlanOf(session);
+    const questionnaire = questionnaireState({
+      intent: change.intent,
+      classification: session.classification,
+      profile: change.profile,
+    });
+    const tripChanged = JSON.stringify(change.intent) !== JSON.stringify(session.intent);
+    const releasedComponents = new Set(change.released.map((r) => r.component));
+    const updated: PlanningSession = {
+      ...session,
+      intent: change.intent,
+      profile: change.profile,
+      constraints: change.constraints,
+      questionnaire,
+      pins: pinnedBefore.filter((p) => !releasedComponents.has(p)),
+      pendingModification: null,
+      decisionLog: [
+        ...session.decisionLog,
+        { at: now, step: 'modify', detail: `${detail} ${change.summary}` },
+        ...change.released.map((r) => ({ at: now, step: 'pins', detail: `Released ${r.component}: ${r.reason}` })),
+      ],
+      updatedAt: now,
+    };
+    const answer = { reSearched: change.reSearch, kept: change.keep, released: change.released, consent: null };
+
+    // Nothing to re-plan yet: no plan exists, or a changed trip now needs one
+    // more answer before plans can be built. Plans for the old trip are not
+    // left looking current.
+    if (!selected || !questionnaire.canPlan) {
+      const saved = await this.store.updateSession({
+        ...updated,
+        ...(tripChanged ? { plans: [], selectedPlanId: null, lastSearch: null } : {}),
+        stage: selected && !tripChanged ? 'planned' : 'profiling',
+      });
+      const next =
+        selected && !questionnaire.canPlan
+          ? ' One more question needs answering before new plans can be built.'
+          : ' Your plans will use this when you next search.';
+      return { ...answer, session: saved, status: 'saved', interpretation: `${change.summary}${next}`, run: null };
+    }
+
+    // Everything the change touches was pinned: the plan stays as it is.
+    if (change.reSearch.length === 0 && !tripChanged) {
+      const saved = await this.store.updateSession({ ...updated, stage: 'planned' });
+      return { ...answer, session: saved, status: 'applied', interpretation: change.summary, run: null };
+    }
+
+    // The search is queued against the trip as it will be saved, and the
+    // parts to keep are captured now, because a changed trip's old plans are
+    // cleared below and the search must not depend on them still being there.
+    const staged: PlanningSession = {
+      ...updated,
+      stage: 'searching',
+      ...(tripChanged ? { plans: [], selectedPlanId: null, lastSearch: null } : {}),
+    };
+    // Turned away before anything is saved, when it can be: a trip that is
+    // marked as searching, with plans cleared and no search behind it, is the
+    // worst outcome of a full queue.
+    await this.deps.runs.assertQuota(actor);
+    const saved = await this.store.updateSession(staged);
+    let run: RunRecord;
+    try {
+      ({ run } = await this.deps.runs.enqueue(saved, actor, {
+        kind: 'replan',
+        keep: keptFrom(selected, change.keep),
+        reason: change.summary,
+        pinsReleased: change.released,
+      }));
+    } catch (err) {
+      // The change is saved and must not be lost, and the trip must not be left
+      // "searching" with nothing searching. Put it back to a state a person can
+      // act on, and say what happened.
+      if (!(err instanceof ApiError)) throw err;
+      const restored = await this.mutate(saved.id, actor, (s) => ({
+        ...s,
+        stage: s.plans.length > 0 ? 'planned' : 'profiling',
+        updatedAt: new Date().toISOString(),
+      })).catch(() => saved);
+      return {
+        ...answer,
+        session: restored,
+        status: 'saved',
+        interpretation: `${change.summary} Your change is saved, but new plans could not be started right now: ${err.message}`,
+        run: null,
+      };
+    }
     return {
-      session: updated,
-      interpretation: `${interpretation} ${outcome.summary}`,
-      reSearch: outcome.reSearch,
-      preserved: outcome.preserved,
-      requiresConsent: null,
-      understoodBy: fromFallback ? 'rules' : this.deps.llm.label,
-      result,
+      ...answer,
+      session: saved,
+      status: 'replanning',
+      interpretation: change.summary,
+      run: runView(run),
     };
   }
 
-  async selectPlan(id: string, planId: string): Promise<PlanningSession> {
-    const session = await this.getTrip(id);
-    if (!session.plans.some((p) => p.id === planId)) {
-      throw ApiError.notFound('That plan');
-    }
-    return this.deps.repository.updateSession({
-      ...session,
-      selectedPlanId: planId,
-      updatedAt: new Date().toISOString(),
+  async selectPlan(id: string, actor: Actor, planId: string): Promise<PlanningSession> {
+    return this.mutate(id, actor, (session) => {
+      if (!session.plans.some((p) => p.id === planId)) throw ApiError.notFound('That plan');
+      return { ...session, selectedPlanId: planId, updatedAt: new Date().toISOString() };
     });
   }
+
+  // --------------------------------------------------------------- places
 
   /**
    * Resolves free text to exactly one place. A query that cannot be resolved
@@ -299,7 +834,7 @@ export class TripService {
   async resolvePlace(query: string, role: 'origin' | 'destination'): Promise<Place> {
     const geocoders = this.deps.registry.geocoding;
     if (geocoders.length === 0) {
-      const missing = this.deps.registry.missingCapabilityNote('Place lookup', ['nominatim']);
+      const missing = this.deps.registry.missingCapabilityNote('geocoding', ['nominatim']);
       throw ApiError.providerUnavailable(
         missing.provider,
         missing.providerLabel,
@@ -308,8 +843,13 @@ export class TripService {
       );
     }
 
+    // Each geocoder is asked through the registry's policy (a time limit, a
+    // circuit breaker), and if one is down the next is tried. It is only a
+    // failure to place the query if *no* geocoder could answer at all.
+    let firstFailure: ProviderFailure | null = null;
+    let someoneAnswered = false;
     for (const geocoder of geocoders) {
-      const res = await geocoder.resolvePlace(query, { limit: 5 });
+      const res = await this.lookup(geocoder, (g) => g.resolvePlace(query, { limit: 5 }));
       if (isOk(res) && res.data[0]) {
         const place = res.data[0];
         // Enriching with airport codes here keeps flight search from having
@@ -317,9 +857,11 @@ export class TripService {
         // the trip record.
         return this.withAirports(place);
       }
-      if (!isOk(res) && res.status !== 'no_availability') {
-        throw ApiError.providerUnavailable(res.provider, res.providerLabel, res.status, res.message);
-      }
+      if (isOk(res) || res.status === 'no_availability') someoneAnswered = true;
+      else firstFailure ??= res;
+    }
+    if (!someoneAnswered && firstFailure) {
+      throw ApiError.providerUnavailable(firstFailure.provider, firstFailure.providerLabel, firstFailure.status, firstFailure.message);
     }
 
     throw ApiError.badRequest(
@@ -330,7 +872,7 @@ export class TripService {
   async searchPlaces(query: string): Promise<Place[]> {
     const geocoder = this.deps.registry.geocoding[0];
     if (!geocoder) {
-      const missing = this.deps.registry.missingCapabilityNote('Place lookup', ['nominatim']);
+      const missing = this.deps.registry.missingCapabilityNote('geocoding', ['nominatim']);
       throw ApiError.providerUnavailable(
         missing.provider,
         missing.providerLabel,
@@ -338,7 +880,7 @@ export class TripService {
         missing.message,
       );
     }
-    const res = await geocoder.resolvePlace(query, { limit: 6 });
+    const res = await this.lookup(geocoder, (g) => g.resolvePlace(query, { limit: 6 }));
     if (!isOk(res)) {
       if (res.status === 'no_availability') return [];
       throw ApiError.providerUnavailable(res.provider, res.providerLabel, res.status, res.message);
@@ -346,10 +888,34 @@ export class TripService {
     return res.data;
   }
 
+  /**
+   * One interactive lookup through the registry's policy: it cannot throw, has
+   * the circuit breaker's protection, and is limited to what a person waiting on
+   * a form should be made to wait.
+   */
+  private lookup<P extends { descriptor?: { id: string; label: string } }, T>(
+    provider: P,
+    ask: (provider: P) => Promise<ProviderResult<T>>,
+    capability: 'geocoding' = 'geocoding',
+  ) {
+    const policy = this.deps.registry.policy ?? passthroughPolicy;
+    return withBudget({ ms: LOOKUP_BUDGET_MS }, () =>
+      policy.execute(
+        {
+          provider: provider.descriptor?.id ?? capability,
+          providerLabel: provider.descriptor?.label ?? 'Place lookup',
+          capability,
+          operation: 'lookup',
+        },
+        () => ask(provider),
+      ),
+    );
+  }
+
   private async withAirports(place: Place): Promise<Place> {
     const amadeus = this.deps.registry.amadeus;
     if (!amadeus) return place;
-    const res = await amadeus.nearestAirports(place.coordinates);
+    const res = await this.lookup(amadeus, (a) => a.nearestAirports(place.coordinates), 'geocoding');
     if (!isOk(res)) return place;
     return {
       ...place,
@@ -363,34 +929,84 @@ export class TripService {
    * Everything already stated is preserved so answering one budget question
    * does not erase another.
    */
-  private budgetFrom(session: PlanningSession, answer: Answer): BudgetAnswers {
-    const existing: BudgetAnswers = {
-      total: session.constraints.budget.total,
-      transport: session.constraints.budget.transport,
-      accommodation: session.constraints.budget.accommodation,
-      dailySpendPerPerson: session.constraints.budget.dailySpend,
-    };
-    if (answer.skipped) return existing;
+  private budgetFrom(session: PlanningSession, profile: TravelerProfile, answer: ValidatedAnswer): BudgetAnswers {
+    // Only what the traveller stated. The transport and accommodation splits
+    // are derived from the total, and passing them back in as if stated used
+    // to turn them into fixed hard constraints on the next answer.
+    const existing = statedBudget(session.constraints, profile);
 
-    const value = answer.value;
-    const isMoney = (v: unknown): v is Money =>
-      typeof v === 'object' && v !== null && 'amount' in v && 'currency' in v;
-
-    if (answer.key === 'budget.total' && isMoney(value)) {
-      return { ...existing, total: value };
+    // The answer has already been validated against its question, so a
+    // money question's value is a positive amount in the trip's currency.
+    if (answer.key === 'budget.total' && !answer.skipped) {
+      return { ...existing, total: answer.value as Money };
     }
-    if (answer.key === 'budget.daily_spend' && isMoney(value)) {
-      return { ...existing, dailySpendPerPerson: value };
+    if (answer.key === 'budget.firm') {
+      // Skipping means "a guide", which is also the default.
+      return { ...existing, firm: !answer.skipped && answer.value === 'firm' };
+    }
+    if (answer.key === 'budget.daily_spend') {
+      // Skipping withdraws an allowance given earlier, rather than keeping it.
+      return { ...existing, dailySpendPerPerson: answer.skipped ? null : (answer.value as Money) };
     }
     return existing;
   }
 }
 
-/** Provider notes repeat across searches; the traveller only needs each once. */
-function dedupeNotes(notes: ProviderNote[]): ProviderNote[] {
-  const seen = new Map<string, ProviderNote>();
-  for (const note of notes) {
-    seen.set(`${note.provider}|${note.status}|${note.message}`, note);
-  }
-  return [...seen.values()];
+export interface ModificationResult {
+  session: PlanningSession;
+  /**
+   * no_change: nothing was changed, and `interpretation` says why.
+   * needs_consent: nothing changes until the question in `consent` is answered.
+   * replanning: the change is saved and new plans are being built; see `run`.
+   * applied: the change is saved and needed no new search.
+   * saved: the change is saved; plans will use it when next built.
+   */
+  status: 'no_change' | 'needs_consent' | 'replanning' | 'applied' | 'saved';
+  /** Written from the validated request and the engine's outcome, never by a model. */
+  interpretation: string;
+  reSearched: TripComponent[];
+  kept: TripComponent[];
+  /** Pins that could not be honoured, each with the reason. */
+  released: Array<{ component: TripComponent; reason: string }>;
+  consent: { id: string; question: string; acceptLabel: string; declineLabel: string } | null;
+  understoodBy: string;
+  run: PlanningRunView | null;
+  /** For operators only: why the model was not used, and what it proposed that failed validation. */
+  diagnostics: { llmFallbackReason: string | null; rejectedParameters: string[] };
 }
+
+/** The parts of a plan to carry into the next search unchanged. */
+function keptFrom(plan: TripPlan | undefined, keep: TripComponent[]): KeptComponents {
+  if (!plan) return {};
+  return {
+    outbound: keep.includes('outbound') ? plan.outboundTransport : null,
+    return: keep.includes('return') ? plan.returnTransport : null,
+    hotel: keep.includes('hotel') ? (plan.hotels[0] ?? null) : null,
+    activities: keep.includes('activities') && plan.activities.length > 0 ? plan.activities : null,
+  };
+}
+
+/**
+ * Drops a modification that is waiting for consent, recording why. Its
+ * answers were worked out against the trip as it was; once the trip changes
+ * in any other way, applying them would silently undo that change.
+ */
+function withdrawPending(
+  session: PlanningSession,
+  why: string,
+): Partial<Pick<PlanningSession, 'pendingModification' | 'decisionLog' | 'stage'>> {
+  if (!session.pendingModification) return {};
+  return {
+    pendingModification: null,
+    stage: session.plans.length > 0 ? 'planned' : 'profiling',
+    decisionLog: [
+      ...session.decisionLog,
+      {
+        at: new Date().toISOString(),
+        step: 'consent',
+        detail: `No longer waiting for an answer to "${session.pendingModification.question}", because ${why}.`,
+      },
+    ],
+  };
+}
+

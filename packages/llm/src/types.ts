@@ -43,6 +43,8 @@ export interface ExtractRequest<T> {
   schemaDescription: string;
   /** Per-call ceiling; providers that cannot honour it should fail loudly. */
   maxOutputTokens?: number;
+  /** Stops the call when it fires (a cancelled search, an agent's own deadline). */
+  signal?: AbortSignal;
 }
 
 export interface LlmProvider {
@@ -61,5 +63,18 @@ export class LlmUnavailableError extends Error {
   ) {
     super(message);
     this.name = 'LlmUnavailableError';
+  }
+}
+
+/**
+ * The model answered, but not in the shape asked for. A kind of unavailability
+ * (callers that only care that the model could not help catch the parent), kept
+ * apart so an agent can tell "the model is down" from "the model produced
+ * something unusable" and record which.
+ */
+export class LlmInvalidOutputError extends LlmUnavailableError {
+  constructor(provider: string, message: string) {
+    super(provider, message);
+    this.name = 'LlmInvalidOutputError';
   }
 }

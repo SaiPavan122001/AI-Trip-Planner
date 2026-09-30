@@ -1,8 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ProviderRegistry } from '@trip/providers';
 import {
   BookingEvent,
   CONFIRMED_STATES,
+  isClientBookingEvent,
   TravelerDetails,
   compare,
   formatMoney,
@@ -13,7 +14,7 @@ import {
   type PlanningSession,
 } from '@trip/shared';
 import { ApiError } from '../errors.js';
-import type { TripRepository } from '../repository/types.js';
+import { BookingChangedError, idempotencyId, type TripRepository } from '../repository/types.js';
 
 /**
  * Booking.
@@ -44,40 +45,72 @@ export interface CreateBookingInput {
   provider: string;
   quotedPrice: Money;
   idempotencyKey: string;
+  /** Who is asking. A key only ever means something within one principal. */
+  principal: string | null;
 }
 
 export class BookingService {
   constructor(private readonly deps: BookingServiceDeps) {}
 
+  /**
+   * Creates a booking at most once per (principal, key). The key is claimed
+   * atomically before any work starts, so concurrent retries cannot each
+   * create a booking: one does the work and the others are told it is in
+   * progress, or get its result once it finishes. A failed attempt releases
+   * the key so the client can retry it.
+   */
   async create(input: CreateBookingInput, session: PlanningSession): Promise<BookingRecord> {
-    const claim = await this.deps.repository.claimIdempotencyKey(
-      input.idempotencyKey,
-      'booking.create',
-    );
-    if (claim.existing) return claim.existing as BookingRecord;
+    const claimInput = { principal: input.principal, scope: 'booking.create', key: input.idempotencyKey };
+    // What this request asks for. The same key with a different request is a
+    // client mistake, and must not quietly return an unrelated booking.
+    const requestHash = createHash('sha256')
+      .update(
+        JSON.stringify([session.id, input.component, input.offerId, input.provider, input.quotedPrice]),
+      )
+      .digest('hex');
 
-    const now = new Date().toISOString();
-    const booking: BookingRecord = {
-      id: randomUUID(),
-      tripId: session.id,
-      state: 'draft',
-      component: input.component,
-      provider: input.provider,
-      providerReference: null,
-      quotedPrice: input.quotedPrice,
-      confirmedPrice: null,
-      idempotencyKey: input.idempotencyKey,
-      history: [],
-      createdAt: now,
-      updatedAt: now,
-    };
+    const claim = await this.deps.repository.claimIdempotencyKey({ ...claimInput, requestHash });
+    if (claim.status === 'completed') return claim.response as BookingRecord;
+    if (claim.status === 'in_progress') {
+      throw ApiError.conflict(
+        'This request is already being processed. Wait a moment and retry with the same Idempotency-Key.',
+      );
+    }
+    if (claim.status === 'mismatch') {
+      throw ApiError.unprocessable(
+        'That Idempotency-Key was already used for a different request. Use a new key for a new request.',
+      );
+    }
 
-    const created = await this.deps.repository.createBooking(booking);
-    await this.deps.repository.completeIdempotencyKey(
-      input.idempotencyKey,
-      'booking.create',
-      created,
-    );
+    let created: BookingRecord;
+    try {
+      const now = new Date().toISOString();
+      created = await this.deps.repository.createBooking({
+        id: randomUUID(),
+        tripId: session.id,
+        state: 'draft',
+        component: input.component,
+        provider: input.provider,
+        providerReference: null,
+        quotedPrice: input.quotedPrice,
+        confirmedPrice: null,
+        // Namespaced by principal and operation, so two callers who happen to
+        // pick the same key cannot collide on the bookings table either.
+        idempotencyKey: idempotencyId(claimInput),
+        history: [],
+        createdAt: now,
+        updatedAt: now,
+      });
+    } catch (err) {
+      // Nothing was created, so the client may safely retry with the same key.
+      await this.deps.repository.releaseIdempotencyKey(claimInput);
+      throw err;
+    }
+    // Deliberately outside the try: once the booking exists, the claim must
+    // not be released. If recording the result fails, the key stays claimed
+    // until it expires, and retries are refused rather than creating a second
+    // booking.
+    await this.deps.repository.completeIdempotencyKey(claimInput, created);
     return created;
   }
 
@@ -88,11 +121,32 @@ export class BookingService {
   }
 
   /**
-   * Applies one event. An event that is not a declared transition from the
-   * current state is rejected with the list of what would be valid, which
-   * makes client bugs obvious instead of silent.
+   * The only way a client may move a booking. Events that record what a
+   * provider or payment processor did are refused outright, whatever state
+   * the booking is in: those facts can only come from this service's own
+   * provider workflows, never from a request body.
    */
-  async apply(
+  async applyClientEvent(
+    id: string,
+    event: BookingEvent,
+    detail: { note?: string } = {},
+  ): Promise<BookingRecord> {
+    if (!isClientBookingEvent(event)) {
+      throw ApiError.forbidden(
+        'event_not_permitted',
+        `"${event}" records something a provider or payment processor did, so it can only be produced by the server.`,
+      );
+    }
+    return this.transition(id, event, detail.note === undefined ? {} : { note: detail.note });
+  }
+
+  /**
+   * Applies one event. An event that is not a declared transition from the
+   * current state is rejected, which makes client bugs obvious instead of
+   * silent. Private: server-side workflows call it with facts they obtained
+   * from a provider; clients go through `applyClientEvent`.
+   */
+  private async transition(
     id: string,
     event: BookingEvent,
     detail: { note?: string; providerReference?: string; confirmedPrice?: Money } = {},
@@ -129,7 +183,14 @@ export class BookingService {
       updatedAt: new Date().toISOString(),
     };
 
-    return this.deps.repository.updateBooking(updated);
+    try {
+      return await this.deps.repository.updateBooking(updated, booking.state);
+    } catch (err) {
+      // Another request moved this booking first. The transition was not
+      // applied, and the caller is told so rather than retried blindly.
+      if (err instanceof BookingChangedError) throw ApiError.conflict(err.message);
+      throw err;
+    }
   }
 
   /**
@@ -142,14 +203,14 @@ export class BookingService {
     revalidationToken: string | null,
   ): Promise<{ booking: BookingRecord; message: string }> {
     let booking = await this.get(id);
-    booking = await this.apply(id, 'START_REVALIDATION', { note: 'Re-pricing with the provider.' });
+    booking = await this.transition(id, 'START_REVALIDATION', { note: 'Re-pricing with the provider.' });
 
     if (booking.component === 'transport_outbound' || booking.component === 'transport_return') {
       const provider = this.deps.registry.flights.find(
         (p) => p.descriptor.id === booking.provider,
       );
       if (!provider || !revalidationToken) {
-        const updated = await this.apply(id, 'REVALIDATION_UNAVAILABLE', {
+        const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', {
           note: 'The provider that quoted this fare is no longer connected.',
         });
         return {
@@ -159,9 +220,9 @@ export class BookingService {
         };
       }
 
-      const res = await provider.revalidateFlight(booking.id, revalidationToken);
+      const res = await provider.revalidateFlight(revalidationToken);
       if (!isOk(res)) {
-        const updated = await this.apply(id, 'REVALIDATION_UNAVAILABLE', { note: res.message });
+        const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', { note: res.message });
         return { booking: updated, message: res.message };
       }
 
@@ -170,14 +231,14 @@ export class BookingService {
         current.currency === booking.quotedPrice.currency &&
         compare(current, booking.quotedPrice) === 0
       ) {
-        const updated = await this.apply(id, 'REVALIDATION_OK', {
+        const updated = await this.transition(id, 'REVALIDATION_OK', {
           note: `Confirmed at ${formatMoney(current)}.`,
           confirmedPrice: current,
         });
         return { booking: updated, message: `Still available at ${formatMoney(current)}.` };
       }
 
-      const updated = await this.apply(id, 'REVALIDATION_PRICE_CHANGED', {
+      const updated = await this.transition(id, 'REVALIDATION_PRICE_CHANGED', {
         note: `Provider now quotes ${formatMoney(current)}, was ${formatMoney(booking.quotedPrice)}.`,
         confirmedPrice: current,
       });
@@ -190,18 +251,18 @@ export class BookingService {
     if (booking.component === 'hotel') {
       const provider = this.deps.registry.hotels.find((p) => p.descriptor.id === booking.provider);
       if (!provider || !revalidationToken) {
-        const updated = await this.apply(id, 'REVALIDATION_UNAVAILABLE', {
+        const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', {
           note: 'The provider that quoted this rate is no longer connected.',
         });
         return { booking: updated, message: 'This rate cannot be re-priced.' };
       }
-      const res = await provider.revalidateHotel(booking.id, revalidationToken);
+      const res = await provider.revalidateHotel(revalidationToken);
       if (!isOk(res)) {
-        const updated = await this.apply(id, 'REVALIDATION_UNAVAILABLE', { note: res.message });
+        const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', { note: res.message });
         return { booking: updated, message: res.message };
       }
       const room = res.data.rooms[0]!;
-      const updated = await this.apply(
+      const updated = await this.transition(
         id,
         compare(room.totalPrice, booking.quotedPrice) === 0
           ? 'REVALIDATION_OK'
@@ -211,7 +272,7 @@ export class BookingService {
       return { booking: updated, message: `Provider quotes ${formatMoney(room.totalPrice)}.` };
     }
 
-    const updated = await this.apply(id, 'REVALIDATION_UNAVAILABLE', {
+    const updated = await this.transition(id, 'REVALIDATION_UNAVAILABLE', {
       note: 'No provider supports re-pricing this component.',
     });
     return {
@@ -242,13 +303,13 @@ export class BookingService {
       );
     }
 
-    await this.apply(id, 'PROVIDER_BOOKING_STARTED', { note: 'Sending the booking to the provider.' });
+    await this.transition(id, 'PROVIDER_BOOKING_STARTED', { note: 'Sending the booking to the provider.' });
 
     // No connected adapter implements ticketing yet: Amadeus Self-Service
     // requires a separate production agreement for the Flight Create Orders
     // endpoint. Rather than simulate a confirmation, the booking fails with
     // an accurate reason and the payment is flagged for release.
-    const failed = await this.apply(id, 'PROVIDER_FAILED', {
+    const failed = await this.transition(id, 'PROVIDER_FAILED', {
       note: 'No connected provider is authorised to issue tickets for this deployment.',
     });
     return {

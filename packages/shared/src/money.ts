@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { minorUnitExponent } from './currency.js';
 
 /**
  * Money is always stored as an integer in the currency's minor unit
@@ -9,22 +10,14 @@ import { z } from 'zod';
 export const CurrencyCode = z.string().regex(/^[A-Z]{3}$/, 'ISO-4217 currency code');
 export type CurrencyCode = z.infer<typeof CurrencyCode>;
 
+export { SUPPORTED_CURRENCY, minorUnitExponent } from './currency.js';
+
 export const Money = z.object({
   /** Integer amount in the currency's minor unit. */
   amount: z.number().int(),
   currency: CurrencyCode,
 });
 export type Money = z.infer<typeof Money>;
-
-/** Currencies whose minor unit is not 1/100. Extend as providers require. */
-const ZERO_DECIMAL = new Set(['JPY', 'KRW', 'VND', 'CLP', 'ISK', 'XAF', 'XOF']);
-const THREE_DECIMAL = new Set(['BHD', 'KWD', 'OMR', 'TND', 'JOD', 'IQD']);
-
-export function minorUnitExponent(currency: CurrencyCode): number {
-  if (ZERO_DECIMAL.has(currency)) return 0;
-  if (THREE_DECIMAL.has(currency)) return 3;
-  return 2;
-}
 
 export function money(major: number, currency: CurrencyCode): Money {
   const factor = 10 ** minorUnitExponent(currency);
@@ -42,7 +35,7 @@ export function toMajor(m: Money): number {
 function assertSame(a: Money, b: Money): void {
   if (a.currency !== b.currency) {
     throw new Error(
-      `Currency mismatch: ${a.currency} vs ${b.currency}. Convert through the FX service before arithmetic.`,
+      `Currency mismatch: ${a.currency} vs ${b.currency}. Amounts in different currencies cannot be combined, and this planner does not convert currencies.`,
     );
   }
 }

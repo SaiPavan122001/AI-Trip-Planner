@@ -1,0 +1,20 @@
+{
+  "data": [
+    {
+      "type": "location",
+      "subType": "AIRPORT",
+      "name": "RAJIV GANDHI INTL",
+      "iataCode": "HYD",
+      "geoCode": { "latitude": 17.2403, "longitude": 78.4294 },
+      "distance": { "value": 32, "unit": "KM" }
+    },
+    {
+      "type": "location",
+      "subType": "AIRPORT",
+      "name": "BEGUMPET",
+      "iataCode": "BPM",
+      "geoCode": { "latitude": 17.4531, "longitude": 78.4676 },
+      "distance": { "value": 8, "unit": "KM" }
+    }
+  ]
+}

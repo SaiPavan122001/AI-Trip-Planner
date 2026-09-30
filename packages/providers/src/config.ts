@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { SUPPORTED_CURRENCY } from '@trip/shared';
+import { validateConfiguredUrl } from './ssrf.js';
 
 /**
  * Provider configuration is read once, from the environment, and validated.
@@ -7,8 +9,15 @@ import { z } from 'zod';
  * rather than to fall over or to substitute sample data.
  */
 
+// Configured costs must be in the one currency the planner works in. A
+// tariff or vehicle profile in another currency would otherwise be ignored
+// or, worse, summed with rupees; failing at boot names the problem instead.
+const InrOnly = z.literal(SUPPORTED_CURRENCY, {
+  errorMap: () => ({ message: `must be ${SUPPORTED_CURRENCY}; this planner works in Indian rupees only` }),
+});
+
 const TariffSchema = z.object({
-  currency: z.string().length(3),
+  currency: InrOnly,
   baseFare: z.number().nonnegative(),
   perKm: z.number().nonnegative(),
   perMinute: z.number().nonnegative(),
@@ -16,12 +25,14 @@ const TariffSchema = z.object({
 });
 
 const VehicleProfileSchema = z.object({
-  currency: z.string().length(3),
+  currency: InrOnly,
   consumptionPer100Km: z.number().positive(),
   energyPrice: z.number().positive(),
   perKmAllowance: z.number().nonnegative().default(0),
   maxDrivingHoursBeforeBreak: z.number().positive().default(3),
   breakMinutes: z.number().nonnegative().default(30),
+  // Accepted so existing settings keep loading. No longer used: the fare for
+  // driving your own car is ₹0, so there is nothing to split per traveller.
   averageOccupancy: z.number().positive().default(2),
 });
 
@@ -75,6 +86,42 @@ export interface ProvidersEnv {
   } | null;
   taxiTariffs: Record<string, z.infer<typeof TariffSchema>>;
   selfDriveProfile: z.infer<typeof VehicleProfileSchema> | null;
+  /** Limits that apply to every provider call, whichever adapter makes it. */
+  policy: {
+    /** Backstop on one provider call, in ms; on top of each adapter's own timeout and retries. */
+    callTimeoutMs: number;
+    /** Consecutive failures that open a provider's circuit. */
+    circuitFailureThreshold: number;
+    /** How long an open circuit waits before it lets one probe through, in ms. */
+    circuitRecoveryMs: number;
+    /** Retries after the first attempt of a safe request, and the longest wait between attempts. */
+    maxRetries: number;
+    retryMaxDelayMs: number;
+  };
+  /** Caching of the answers that are safe to keep (places, routes, things to do). */
+  cache: {
+    enabled: boolean;
+    geocodingTtlMs: number;
+    routingTtlMs: number;
+    activitiesTtlMs: number;
+    maxEntries: number;
+  };
+}
+
+/** A positive number from the environment, or the default when unset. A bad value stops start-up. */
+function positiveNumber(raw: string | undefined, fallback: number, name: string): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`${name} must be a positive number of milliseconds.`);
+  return n;
+}
+
+/** A whole number from the environment, at least `min`, or the default when unset. A bad value stops start-up. */
+function wholeNumber(raw: string | undefined, fallback: number, min: number, name: string): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min) throw new Error(`${name} must be a whole number of at least ${min}.`);
+  return n;
 }
 
 function coverageFrom(raw: string | undefined): 'global' | string[] {
@@ -86,19 +133,24 @@ function coverageFrom(raw: string | undefined): 'global' | string[] {
 }
 
 export function loadProvidersEnv(env: NodeJS.ProcessEnv = process.env): ProvidersEnv {
+  // A base URL is operator configuration, so it may name a host on the
+  // operator's own network, but it must be plain http(s), carry no credentials,
+  // and be https in production. A bad one stops start-up naming the setting.
+  const production = env['NODE_ENV'] === 'production';
+  const checked = (name: string, value: string): string => validateConfiguredUrl(name, value, { production });
   const tariffList = parseJsonEnv(env['GROUND_TRANSPORT_TARIFFS'], z.array(TariffSchema), 'GROUND_TRANSPORT_TARIFFS');
   const taxiTariffs: ProvidersEnv['taxiTariffs'] = {};
   for (const t of tariffList ?? []) taxiTariffs[t.currency] = t;
 
   return {
     nominatim: {
-      baseUrl: env['NOMINATIM_BASE_URL'] ?? 'https://nominatim.openstreetmap.org',
+      baseUrl: checked('NOMINATIM_BASE_URL', env['NOMINATIM_BASE_URL'] ?? 'https://nominatim.openstreetmap.org'),
       userAgent: env['NOMINATIM_USER_AGENT'] ?? '',
       minIntervalMs: Number(env['NOMINATIM_MIN_INTERVAL_MS'] ?? 1100),
     },
     osrm: env['OSRM_BASE_URL']
       ? {
-          baseUrl: env['OSRM_BASE_URL'],
+          baseUrl: checked('OSRM_BASE_URL', env['OSRM_BASE_URL']),
           minIntervalMs: Number(env['OSRM_MIN_INTERVAL_MS'] ?? 250),
         }
       : null,
@@ -119,7 +171,7 @@ export function loadProvidersEnv(env: NodeJS.ProcessEnv = process.env): Provider
       : null,
     rail: env['RAIL_PROVIDER_URL']
       ? {
-          baseUrl: env['RAIL_PROVIDER_URL'],
+          baseUrl: checked('RAIL_PROVIDER_URL', env['RAIL_PROVIDER_URL']),
           apiKey: env['RAIL_PROVIDER_KEY'] ?? null,
           label: env['RAIL_PROVIDER_LABEL'] ?? 'Rail provider',
           coverage: coverageFrom(env['RAIL_PROVIDER_COVERAGE']),
@@ -129,7 +181,7 @@ export function loadProvidersEnv(env: NodeJS.ProcessEnv = process.env): Provider
       : null,
     bus: env['BUS_PROVIDER_URL']
       ? {
-          baseUrl: env['BUS_PROVIDER_URL'],
+          baseUrl: checked('BUS_PROVIDER_URL', env['BUS_PROVIDER_URL']),
           apiKey: env['BUS_PROVIDER_KEY'] ?? null,
           label: env['BUS_PROVIDER_LABEL'] ?? 'Bus provider',
           coverage: coverageFrom(env['BUS_PROVIDER_COVERAGE']),
@@ -139,5 +191,19 @@ export function loadProvidersEnv(env: NodeJS.ProcessEnv = process.env): Provider
       : null,
     taxiTariffs,
     selfDriveProfile: parseJsonEnv(env['SELF_DRIVE_PROFILE'], VehicleProfileSchema, 'SELF_DRIVE_PROFILE'),
+    policy: {
+      callTimeoutMs: positiveNumber(env['PROVIDER_CALL_TIMEOUT_MS'], 45_000, 'PROVIDER_CALL_TIMEOUT_MS'),
+      circuitFailureThreshold: wholeNumber(env['PROVIDER_CIRCUIT_FAILURE_THRESHOLD'], 5, 1, 'PROVIDER_CIRCUIT_FAILURE_THRESHOLD'),
+      circuitRecoveryMs: wholeNumber(env['PROVIDER_CIRCUIT_RECOVERY_MS'], 30_000, 1000, 'PROVIDER_CIRCUIT_RECOVERY_MS'),
+      maxRetries: wholeNumber(env['PROVIDER_MAX_RETRIES'], 2, 0, 'PROVIDER_MAX_RETRIES'),
+      retryMaxDelayMs: wholeNumber(env['PROVIDER_RETRY_MAX_DELAY_MS'], 3000, 0, 'PROVIDER_RETRY_MAX_DELAY_MS'),
+    },
+    cache: {
+      enabled: env['CACHE_ENABLED'] !== 'false',
+      geocodingTtlMs: wholeNumber(env['CACHE_TTL_GEOCODING_S'], 86_400, 1, 'CACHE_TTL_GEOCODING_S') * 1000,
+      routingTtlMs: wholeNumber(env['CACHE_TTL_ROUTING_S'], 21_600, 1, 'CACHE_TTL_ROUTING_S') * 1000,
+      activitiesTtlMs: wholeNumber(env['CACHE_TTL_ACTIVITIES_S'], 21_600, 1, 'CACHE_TTL_ACTIVITIES_S') * 1000,
+      maxEntries: wholeNumber(env['CACHE_MAX_ENTRIES'], 2000, 10, 'CACHE_MAX_ENTRIES'),
+    },
   };
 }

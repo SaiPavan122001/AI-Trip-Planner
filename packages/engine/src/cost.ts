@@ -16,6 +16,7 @@ import {
   type TransportOffer,
   type TripIntent,
 } from '@trip/shared';
+import { knownTransportCost } from './pricing.js';
 
 /**
  * Cost aggregation and budget conflict detection.
@@ -84,12 +85,19 @@ export function computeCost(input: CostInput): CostBreakdown {
   const total = add(transport, fees, accommodation, localTransport, activities, meals, other);
   const people = Math.max(1, seatedTravelers(input.intent.travelers));
 
-  const estimatedPortion = sum(
-    input.items
+  // Modelled rather than quoted: estimated items, plus estimated extras such
+  // as fuel for a drive.
+  const estimatedFees = [input.outbound, input.inbound]
+    .filter((o): o is TransportOffer => o !== null)
+    .flatMap((o) => o.itemisedFees.filter((f) => !f.included && f.isEstimate).map((f) => f.amount))
+    .filter(inCurrency);
+  const estimatedPortion = sum([
+    ...input.items
       .filter((i) => i.costIsEstimate)
       .map((i) => i.cost)
       .filter(inCurrency),
-  );
+    ...estimatedFees,
+  ]);
 
   const budget = input.constraints.budget.total;
   const remainingBudget =
@@ -107,7 +115,49 @@ export function computeCost(input: CostInput): CostBreakdown {
     perPerson: divide(total, people),
     estimatedPortion,
     remainingBudget,
+    notIncluded: notIncludedIn(input),
   };
+}
+
+/**
+ * The costs this plan involves that nobody could price. They used to vanish
+ * from the total without a word, which made an incomplete total look
+ * complete; now each is named, so the traveller knows what to add.
+ */
+function notIncludedIn(input: CostInput): CostBreakdown['notIncluded'] {
+  const out: CostBreakdown['notIncluded'] = [];
+  const count = (kind: string) => input.items.filter((i) => i.kind === kind && i.cost === null).length;
+
+  const unpriced = new Set(
+    [input.outbound, input.inbound]
+      .filter((o): o is TransportOffer => o !== null)
+      .flatMap((o) => o.unpricedCosts),
+  );
+  for (const label of unpriced) {
+    out.push({ label, reason: 'Not calculated: no connected source can price it.' });
+  }
+
+  const transfers = count('transfer');
+  if (transfers > 0) {
+    out.push({
+      label: `Local travel (${transfers} leg${transfers === 1 ? '' : 's'})`,
+      reason: 'No fare is available for these legs, so they are timed but not priced.',
+    });
+  }
+  const activities = count('activity');
+  if (activities > 0) {
+    out.push({
+      label: `Entry to ${activities} place${activities === 1 ? '' : 's'}`,
+      reason: 'The source does not publish entry prices. Many places are free; some are not.',
+    });
+  }
+  if (count('meal') > 0) {
+    out.push({
+      label: 'Food',
+      reason: 'No daily spending allowance was given, so meals are not costed.',
+    });
+  }
+  return out;
 }
 
 export interface BudgetConflict {
@@ -153,7 +203,10 @@ export function detectBudgetConflict(
   const adjustments: BudgetAdjustment[] = [];
 
   if (context.cheaperTransport && context.currentTransport) {
-    const saving = subtract(context.currentTransport.totalPrice, context.cheaperTransport.totalPrice);
+    const saving = subtract(
+      knownTransportCost(context.currentTransport),
+      knownTransportCost(context.cheaperTransport),
+    );
     if (saving.amount > 0) {
       const extraMinutes =
         context.cheaperTransport.totalDurationMinutes - context.currentTransport.totalDurationMinutes;

@@ -1,0 +1,13 @@
+# The repository stores LF line endings regardless of a contributor's local
+# core.autocrlf setting, matching .editorconfig. Shell scripts and Dockerfiles
+# copied into Linux images break on CRLF, so this is not only cosmetic.
+* text=auto eol=lf
+
+# Binary assets must never be normalised.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

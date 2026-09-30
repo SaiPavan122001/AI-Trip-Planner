@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LocalTime, TransportMode } from './trip.js';
 
 export const TravelStyle = z.enum(['budget', 'standard', 'premium', 'luxury']);
 export type TravelStyle = z.infer<typeof TravelStyle>;
@@ -101,20 +102,18 @@ export const TransportPreferences = z.object({
   maxStops: z.number().int().min(0).max(3).nullable().default(null),
   avoidOvernightTravel: z.boolean().default(false),
   avoidRedEyeArrival: z.boolean().default(false),
-  earliestDepartureLocal: z
-    .string()
-    .regex(/^\d{2}:\d{2}$/)
-    .nullable()
-    .default(null),
-  latestArrivalLocal: z
-    .string()
-    .regex(/^\d{2}:\d{2}$/)
-    .nullable()
-    .default(null),
+  earliestDepartureLocal: LocalTime.nullable().default(null),
+  latestArrivalLocal: LocalTime.nullable().default(null),
   checkedBagsPerTraveler: z.number().int().min(0).max(5).default(0),
   cabinBagsPerTraveler: z.number().int().min(0).max(3).default(1),
   /** Modes the traveller ruled out explicitly, for example "no buses". */
   excludedModes: z.array(z.string()).default([]),
+  /**
+   * The way the traveller asked to travel ("use the train"). Plans use it
+   * where an option exists; every other mode is still searched and shown,
+   * so the comparison stays honest and the traveller can change their mind.
+   */
+  preferredMode: TransportMode.nullable().default(null),
   refundableRequired: z.boolean().default(false),
 });
 export type TransportPreferences = z.infer<typeof TransportPreferences>;
@@ -127,6 +126,14 @@ export const SpecialRequirements = z.object({
   /** Free-text notes the traveller added, passed to providers that support them. */
   assistanceNotes: z.array(z.string()).default([]),
   petsTraveling: z.boolean().default(false),
+  /** Safety is what the traveller wants weighed first when options are close. */
+  safetyFirst: z.boolean().default(false),
+  /**
+   * Anything else the traveller asked for, in their own words. It is shown back
+   * to them on every plan and never interpreted: the planner cannot check it,
+   * and says so, instead of pretending it has been met.
+   */
+  otherRequirements: z.array(z.string().max(300)).max(5).default([]),
 });
 export type SpecialRequirements = z.infer<typeof SpecialRequirements>;
 

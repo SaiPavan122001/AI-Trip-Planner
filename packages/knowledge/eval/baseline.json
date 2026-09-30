@@ -1,0 +1,117 @@
+{
+  "reportVersion": "knowledge-eval/1",
+  "fingerprint": {
+    "corpus": {
+      "version": "corpus/1",
+      "hash": "c4a59c95e37c0dfd"
+    },
+    "answers": {
+      "version": "answers/1",
+      "hash": "deb63a2a9acc25e1"
+    },
+    "groundedness": {
+      "version": "groundedness/1",
+      "hash": "1ae8dc29023639f7"
+    },
+    "hallucination": {
+      "version": "hallucination/1"
+    },
+    "injection": {
+      "version": "injection/1",
+      "hash": "6ebe16b73cada660"
+    },
+    "chunking": {
+      "maxChars": 700,
+      "overlapChars": 160
+    },
+    "retrieval": {
+      "k": 4,
+      "minScore": 0.28,
+      "minCoverage": 0.5,
+      "minQueryTerms": 2,
+      "maxPerDoc": 2,
+      "minAuthority": 2,
+      "rerank": "lexical",
+      "candidateFactor": 4,
+      "screen": true,
+      "includeStale": false
+    },
+    "rerankFormula": "lexical-blend-0.7-0.3/1",
+    "embedder": "hashing@1:512",
+    "prompt": {
+      "promptVersion": "knowledge-answer/1",
+      "verifier": "lexical/1",
+      "systemPromptHash": "3eed8b79b5dbeb80fe4ac208658714bcb1622e435d6662ab9b308042d882a33b"
+    },
+    "scanner": {
+      "reasons": "3babe3d41866eecb",
+      "rules": "6371985c3b3b9b24"
+    },
+    "model": "scripted/1"
+  },
+  "metrics": {
+    "retrieval.recallAtK": 0.9167,
+    "retrieval.precisionAtK": 0.3611,
+    "retrieval.mrr": 0.9375,
+    "retrieval.hitRate": 0.9167,
+    "answers.extractive.passRate": 0.8372,
+    "answers.extractive.answerRecall": 0.875,
+    "answers.extractive.abstainRecall": 0.8947,
+    "answers.extractive.answerPrecision": 0.913,
+    "answers.extractive.falseAnswerRate": 0.1053,
+    "answers.extractive.holdoutPassRate": 0.7333,
+    "answers.extractive.tunePassRate": 0.8929,
+    "answers.model.passRate": 0.7907,
+    "answers.model.answerRecall": 0.875,
+    "answers.model.abstainRecall": 0.8947,
+    "answers.model.answerPrecision": 0.913,
+    "answers.model.falseAnswerRate": 0.1053,
+    "answers.model.holdoutPassRate": 0.7333,
+    "answers.model.tunePassRate": 0.8214,
+    "groundedness.accuracy": 1,
+    "groundedness.falseAcceptRate": 0,
+    "groundedness.falseRejectRate": 0,
+    "groundedness.contradictionRecall": 1,
+    "groundedness.hardFalseAccepts": 3,
+    "hallucination.leaks": 0,
+    "hallucination.faithfulAcceptRate": 1,
+    "injection.blockRate": 1,
+    "injection.blockRateWithoutIngestion": 1,
+    "injection.blockRateVerifierAlone": 0.9048,
+    "injection.quarantineRate": 1,
+    "injection.knownLimitationsReached": 1
+  },
+  "directions": {
+    "retrieval.recallAtK": "higher",
+    "retrieval.precisionAtK": "higher",
+    "retrieval.mrr": "higher",
+    "retrieval.hitRate": "higher",
+    "answers.extractive.passRate": "higher",
+    "answers.extractive.answerRecall": "higher",
+    "answers.extractive.abstainRecall": "higher",
+    "answers.extractive.answerPrecision": "higher",
+    "answers.extractive.falseAnswerRate": "lower",
+    "answers.extractive.holdoutPassRate": "higher",
+    "answers.extractive.tunePassRate": "higher",
+    "answers.model.passRate": "higher",
+    "answers.model.answerRecall": "higher",
+    "answers.model.abstainRecall": "higher",
+    "answers.model.answerPrecision": "higher",
+    "answers.model.falseAnswerRate": "lower",
+    "answers.model.holdoutPassRate": "higher",
+    "answers.model.tunePassRate": "higher",
+    "groundedness.accuracy": "higher",
+    "groundedness.falseAcceptRate": "lower",
+    "groundedness.falseRejectRate": "lower",
+    "groundedness.contradictionRecall": "higher",
+    "groundedness.hardFalseAccepts": "lower",
+    "hallucination.leaks": "lower",
+    "hallucination.faithfulAcceptRate": "higher",
+    "injection.blockRate": "higher",
+    "injection.blockRateWithoutIngestion": "higher",
+    "injection.blockRateVerifierAlone": "higher",
+    "injection.quarantineRate": "higher",
+    "injection.knownLimitationsReached": "lower"
+  },
+  "digest": "6bf6929ddd75afb5"
+}

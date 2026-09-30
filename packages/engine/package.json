@@ -16,11 +16,12 @@
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "lint": "echo \"(lint: configured via eslint in CI)\""
+    "lint": "eslint src"
   },
   "dependencies": {
     "@trip/providers": "*",
     "@trip/shared": "*",
+    "@trip/telemetry": "*",
     "zod": "^3.23.8"
   },
   "devDependencies": {

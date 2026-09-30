@@ -77,15 +77,20 @@ export interface FlightSearchRequest {
   /** Hard ceiling passed to the provider where supported, to cut noise. */
   maxPrice: number | null;
   limit: number;
+  /** Stops the search, and any waiting or retrying, when it fires. */
+  signal?: AbortSignal;
 }
 
 export interface FlightProvider extends BaseProvider {
   searchFlights(req: FlightSearchRequest): Promise<ProviderResult<TransportOffer[]>>;
-  /** Re-price a specific offer immediately before booking. */
-  revalidateFlight(
-    offerId: string,
-    token: string,
-  ): Promise<ProviderResult<TransportOffer>>;
+  /**
+   * Re-price a specific offer immediately before booking. Takes only the
+   * provider's own revalidation token, exactly as the search returned it.
+   * Nothing from this system's own records, such as a booking id, may be
+   * passed here: a provider cannot interpret it, and mixing the two up is
+   * how a request ends up naming an offer that does not exist.
+   */
+  revalidateFlight(token: string): Promise<ProviderResult<TransportOffer>>;
 }
 
 export interface HotelSearchRequest {
@@ -103,11 +108,13 @@ export interface HotelSearchRequest {
   near: Coordinates | null;
   radiusKm: number;
   limit: number;
+  signal?: AbortSignal;
 }
 
 export interface HotelProvider extends BaseProvider {
   searchHotels(req: HotelSearchRequest): Promise<ProviderResult<HotelOffer[]>>;
-  revalidateHotel(offerId: string, token: string): Promise<ProviderResult<HotelOffer>>;
+  /** As `revalidateFlight`: the provider's own token, and nothing internal. */
+  revalidateHotel(token: string): Promise<ProviderResult<HotelOffer>>;
 }
 
 export interface SurfaceSearchRequest {
@@ -119,6 +126,7 @@ export interface SurfaceSearchRequest {
   /** Provider-specific class filter, passed through untranslated. */
   classCode: string | null;
   limit: number;
+  signal?: AbortSignal;
 }
 
 /** Rail and bus share a shape but stay separate interfaces: their class
@@ -136,6 +144,7 @@ export interface RouteRequest {
   to: Coordinates;
   profile: 'driving' | 'walking' | 'cycling';
   departAt?: string;
+  signal?: AbortSignal;
 }
 
 export interface RouteResult {
@@ -152,7 +161,10 @@ export interface RoutingProvider extends BaseProvider {
 export interface TransferSearchRequest {
   from: { name: string; coordinates: Coordinates };
   to: { name: string; coordinates: Coordinates };
+  /** When the transfer starts, as an instant. */
   at: string;
+  /** IANA zone where it happens, so a night tariff is applied by the local clock, not the server's. */
+  timezone: string;
   party: PartySize;
   luggagePieces: number;
   accessibleRequired: boolean;
@@ -185,6 +197,7 @@ export interface ActivitySearchRequest {
   accessibilityNeeds: string[];
   currency: string;
   limit: number;
+  signal?: AbortSignal;
 }
 
 export interface ActivityProvider extends BaseProvider {

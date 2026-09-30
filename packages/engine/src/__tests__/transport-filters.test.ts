@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { money, type ConstraintSet } from '@trip/shared';
 import { applyHardConstraints } from '../transport.js';
-import { profile, transportOffer } from './fixtures.js';
+import { profile, transportOffer, INDIA_LEG } from './fixtures.js';
 
 const constraints = (overrides: Partial<ConstraintSet> = {}): ConstraintSet => ({
   hard: [],
   soft: [],
   budget: {
     total: null,
+    firm: false,
     transport: null,
     accommodation: null,
     dailySpend: null,
@@ -29,6 +30,7 @@ describe('hard constraints on transport', () => {
       ],
       constraints(),
       avoiding,
+      INDIA_LEG,
     );
 
     expect(kept.map((o) => o.id)).toEqual(['day']);
@@ -45,6 +47,7 @@ describe('hard constraints on transport', () => {
       ],
       constraints({ hard: [{ kind: 'max_stops', value: 0 }] }),
       profile(),
+      INDIA_LEG,
     );
 
     expect(kept.map((o) => o.id)).toEqual(['direct']);
@@ -57,20 +60,14 @@ describe('hard constraints on transport', () => {
         transportOffer({ id: 'affordable', totalPrice: money(9000, 'INR') }),
         transportOffer({ id: 'expensive', totalPrice: money(60_000, 'INR') }),
       ],
-      constraints({
-        budget: {
-          total: null,
-          transport: money(20_000, 'INR'),
-          accommodation: null,
-          dailySpend: null,
-          activities: null,
-        },
-      }),
+      // Only a firm limit filters; the ceiling is a hard constraint.
+      constraints({ hard: [{ kind: 'max_transport_budget', value: money(20_000, 'INR') }] }),
       profile(),
+      INDIA_LEG,
     );
 
     expect(kept.map((o) => o.id)).toEqual(['affordable']);
-    expect(dropped[0]?.reason).toMatch(/transport budget/);
+    expect(dropped[0]?.reason).toMatch(/firm budget/);
   });
 
   it('keeps a fare whose baggage the provider did not state, rather than hiding it', () => {
@@ -87,6 +84,7 @@ describe('hard constraints on transport', () => {
       [unstated],
       constraints({ hard: [{ kind: 'required_checked_bags', value: 2 }] }),
       profile(),
+      INDIA_LEG,
     );
 
     expect(kept.map((o) => o.id)).toEqual(['unstated']);
@@ -99,6 +97,7 @@ describe('hard constraints on transport', () => {
       [oneBag],
       constraints({ hard: [{ kind: 'required_checked_bags', value: 2 }] }),
       profile(),
+      INDIA_LEG,
     );
 
     expect(kept).toEqual([]);
@@ -116,6 +115,7 @@ describe('hard constraints on transport', () => {
       ],
       constraints(),
       flexible,
+      INDIA_LEG,
     );
 
     expect(kept.map((o) => o.id)).toEqual(['flex']);

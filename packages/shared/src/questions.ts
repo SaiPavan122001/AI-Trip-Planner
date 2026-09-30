@@ -40,6 +40,15 @@ export const Question = z.object({
   min: z.number().nullable().default(null),
   max: z.number().nullable().default(null),
   currency: z.string().nullable().default(null),
+  /**
+   * For multi_choice and ranking: how many options must and may be chosen.
+   * The server enforces these; they are sent so the UI can enforce the same
+   * rule before the request is made.
+   */
+  minSelections: z.number().int().min(0).nullable().default(null),
+  maxSelections: z.number().int().min(1).nullable().default(null),
+  /** For text: the longest answer accepted, after trimming. */
+  maxLength: z.number().int().min(1).nullable().default(null),
   required: z.boolean().default(false),
   /** Why this is being asked, shown on request. Builds trust in the funnel. */
   reason: z.string(),
@@ -47,15 +56,19 @@ export const Question = z.object({
   stage: z.enum(['budget', 'style', 'priorities', 'accommodation', 'traveler_needs', 'transport']),
 });
 export type Question = z.infer<typeof Question>;
+/** A question before defaults are applied, as the engine declares it. */
+export type QuestionInput = z.input<typeof Question>;
 
 export const Answer = z.object({
-  key: z.string(),
+  key: z.string().min(1).max(100),
+  // Every shape has a ceiling: an answer is a choice, a number, a sum of money
+  // or a sentence, never a document.
   value: z.union([
-    z.string(),
-    z.number(),
+    z.string().max(10_000),
+    z.number().finite(),
     z.boolean(),
-    z.array(z.string()),
-    z.object({ amount: z.number().int(), currency: z.string() }),
+    z.array(z.string().max(400)).max(50),
+    z.object({ amount: z.number().int().max(1_000_000_000_000), currency: z.string().max(8) }),
     z.null(),
   ]),
   /** True when the traveller chose to skip rather than answer. */

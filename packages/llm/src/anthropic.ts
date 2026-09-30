@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { zodToJsonSchema } from 'zod-to-json-schema';
-import { LlmUnavailableError, type ExtractRequest, type LlmProvider, type LlmResult } from './types.js';
+import { LlmInvalidOutputError, LlmUnavailableError, type ExtractRequest, type LlmProvider, type LlmResult } from './types.js';
 
 /**
  * Anthropic adapter.
@@ -21,6 +21,12 @@ export interface AnthropicConfig {
   apiKey: string;
   model: string;
   maxOutputTokens: number;
+  /**
+   * Per-attempt ceiling. The SDK's default is ten minutes with two retries,
+   * which would let one modification request hang for half an hour; a
+   * traveller waiting on a reply is better served by the rule-based fallback.
+   */
+  timeoutMs: number;
 }
 
 export class AnthropicLlmProvider implements LlmProvider {
@@ -31,7 +37,9 @@ export class AnthropicLlmProvider implements LlmProvider {
 
   constructor(private readonly config: AnthropicConfig) {
     this.model = config.model;
-    this.client = config.apiKey ? new Anthropic({ apiKey: config.apiKey }) : null;
+    this.client = config.apiKey
+      ? new Anthropic({ apiKey: config.apiKey, timeout: config.timeoutMs, maxRetries: 1 })
+      : null;
   }
 
   isConfigured(): boolean {
@@ -80,7 +88,7 @@ export class AnthropicLlmProvider implements LlmProvider {
         ],
         tool_choice: { type: 'tool', name: req.schemaName },
         messages: [{ role: 'user', content: req.input }],
-      });
+      }, req.signal ? { signal: req.signal } : undefined);
 
       if (response.stop_reason === 'refusal') {
         throw new LlmUnavailableError(
@@ -93,12 +101,12 @@ export class AnthropicLlmProvider implements LlmProvider {
         (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
       );
       if (!toolUse) {
-        throw new LlmUnavailableError(this.id, 'The model returned no structured result.');
+        throw new LlmInvalidOutputError(this.id, 'The model returned no structured result.');
       }
 
       const parsed = req.schema.safeParse(toolUse.input);
       if (!parsed.success) {
-        throw new LlmUnavailableError(
+        throw new LlmInvalidOutputError(
           this.id,
           `Structured output failed validation: ${parsed.error.issues.map((i) => i.message).join('; ')}`,
         );

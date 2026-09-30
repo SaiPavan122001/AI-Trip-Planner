@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+import { SUPPORTED_CURRENCY, minorUnitExponent } from '@trip/shared/currency';
 import type { Question } from '@/lib/api';
 
 /**
@@ -106,7 +107,7 @@ function AnswerControl({
     case 'boolean':
       return <BooleanChoice busy={busy} onAnswer={onAnswer} />;
     default:
-      return <TextInput busy={busy} onAnswer={onAnswer} />;
+      return <TextInput question={question} busy={busy} onAnswer={onAnswer} />;
   }
 }
 
@@ -159,9 +160,16 @@ function MultiChoice({
     question.key === 'transport.mode_openness' ? question.options.map((o) => o.value) : [],
   );
 
+  const minSelections = question.minSelections ?? 0;
+  const maxSelections = question.maxSelections ?? question.options.length;
+
   const toggle = (value: string) =>
     setSelected((current) =>
-      current.includes(value) ? current.filter((v) => v !== value) : [...current, value],
+      current.includes(value)
+        ? current.filter((v) => v !== value)
+        : current.length >= maxSelections
+          ? current
+          : [...current, value],
     );
 
   return (
@@ -186,10 +194,15 @@ function MultiChoice({
           );
         })}
       </div>
+      {minSelections > 0 && selected.length < minSelections ? (
+        <p className="mt-3 text-xs text-ink-faint">
+          {minSelections === 1 ? 'Choose at least one.' : `Choose at least ${minSelections}.`}
+        </p>
+      ) : null}
       <button
         type="button"
         className="btn-primary mt-5"
-        disabled={busy}
+        disabled={busy || selected.length < minSelections}
         onClick={() => onAnswer(selected)}
       >
         Continue
@@ -213,12 +226,14 @@ function Ranking({
   onAnswer: (v: unknown) => void;
 }) {
   const [order, setOrder] = useState<string[]>([]);
+  const maxSelections = question.maxSelections ?? question.options.length;
+  const minSelections = Math.max(1, question.minSelections ?? 1);
 
   const toggle = (value: string) =>
     setOrder((current) =>
       current.includes(value)
         ? current.filter((v) => v !== value)
-        : current.length >= 4
+        : current.length >= maxSelections
           ? current
           : [...current, value],
     );
@@ -253,13 +268,13 @@ function Ranking({
       </div>
       <p className="mt-3 text-xs text-ink-faint">
         {order.length === 0
-          ? 'Pick up to four, most important first.'
+          ? `Pick up to ${maxSelections}, most important first.`
           : `Optimising for ${order.join(' → ')}.`}
       </p>
       <button
         type="button"
         className="btn-primary mt-4"
-        disabled={busy || order.length === 0}
+        disabled={busy || order.length < minSelections}
         onClick={() => onAnswer(order)}
       >
         Continue
@@ -278,8 +293,8 @@ function MoneyInput({
   onAnswer: (v: unknown) => void;
 }) {
   const [value, setValue] = useState('');
-  const currency = question.currency ?? 'INR';
-  const exponent = ['JPY', 'KRW', 'VND'].includes(currency) ? 0 : 2;
+  const currency = question.currency ?? SUPPORTED_CURRENCY;
+  const exponent = minorUnitExponent(currency);
 
   return (
     <form
@@ -320,8 +335,9 @@ function NumberInput({
   busy: boolean;
   onAnswer: (v: unknown) => void;
 }) {
+  // No reset effect is needed: the parent keys this control by question, so a
+  // new question mounts a fresh input with its own starting value.
   const [value, setValue] = useState(String(question.min ?? 0));
-  useEffect(() => setValue(String(question.min ?? 0)), [question.min]);
 
   return (
     <form
@@ -360,7 +376,15 @@ function BooleanChoice({ busy, onAnswer }: { busy: boolean; onAnswer: (v: unknow
   );
 }
 
-function TextInput({ busy, onAnswer }: { busy: boolean; onAnswer: (v: unknown) => void }) {
+function TextInput({
+  question,
+  busy,
+  onAnswer,
+}: {
+  question: Question;
+  busy: boolean;
+  onAnswer: (v: unknown) => void;
+}) {
   const [value, setValue] = useState('');
   return (
     <form
@@ -374,6 +398,7 @@ function TextInput({ busy, onAnswer }: { busy: boolean; onAnswer: (v: unknown) =
         className="field sm:w-96"
         value={value}
         onChange={(e) => setValue(e.target.value)}
+        maxLength={question.maxLength ?? undefined}
         autoFocus
       />
       <button type="submit" className="btn-primary" disabled={busy}>

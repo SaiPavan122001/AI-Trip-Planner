@@ -9,6 +9,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./currency": {
+      "types": "./dist/currency.d.ts",
+      "default": "./dist/currency.js"
+    },
+    "./provider-status": {
+      "types": "./dist/provider-status.d.ts",
+      "default": "./dist/provider-status.js"
     }
   },
   "scripts": {
@@ -16,7 +24,7 @@
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "lint": "echo \"(lint: configured via eslint in CI)\""
+    "lint": "eslint src"
   },
   "dependencies": {
     "zod": "^3.23.8"

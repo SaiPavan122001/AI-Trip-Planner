@@ -8,6 +8,7 @@ import {
   type TransportOffer,
 } from '@trip/shared';
 import { httpJson, RequestPacer, toProviderFailure } from '../http.js';
+import { droppedWarning, readItems } from '../guard.js';
 import type {
   BusProvider,
   ProviderDescriptor,
@@ -36,6 +37,12 @@ const RemoteFare = z.object({
   refundable: z.boolean().nullable().optional(),
 });
 
+/** ISO 8601 with an offset ("+05:30" or "Z"): a bare local time cannot be checked against connections. */
+const OffsetDateTime = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/, 'a timestamp with a UTC offset')
+  .refine((v) => Number.isFinite(Date.parse(v)), 'not a real timestamp');
+
 const RemoteLeg = z.object({
   operatorCode: z.string().nullable().optional(),
   operatorName: z.string().nullable().optional(),
@@ -46,26 +53,33 @@ const RemoteLeg = z.object({
   destinationCode: z.string().nullable().optional(),
   /** ISO 8601 with offset. The offset is required: a bare local time cannot be
    *  validated against connections or check-in times. */
-  departureAt: z.string(),
-  arrivalAt: z.string(),
+  departureAt: OffsetDateTime,
+  arrivalAt: OffsetDateTime,
   durationMinutes: z.number().int().positive(),
   vehicleType: z.string().nullable().optional(),
 });
 
-const RemoteService = z.object({
-  id: z.string(),
-  legs: z.array(RemoteLeg).min(1),
-  currency: z.string().length(3),
-  /** Fare classes exactly as the operator names them: "3A", "SL", "Sleeper AC". */
-  fares: z.array(RemoteFare).min(1),
-  transfers: z.number().int().min(0).default(0),
-  cancellationPolicy: z.string().nullable().optional(),
-  baggageSummary: z.string().nullable().optional(),
-  revalidationToken: z.string().nullable().optional(),
-});
+const RemoteService = z
+  .object({
+    id: z.string(),
+    legs: z.array(RemoteLeg).min(1),
+    currency: z.string().length(3),
+    /** Fare classes exactly as the operator names them: "3A", "SL", "Sleeper AC". */
+    fares: z.array(RemoteFare).min(1),
+    transfers: z.number().int().min(0).default(0),
+    cancellationPolicy: z.string().nullable().optional(),
+    baggageSummary: z.string().nullable().optional(),
+    revalidationToken: z.string().nullable().optional(),
+  })
+  // A service that arrives before it leaves is not a service.
+  .refine(
+    (s) => s.legs.every((l) => Date.parse(l.arrivalAt) > Date.parse(l.departureAt)),
+    'a leg arrives before it departs',
+  );
 
 const RemoteResponse = z.object({
-  services: z.array(RemoteService),
+  /** Each service is checked on its own, so one bad row does not discard the rest. */
+  services: z.array(z.unknown()),
   /** Operator-reported validity of these prices, if any. */
   validUntil: z.string().nullable().optional(),
   searchId: z.string().nullable().optional(),
@@ -138,6 +152,7 @@ abstract class GenericSurfaceProvider {
           method: 'POST',
           headers: this.authHeaders(),
           timeoutMs: this.config.timeoutMs,
+          ...(req.signal ? { signal: req.signal } : {}),
           body: {
             origin: {
               name: req.origin.name,
@@ -166,10 +181,20 @@ abstract class GenericSurfaceProvider {
       const parsed = RemoteResponse.safeParse(raw);
       if (!parsed.success) {
         return fail(
-          'unavailable',
+          'invalid_response',
           this.descriptor.id,
           this.descriptor.label,
           `${this.descriptor.label} returned a response that does not match the documented provider contract, so its results were discarded.`,
+        );
+      }
+
+      const services = readItems(parsed.data.services, RemoteService);
+      if (services.allInvalid) {
+        return fail(
+          'invalid_response',
+          this.descriptor.id,
+          this.descriptor.label,
+          `${this.descriptor.label} returned services that do not match the documented provider contract, so all of them were discarded.`,
         );
       }
 
@@ -183,10 +208,13 @@ abstract class GenericSurfaceProvider {
       }
 
       const mode = this.descriptor.kinds[0] === 'rail' ? ('train' as const) : ('bus' as const);
-      const offers = parsed.data.services.map((s) =>
-        toTransportOffer(s, mode, this.provenance(parsed.data.searchId ?? null, parsed.data.validUntil ?? null)),
+      const offers = services.valid.map((s) =>
+        toTransportOffer(s.data, mode, req.date, this.provenance(parsed.data.searchId ?? null, parsed.data.validUntil ?? null)),
       );
-      return ok(offers, this.provenance(parsed.data.searchId ?? null), parsed.data.warnings);
+      return ok(offers, this.provenance(parsed.data.searchId ?? null), [
+        ...parsed.data.warnings,
+        ...droppedWarning(this.descriptor.label, services.dropped, 'service(s)'),
+      ]);
     } catch (err) {
       return toProviderFailure(err, this.descriptor.id, this.descriptor.label);
     }
@@ -240,6 +268,7 @@ export class GenericBusProvider extends GenericSurfaceProvider implements BusPro
 function toTransportOffer(
   s: z.infer<typeof RemoteService>,
   mode: 'train' | 'bus',
+  date: string,
   provenance: ProviderProvenance,
 ): TransportOffer {
   const cheapest = [...s.fares].sort((a, b) => a.priceMajor - b.priceMajor)[0]!;
@@ -248,7 +277,8 @@ function toTransportOffer(
   const last = s.legs[s.legs.length - 1]!;
 
   return {
-    id: `${provenance.provider}:${s.id}`,
+    // A service number repeats every day, so the day is part of the id.
+    id: `${provenance.provider}:${date}:${s.id}`,
     mode,
     segments: s.legs.map((l) => ({
       mode,
@@ -277,6 +307,7 @@ function toTransportOffer(
     totalPrice: money(cheapest.priceMajor, s.currency),
     pricePerTraveler: money(cheapest.priceMajor, s.currency),
     itemisedFees: [],
+    unpricedCosts: [],
     // Classes are passed through exactly as the operator names them. There is
     // no normalisation into invented "first/second class" tiers, because a
     // 3A berth and a semi-sleeper seat are not points on one shared scale.

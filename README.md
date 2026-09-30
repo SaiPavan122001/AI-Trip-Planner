@@ -24,9 +24,20 @@ along with the reason — so "no trains" is an answer, not an omission.
 business traveller is never asked about cots. Nobody is asked about rail classes on a route with no
 rail.
 
-**Hard constraints are filters, not suggestions.** Budget, dates, room count, accessibility needs
-and "no overnight travel" remove options before anything is ranked, and every removal is recorded
-with its reason. Nothing is quietly relaxed to make a plan fit a number.
+**Hard constraints are filters, not suggestions.** Dates, room count, accessibility needs and "no
+overnight travel" remove options before anything is ranked, and every removal is recorded with its
+reason. Nothing is quietly relaxed to make a plan fit a number.
+
+**A budget is a guide, unless you say "do not exceed".** By default a plan over budget is still
+shown, flagged and ranked lower, so you can see what a nicer stay costs. Say "do not exceed ₹80,000"
+and it becomes a hard limit: what cannot fit is filtered, with the reason. Plans are ranked on the
+journey and the stay together, so a hotel that suits you counts as much as a good flight.
+
+**Not simply the cheapest.** The planner chooses among real options for reasons it can state. Three readings of "best" (cheapest known cost; fewest changes and shortest time; the best fit for what you ranked) are built from the same search; your travel style moves the balanced pick (a luxury trip is not scored on price alone); rooms are chosen for what you asked (breakfast, room type, sleeping the whole party) before price; and every plan carries a "why this plan" list of what it chose and passed over. A firm budget is kept whenever any combination fits it, and when none does the planner says by how much and what to raise, without loosening it for you.
+
+**One provider failing does not fail the search.** Sources are asked at the same time, each behind a deadline; one that throws, hangs, is rate limited, finds nothing or sends data that does not match its documented shape costs that source's results and adds a note saying which of those it was, for which of flights, hotels, trains and so on. You still get the plans that can be built. Each source has its share of the search's time, safe requests are retried a bounded number of times, a source that keeps failing is left alone for a while, and the drive between two places falls back to a second routing source when the first fails ([details](docs/reliability.md)). The service says `503 busy` rather than accept more searches than it can run, and limits are counted per person and per address, so clearing cookies does not restart them.
+
+**It says when it does not know.** Questions whose answer is written down (a cancellation policy, a permit rule) can be answered from a curated index, with citations, in words that were checked against the source, or with "Insufficient verified information." Prices, timetables and availability are never taken from that index: they come from providers, live ([details, evidence and limits](docs/knowledge.md)). Off unless you switch it on.
 
 **Total cost, not sticker price.** A room ₹1,000 cheaper that adds ₹2,500 a day in taxis is priced
 with the taxis. Accommodation is chosen on what the whole stay costs.
@@ -36,8 +47,32 @@ stated daily allowance are real estimates, labelled as estimates, with the basis
 separately from quoted prices.
 
 **The model routes; it does not source.** The LLM classifies what you typed when you ask for a
-change. It never produces a price, a schedule, a flight number or an availability, and every plan is
-validated afterwards by deterministic rules that cannot be argued with.
+change. It never produces a price, a schedule, a flight number or an availability, and what it returns
+is treated as untrusted: every value is checked against the same rules a form would apply, invalid
+ones are dropped, and the sentence shown to you is written from the validated request, never taken
+from the model. Every plan is validated afterwards by deterministic rules that cannot be argued
+with.
+
+**Pin what you like.** Tick the hotel, or say "make it cheaper but keep the hotel", and it is carried
+over exactly while everything else is optimised again. Pins persist. When new dates or a different
+group make a pinned part impossible to keep, you are told which part and why, not left believing it
+was kept. Changes that would break something you set (new dates, a different group size, a comfort
+upgrade over a firm budget) are explained and asked about before anything happens.
+
+**Agents that understand you; code that decides.** Tell it what you want in your own words and a Requirements Agent reads it, quoting your words for everything it takes from them. Transport, stay and activity agents turn that into soft guidance; an orchestrator runs them, then the deterministic planner (every price, date, total and constraint is code), an independent validation gate, and a writer whose explanation is fact-checked against the plans, so it can only restate what the plan contains. Agents fill gaps and never overwrite your answers, cannot set a price, and cannot make a request you did not make. Without a language model configured, every agent falls back to plain rules and says so.
+
+**Searches run in the background.** Searching many providers takes a while, so it never holds a
+request open: you get a progress view you can leave and come back to, cancel, or reload without losing
+anything. If a worker dies mid-search another picks it up, and results for a trip you changed
+meanwhile are thrown away rather than shown against the wrong trip.
+
+**Your trips are yours.** Planning needs no sign-up: you get a private session, and nobody else can open
+your trips. Sign in with an emailed link (no password) to keep them across devices, and download or
+delete everything from your account.
+
+**Indian rupees only.** Wayfare serves travellers in India, so every budget and price is in INR.
+Prices a provider returns in another currency are set aside with a reason; nothing is converted at an
+invented rate.
 
 ---
 
@@ -74,11 +109,13 @@ zero-credential experience — see [Connecting providers](#connecting-providers)
 
 ```bash
 cp .env.example .env
-# set JWT_SECRET — compose refuses to start without it
+# set SESSION_SECRET (at least 32 characters) — compose refuses to start without it
 docker compose up --build
 ```
 
-Brings up PostgreSQL, Redis, the API and the web app, running migrations first.
+Brings up PostgreSQL, Redis, the API, a separate search worker and the web app, running migrations
+first. Sign-in by email needs `MAIL_WEBHOOK_URL`; without it the app says so and you keep planning
+without signing in. Docker is not required for development: see below.
 
 ---
 
@@ -96,6 +133,7 @@ would add.
 | Things to do, traffic-aware transfers | Google Maps Platform | `GOOGLE_MAPS_API_KEY` | Billed. Brings published opening hours. |
 | Rail | Your authorised provider | `RAIL_PROVIDER_URL` | No global open API exists. Implement the documented contract. |
 | Bus | Your authorised provider | `BUS_PROVIDER_URL` | Same. |
+| Sign-in email | Any mail service, through a webhook you point it at | `MAIL_WEBHOOK_URL`, `MAIL_WEBHOOK_TOKEN` | Optional. Redirects are refused. See [docs/providers.md](docs/providers.md). |
 | Language understanding | Anthropic, or any OpenAI-compatible endpoint | `ANTHROPIC_API_KEY`, or `LLM_BASE_URL` + `LLM_MODEL` | Optional. Without it, plain-language changes use keyword rules. |
 
 Rail and bus have no global open API, and the operators that do expose one require a commercial
@@ -123,6 +161,11 @@ packages/
   engine/      The planner. Classification, questioning, scoring, search
                orchestration, scheduling, costing, validation.
   llm/         Pluggable LLM boundary with a deterministic fallback.
+  telemetry/   Logs, metrics and traces: one system, no vendor lock-in (Phase 7).
+  knowledge/   Answers from a curated index with citations, and the evaluation
+               harness that measures it (Phase 8). Not used by planning.
+  agents/      The planning agents, deterministic services and the orchestrator
+               that coordinates them. Agent output is untrusted and checked.
 apps/
   api/         Fastify service, Prisma persistence, booking state machine.
   web/         Next.js front end.
@@ -140,7 +183,13 @@ the engine imports a vendor SDK; nothing in the UI decides what to ask next.
 npm run dev            # API and web together
 npm run dev:api        # API only
 npm run dev:web        # web only
-npm test               # all workspace tests
+npm run dev:worker     # a search worker on its own (see RUN_WORKER in .env.example)
+npm test               # all workspace tests (needs nothing installed or running)
+npm run test:integration   # the store contract and request path against a real PostgreSQL
+npm run smoke          # the built API + worker end to end on a throwaway PostgreSQL
+npm run eval -w @trip/knowledge   # knowledge evaluation vs the committed baseline (build first; offline)
+npm run ingest:knowledge -w @trip/api -- ./docs.json   # put curated documents in the knowledge index
+npm run lint           # ESLint, all workspaces
 npm run typecheck      # all workspaces
 npm run build          # full build in dependency order
 ```
@@ -157,21 +206,25 @@ npm run db:generate    # Prisma client
 npm run db:migrate     # apply migrations
 ```
 
+Docker is optional. `npm run test:integration` and `npm run smoke` start a private PostgreSQL 16 from the
+`embedded-postgres` dev dependency, apply the migrations to it, and remove it afterwards. To use a
+database you run yourself, set `TEST_DATABASE_URL` to a disposable one whose name contains "test": the
+integration tests empty its tables.
+
+Migrations are additive and never edited once released; add a new one for each schema change.
+
 ---
 
 ## Booking
 
-The booking flow is implemented as an explicit state machine with idempotency keys and mandatory
-re-pricing before payment. Two rules are enforced in code and covered by tests:
+**Booking is not available in this release.** Wayfare plans, compares and adjusts trips; it cannot
+reserve, pay for or ticket anything. Every booking endpoint answers `501 booking_unavailable`, stores
+nothing, and does not collect traveller names or passport numbers.
 
-- A booking may only reach `confirmed` or `ticketed` through a provider response carrying a provider
-  reference. Nothing sets those states optimistically.
-- `awaiting_confirmation` cannot reach payment except through a fresh revalidation. A price quoted
-  twenty minutes ago is not a price anyone may be charged.
-
-No connected adapter currently issues tickets — Amadeus Self-Service requires a separate production
-agreement for order creation — so `POST /v1/bookings/:id/confirm` fails honestly with that reason
-rather than simulating a confirmation. Card data never touches the service.
+The state machine for booking is kept in the code, with the rule that a client can never send a
+payment or provider event, and idempotency that is atomic and per user. None of it is reachable over
+HTTP yet, and it needs a payment provider, a booking-capable provider and encrypted traveller data
+before it can be switched on. Accounts and ownership now exist, which it builds on.
 
 See [docs/booking.md](docs/booking.md).
 
@@ -183,7 +236,11 @@ See [docs/booking.md](docs/booking.md).
 - [Providers](docs/providers.md) — the interfaces, and the contract for your own rail or bus adapter
 - [API reference](docs/api.md) — every endpoint, with request and response shapes
 - [Booking](docs/booking.md) — the state machine and its guarantees
-- [Security](SECURITY.md) — threat model, data handling, reporting a vulnerability
+- [Reliability](docs/reliability.md) — time budgets, retries, circuit breakers, fallback, caching, rate limits, idempotency, overload, and what is not verified
+- [Observability](docs/observability.md) — logs, correlation ids, traces, metrics, health and readiness, the telemetry data policy, alerts
+- [Knowledge and evaluation](docs/knowledge.md) — answers with citations from a curated index, the boundary with live provider facts, prompt-injection defence, and the measured results and limits
+- [Security](SECURITY.md) — what is protected and what is not, data handling, reporting a vulnerability
+- [Threat model](docs/threat-model.md) — what an attacker could realistically do, what stood in the way, what was fixed
 - [Contributing](CONTRIBUTING.md)
 
 ---

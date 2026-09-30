@@ -1,4 +1,15 @@
-import type { ProviderFailure, ProviderResult } from '@trip/shared';
+import {
+  CAPABILITY_LABEL,
+  type ProviderCapability,
+  type ProviderFailure,
+  type ProviderResult,
+} from '@trip/shared';
+import { MemoryCache, type AsyncCache } from '@trip/shared';
+import { CachedActivityProvider, CachedGeocodingProvider, CachedRoutingProvider, ResponseCache } from './cache.js';
+import { FallbackRoutingProvider } from './fallback.js';
+import { type ProviderPolicy } from './guard.js';
+import { configureHttp } from './http.js';
+import { ResilientPolicy, type PolicyEvent } from './policy.js';
 import { AmadeusProvider } from './adapters/amadeus.js';
 import { GenericBusProvider, GenericRailProvider } from './adapters/generic-surface.js';
 import { GooglePlacesProvider, GoogleRoutesProvider } from './adapters/google-maps.js';
@@ -30,6 +41,21 @@ export interface DisabledProvider {
   label: string;
   reason: string;
   requiredEnv: string[];
+  /**
+   * What its absence means for each capability it would serve, in words for a
+   * traveller. One vendor can serve several (Amadeus does flights and hotels),
+   * and each is reported on its own so the two are never merged into one note.
+   */
+  capabilities: Partial<Record<ProviderCapability, string>>;
+}
+
+/** What a host process may supply: a shared cache (Redis), and a way to hear about circuit changes. */
+export interface RegistryExtras {
+  /** A ready-made cache. */
+  cache?: ResponseCache;
+  /** Or only where to keep entries (Redis, shared between instances); the time to live and the limits come from the environment. */
+  cacheStore?: AsyncCache;
+  onPolicyEvent?: (event: PolicyEvent) => void;
 }
 
 export class ProviderRegistry {
@@ -49,43 +75,82 @@ export class ProviderRegistry {
   /** Operator-configured ground tariffs, by currency. The planner uses these
    *  to model local transport cost; with none configured it models nothing. */
   readonly taxiTariffs: ProvidersEnv['taxiTariffs'];
+  /**
+   * Every provider call the planner makes goes through this. The default
+   * isolates failures, enforces the call's share of the search's time, and
+   * keeps a circuit breaker per provider and capability (`policy.ts`).
+   */
+  readonly policy: ProviderPolicy;
+  /** The cache behind the place, route and things-to-do lookups; null when caching is off. */
+  readonly cache: ResponseCache | null;
 
-  constructor(env: ProvidersEnv) {
+  constructor(env: ProvidersEnv, policy?: ProviderPolicy, extras: RegistryExtras = {}) {
     this.taxiTariffs = env.taxiTariffs;
+    configureHttp({ maxRetries: env.policy.maxRetries, maxRetryDelayMs: env.policy.retryMaxDelayMs });
+    this.policy =
+      policy ??
+      new ResilientPolicy({
+        deadlineMs: env.policy.callTimeoutMs,
+        circuit: { failureThreshold: env.policy.circuitFailureThreshold, recoveryTimeoutMs: env.policy.circuitRecoveryMs },
+        ...(extras.onPolicyEvent ? { onEvent: extras.onPolicyEvent } : {}),
+      });
+    this.cache = !env.cache.enabled
+      ? null
+      : (extras.cache ??
+        new ResponseCache({
+          store: extras.cacheStore ?? new MemoryCache({ maxEntries: env.cache.maxEntries }),
+          ttls: { geocodingMs: env.cache.geocodingTtlMs, routingMs: env.cache.routingTtlMs, activitiesMs: env.cache.activitiesTtlMs },
+        }));
+    const cache = this.cache;
     const nominatim = new NominatimProvider(env.nominatim);
-    if (nominatim.isConfigured()) this.geocoding.push(nominatim);
+    if (nominatim.isConfigured()) this.geocoding.push(cache ? new CachedGeocodingProvider(nominatim, cache) : nominatim);
     else
       this.disable(
         'nominatim',
         'OpenStreetMap Nominatim',
         'Set NOMINATIM_USER_AGENT to a contact address. The geocoder is required to resolve places and classify the journey.',
         ['NOMINATIM_USER_AGENT'],
+        { geocoding: 'No place lookup is configured: set NOMINATIM_USER_AGENT to a contact address so places can be resolved and the journey classified.' },
       );
 
-    let osrmRouting: OsrmRoutingProvider | null = null;
     if (env.osrm) {
-      osrmRouting = new OsrmRoutingProvider(env.osrm);
+      const rawOsrm = new OsrmRoutingProvider(env.osrm);
+      const osrmRouting = cache ? new CachedRoutingProvider(rawOsrm, cache) : rawOsrm;
       this.routing.push(osrmRouting);
       this.groundTransport.push(new OsrmTransferProvider(osrmRouting, env.taxiTariffs));
     } else {
-      this.disable('osrm', 'OSRM routing', 'Set OSRM_BASE_URL to enable road routing, transfers and self-drive legs.', [
-        'OSRM_BASE_URL',
-      ]);
+      this.disable(
+        'osrm',
+        'OSRM routing',
+        'Set OSRM_BASE_URL to enable road routing, transfers and self-drive legs.',
+        ['OSRM_BASE_URL'],
+        {
+          routing: 'No road routing is configured: set OSRM_BASE_URL (or GOOGLE_MAPS_API_KEY).',
+          transfers: 'No routing provider is connected, so transfers are timed by assumption and not priced: set OSRM_BASE_URL (or GOOGLE_MAPS_API_KEY) to measure them.',
+          self_drive: 'No routing provider is connected, so a drive cannot be measured: set OSRM_BASE_URL (or GOOGLE_MAPS_API_KEY).',
+        },
+      );
     }
 
     if (env.google) {
-      const googleRouting = new GoogleRoutesProvider(env.google);
+      const rawGoogle = new GoogleRoutesProvider(env.google);
+      const googleRouting = cache ? new CachedRoutingProvider(rawGoogle, cache) : rawGoogle;
       // Google goes first when present: traffic-aware durations are the
       // difference between a transfer that works and one that misses a flight.
       this.routing.unshift(googleRouting);
-      this.activities.push(new GooglePlacesProvider(env.google));
-      if (!osrmRouting) osrmRouting = null;
+      const places = new GooglePlacesProvider(env.google);
+      this.activities.push(cache ? new CachedActivityProvider(places, cache) : places);
     } else {
       this.disable(
         'google-maps',
         'Google Maps Platform',
         'Set GOOGLE_MAPS_API_KEY to include things to do with published opening hours and traffic-aware transfer times.',
         ['GOOGLE_MAPS_API_KEY'],
+        {
+          activities: 'No things-to-do source is connected: set GOOGLE_MAPS_API_KEY to include places with published opening hours.',
+          transfers: 'No traffic-aware routing is connected: set GOOGLE_MAPS_API_KEY for transfer times that reflect traffic.',
+          self_drive: 'No traffic-aware routing is connected: set GOOGLE_MAPS_API_KEY for drive times that reflect traffic.',
+        },
       );
     }
 
@@ -100,6 +165,10 @@ export class ProviderRegistry {
         'Amadeus Self-Service',
         'Set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search real flight and hotel inventory.',
         ['AMADEUS_CLIENT_ID', 'AMADEUS_CLIENT_SECRET'],
+        {
+          flights: 'No flight provider is connected: set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search real flights.',
+          hotels: 'No hotel provider is connected: set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search real rooms and rates.',
+        },
       );
     }
 
@@ -117,6 +186,7 @@ export class ProviderRegistry {
         'Rail provider',
         'No rail provider is connected. Point RAIL_PROVIDER_URL at a service you are authorised to use that implements the surface-transport contract in docs/providers.md.',
         ['RAIL_PROVIDER_URL'],
+        { trains: 'No rail provider is connected, so trains were not searched. Point RAIL_PROVIDER_URL at a service you are authorised to use (contract in docs/providers.md).' },
       );
     }
 
@@ -134,21 +204,30 @@ export class ProviderRegistry {
         'Bus provider',
         'No bus provider is connected. Point BUS_PROVIDER_URL at a service you are authorised to use that implements the surface-transport contract in docs/providers.md.',
         ['BUS_PROVIDER_URL'],
+        { buses: 'No bus provider is connected, so buses were not searched. Point BUS_PROVIDER_URL at a service you are authorised to use (contract in docs/providers.md).' },
       );
     }
 
-    const primaryRouting = this.routing[0];
+    // With more than one routing provider, a drive is measured by the preferred
+    // one and falls back to the next, and says so when it does.
+    const primaryRouting = this.routing.length > 1 ? new FallbackRoutingProvider(this.routing, this.policy) : this.routing[0];
     if (primaryRouting) {
       this.selfDrive = new SelfDriveProvider(primaryRouting, env.selfDriveProfile);
     }
   }
 
-  static fromEnv(env: NodeJS.ProcessEnv = process.env): ProviderRegistry {
-    return new ProviderRegistry(loadProvidersEnv(env));
+  static fromEnv(env: NodeJS.ProcessEnv = process.env, extras: RegistryExtras = {}): ProviderRegistry {
+    return new ProviderRegistry(loadProvidersEnv(env), undefined, extras);
   }
 
-  private disable(id: string, label: string, reason: string, requiredEnv: string[]): void {
-    this.disabled.push({ id, label, reason, requiredEnv });
+  private disable(
+    id: string,
+    label: string,
+    reason: string,
+    requiredEnv: string[],
+    capabilities: DisabledProvider['capabilities'] = {},
+  ): void {
+    this.disabled.push({ id, label, reason, requiredEnv, capabilities });
   }
 
   /** Rail/bus adapters are usually country-scoped; skip ones that cannot help. */
@@ -160,17 +239,23 @@ export class ProviderRegistry {
     return this.buses.filter((p) => covers(p, countryCode));
   }
 
-  /** The note the UI shows when a capability has no provider at all. */
-  missingCapabilityNote(capability: string, ids: string[]): ProviderFailure {
-    const matching = this.disabled.filter((d) => ids.includes(d.id));
-    const detail = matching.length
-      ? matching.map((d) => `${d.label}: ${d.reason}`).join(' ')
-      : `No adapter is registered for ${capability}.`;
+  /**
+   * The note the UI shows when a capability has no provider at all. It says
+   * what is missing *for that capability*: Flights and Hotels both come from
+   * Amadeus, and a message about one must not stand in for the other.
+   */
+  missingCapabilityNote(capability: ProviderCapability, ids: string[]): ProviderFailure {
+    const label = CAPABILITY_LABEL[capability];
+    const specific = this.disabled
+      .filter((d) => ids.includes(d.id))
+      .map((d) => d.capabilities[capability])
+      .filter((m): m is string => Boolean(m));
     return {
       status: 'not_configured',
       provider: ids.join(','),
-      providerLabel: capability,
-      message: detail,
+      providerLabel: label,
+      capability,
+      message: specific.length ? specific.join(' ') : `No adapter is registered for ${label.toLowerCase()}.`,
       occurredAt: new Date().toISOString(),
     };
   }

@@ -90,6 +90,12 @@ export function PlanCards({
                 </p>
               ) : null}
 
+              {plan.cost.notIncluded.length > 0 ? (
+                <p className="mt-2 text-xs text-ink-faint">
+                  Not included: {plan.cost.notIncluded.map((n) => n.label.toLowerCase()).join(', ')}.
+                </p>
+              ) : null}
+
               {plan.tradeoffs.length > 0 ? (
                 <ul className="mt-4 space-y-1.5 text-xs text-ink-soft">
                   {plan.tradeoffs.map((t) => (
@@ -101,6 +107,30 @@ export function PlanCards({
                     </li>
                   ))}
                 </ul>
+              ) : null}
+
+              {plan.choices.length > 0 ? (
+                <details className="mt-3 text-xs">
+                  <summary className="cursor-pointer text-ink-faint">Why this plan</summary>
+                  <ul className="mt-2 space-y-3 text-ink-soft">
+                    {plan.choices.map((c) => (
+                      <li key={`${c.topic}-${c.chosen}`}>
+                        <p className="font-medium text-ink">{c.chosen}</p>
+                        <p>{c.why}</p>
+                        {c.alternatives.length > 0 ? (
+                          <ul className="mt-1 space-y-0.5 text-ink-faint">
+                            {c.alternatives.map((a) => (
+                              <li key={a.label}>
+                                Not taken: {a.label}
+                                {a.note ? ` (${a.note})` : ''}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
               ) : null}
 
               {blockers.length > 0 ? (

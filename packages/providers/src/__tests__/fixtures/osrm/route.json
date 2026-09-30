@@ -1,0 +1,17 @@
+{
+  "code": "Ok",
+  "routes": [
+    {
+      "distance": 32450.7,
+      "duration": 2385.2,
+      "geometry": "_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+      "legs": [{ "distance": 32450.7, "duration": 2385.2, "summary": "", "steps": [] }],
+      "weight_name": "routability",
+      "weight": 2385.2
+    }
+  ],
+  "waypoints": [
+    { "hint": "abc", "distance": 4.1, "name": "", "location": [78.4867, 17.385] },
+    { "hint": "def", "distance": 7.9, "name": "", "location": [78.4294, 17.2403] }
+  ]
+}

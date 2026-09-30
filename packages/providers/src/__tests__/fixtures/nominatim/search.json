@@ -1,0 +1,21 @@
+[
+  {
+    "place_id": 297841623,
+    "licence": "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright",
+    "osm_type": "relation",
+    "osm_id": 2426370,
+    "lat": "17.360589",
+    "lon": "78.4740613",
+    "category": "boundary",
+    "type": "administrative",
+    "display_name": "Hyderabad, Hyderabad District, Telangana, India",
+    "name": "Hyderabad",
+    "address": {
+      "city": "Hyderabad",
+      "state_district": "Hyderabad District",
+      "state": "Telangana",
+      "country": "India",
+      "country_code": "in"
+    }
+  }
+]

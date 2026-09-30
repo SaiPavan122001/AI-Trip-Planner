@@ -1,12 +1,61 @@
-# Local stack: PostgreSQL, Redis, the API and the web app.
+# Local stack: PostgreSQL, Redis, the API, a separate search worker, and the web app.
 #
-#   cp .env.example .env    # fill in whatever provider keys you have
+#   cp .env.example .env    # set SESSION_SECRET, plus whatever provider keys you have
 #   docker compose up --build
+#
+# The API queues searches and a separate worker service carries them out (the
+# API sets RUN_WORKER=false), which is the topology to expect in production.
+# Scale searches with:  docker compose up --scale worker=3
 #
 # The planner starts with no provider credentials at all and reports which
 # sources it cannot search. Add keys to .env and restart to widen its reach.
 
 name: wayfare
+
+# Everything the API and the worker both read, so the two cannot drift apart.
+x-app-env: &app-env
+  NODE_ENV: production
+  DATABASE_URL: postgresql://wayfare:${POSTGRES_PASSWORD:-wayfare}@postgres:5432/wayfare
+  REDIS_URL: redis://redis:6379
+  SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env (at least 32 characters) - it is required in production}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  PLANNING_TIMEOUT_MS: ${PLANNING_TIMEOUT_MS:-60000}
+  RUN_LEASE_MS: ${RUN_LEASE_MS:-30000}
+  RUN_MAX_ATTEMPTS: ${RUN_MAX_ATTEMPTS:-3}
+  RUN_CONCURRENCY: ${RUN_CONCURRENCY:-2}
+  PLAN_RUNS_PER_DAY_ANONYMOUS: ${PLAN_RUNS_PER_DAY_ANONYMOUS:-15}
+  PLAN_RUNS_PER_DAY_SIGNED_IN: ${PLAN_RUNS_PER_DAY_SIGNED_IN:-60}
+  PLAN_RUNS_PER_DAY_PER_ADDRESS: ${PLAN_RUNS_PER_DAY_PER_ADDRESS:-60}
+  MAX_QUEUED_RUNS: ${MAX_QUEUED_RUNS:-200}
+  MAX_ACTIVE_RUNS_PER_USER: ${MAX_ACTIVE_RUNS_PER_USER:-3}
+  RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+  RATE_LIMIT_ADDRESS_MAX: ${RATE_LIMIT_ADDRESS_MAX:-600}
+  # Knowledge answers (docs/knowledge.md). Off unless switched on; documents are ingested by a script.
+  KNOWLEDGE_ENABLED: ${KNOWLEDGE_ENABLED:-false}
+  KNOWLEDGE_NAMESPACE: ${KNOWLEDGE_NAMESPACE:-public}
+  # Provider credentials. Every one is optional; an unset value disables
+  # that adapter and the UI says which source is missing and why.
+  NOMINATIM_USER_AGENT: ${NOMINATIM_USER_AGENT:-}
+  NOMINATIM_BASE_URL: ${NOMINATIM_BASE_URL:-https://nominatim.openstreetmap.org}
+  OSRM_BASE_URL: ${OSRM_BASE_URL:-}
+  AMADEUS_CLIENT_ID: ${AMADEUS_CLIENT_ID:-}
+  AMADEUS_CLIENT_SECRET: ${AMADEUS_CLIENT_SECRET:-}
+  AMADEUS_ENV: ${AMADEUS_ENV:-test}
+  GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+  RAIL_PROVIDER_URL: ${RAIL_PROVIDER_URL:-}
+  RAIL_PROVIDER_KEY: ${RAIL_PROVIDER_KEY:-}
+  RAIL_PROVIDER_COVERAGE: ${RAIL_PROVIDER_COVERAGE:-global}
+  BUS_PROVIDER_URL: ${BUS_PROVIDER_URL:-}
+  BUS_PROVIDER_KEY: ${BUS_PROVIDER_KEY:-}
+  BUS_PROVIDER_COVERAGE: ${BUS_PROVIDER_COVERAGE:-global}
+  GROUND_TRANSPORT_TARIFFS: ${GROUND_TRANSPORT_TARIFFS:-}
+  SELF_DRIVE_PROFILE: ${SELF_DRIVE_PROFILE:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
+  LLM_PROVIDER: ${LLM_PROVIDER:-}
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_MODEL: ${LLM_MODEL:-}
 
 services:
   postgres:
@@ -42,7 +91,7 @@ services:
       timeout: 3s
       retries: 20
 
-  # One-shot: applies migrations, then exits. The API waits for it to succeed.
+  # One-shot: applies migrations, then exits. The API and worker wait for it.
   migrate:
     build:
       context: .
@@ -63,41 +112,46 @@ services:
     ports:
       - '4000:4000'
     environment:
-      NODE_ENV: production
+      <<: *app-env
       PORT: 4000
-      DATABASE_URL: postgresql://wayfare:${POSTGRES_PASSWORD:-wayfare}@postgres:5432/wayfare
-      REDIS_URL: redis://redis:6379
+      # Searches run in the worker service below, not in this process.
+      RUN_WORKER: 'false'
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env — it is required in production}
-      DEFAULT_CURRENCY: ${DEFAULT_CURRENCY:-INR}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      # Provider credentials. Every one is optional; an unset value disables
-      # that adapter and the UI says which source is missing and why.
-      NOMINATIM_USER_AGENT: ${NOMINATIM_USER_AGENT:-}
-      NOMINATIM_BASE_URL: ${NOMINATIM_BASE_URL:-https://nominatim.openstreetmap.org}
-      OSRM_BASE_URL: ${OSRM_BASE_URL:-}
-      AMADEUS_CLIENT_ID: ${AMADEUS_CLIENT_ID:-}
-      AMADEUS_CLIENT_SECRET: ${AMADEUS_CLIENT_SECRET:-}
-      AMADEUS_ENV: ${AMADEUS_ENV:-test}
-      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
-      RAIL_PROVIDER_URL: ${RAIL_PROVIDER_URL:-}
-      RAIL_PROVIDER_KEY: ${RAIL_PROVIDER_KEY:-}
-      RAIL_PROVIDER_COVERAGE: ${RAIL_PROVIDER_COVERAGE:-global}
-      BUS_PROVIDER_URL: ${BUS_PROVIDER_URL:-}
-      BUS_PROVIDER_KEY: ${BUS_PROVIDER_KEY:-}
-      BUS_PROVIDER_COVERAGE: ${BUS_PROVIDER_COVERAGE:-global}
-      GROUND_TRANSPORT_TARIFFS: ${GROUND_TRANSPORT_TARIFFS:-}
-      SELF_DRIVE_PROFILE: ${SELF_DRIVE_PROFILE:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
-      LLM_PROVIDER: ${LLM_PROVIDER:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-}
+      WEB_BASE_URL: ${WEB_BASE_URL:-http://localhost:3000}
+      # Behind a proxy, set this to match it (see .env.example).
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      # Compose serves plain HTTP on localhost, where a Secure cookie would be
+      # dropped by some browsers. Turn it back on (the production default)
+      # once there is HTTPS in front.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
+      # Sign-in by email needs a mail webhook; without one it is switched off
+      # and the app says so.
+      MAIL_WEBHOOK_URL: ${MAIL_WEBHOOK_URL:-}
+      MAIL_WEBHOOK_TOKEN: ${MAIL_WEBHOOK_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Carries out the searches the API queues. Stateless: run as many as needed.
+  worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    command: ['node', 'dist/worker.js']
+    environment:
+      <<: *app-env
+    # The image's health check probes the API's port, which a worker does not
+    # serve.
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully

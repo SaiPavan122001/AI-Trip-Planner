@@ -1,9 +1,11 @@
-import type { ProviderRegistry } from '@trip/providers';
+import { toProviderFailure, type ProviderRegistry } from '@trip/providers';
 import {
   compare,
   findHard,
   isOk,
+  noteFromFailure,
   toMajor,
+  type ProviderCapability,
   type ConstraintSet,
   type IsoDate,
   type JourneyClassification,
@@ -14,6 +16,11 @@ import {
   type TravelerProfile,
   type TripIntent,
 } from '@trip/shared';
+import { budgetCeiling } from './constraints.js';
+import { keepSupportedTransport } from './currency.js';
+import { primaryFailure, sweepProviders } from './provider-calls.js';
+import { knownTransportCost } from './pricing.js';
+import { smallHoursArrival, timeWindowViolations, type LegZones } from './time-windows.js';
 import { scoreTransportOffers, type ScoredCandidate } from './scoring.js';
 
 /**
@@ -36,6 +43,12 @@ export interface ModeResult {
   bestForYou: TransportOffer | null;
   /** Why this mode has nothing, when it has nothing. */
   note: ProviderNote | null;
+  /**
+   * Everything the providers asked for this mode had to say, including
+   * failures of a provider whose neighbour did answer: a mode with results
+   * can still be missing a source, and the traveller is told.
+   */
+  notes: ProviderNote[];
 }
 
 export interface TransportSearchResult {
@@ -53,12 +66,21 @@ export interface TransportSearchDeps {
   classification: JourneyClassification;
   profile: TravelerProfile;
   constraints: ConstraintSet;
+  /** Stops every provider call in the search when it fires. */
+  signal?: AbortSignal;
 }
 
-function noteFrom(status: string, provider: string, label: string, message: string): ProviderNote {
+function noteFrom(
+  status: string,
+  provider: string,
+  label: string,
+  message: string,
+  capability?: ProviderCapability,
+): ProviderNote {
   return {
     provider,
     providerLabel: label,
+    ...(capability ? { capability } : {}),
     status,
     message,
     occurredAt: new Date().toISOString(),
@@ -74,6 +96,7 @@ function noteFrom(status: string, provider: string, label: string, message: stri
 export async function enrichWithAirports(
   registry: ProviderRegistry,
   place: Place,
+  signal?: AbortSignal,
 ): Promise<{ place: Place; note: ProviderNote | null }> {
   if (place.airports.length > 0 || place.iataCityCode) return { place, note: null };
   const amadeus = registry.amadeus;
@@ -85,14 +108,15 @@ export async function enrichWithAirports(
         'amadeus',
         'Amadeus',
         `No airport reference data is available for ${place.name}: set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search flights.`,
+        'flights',
       ),
     };
   }
-  const res = await amadeus.nearestAirports(place.coordinates);
+  const res = await amadeus.nearestAirports(place.coordinates, undefined, signal);
   if (!isOk(res)) {
     return {
       place,
-      note: noteFrom(res.status, res.provider, res.providerLabel, res.message),
+      note: noteFrom(res.status, res.provider, res.providerLabel, res.message, 'flights'),
     };
   }
   return { place: { ...place, airports: res.data }, note: null };
@@ -102,7 +126,7 @@ export async function searchTransport(
   deps: TransportSearchDeps,
   direction: 'outbound' | 'return',
 ): Promise<TransportSearchResult> {
-  const { registry, intent, classification, profile, constraints } = deps;
+  const { intent, classification, profile, constraints } = deps;
   const outbound = direction === 'outbound';
   const date = outbound ? intent.departureDate : intent.returnDate;
   if (!date) {
@@ -122,7 +146,9 @@ export async function searchTransport(
   const notes: ProviderNote[] = [];
   const results: ModeResult[] = [];
 
-  const searches = modes.map(async (mode): Promise<ModeResult> => {
+  // Each mode is searched on its own and can only fail on its own: one that
+  // throws becomes a note about that mode, and the others carry on.
+  const searchMode = async (mode: TransportMode): Promise<ModeResult> => {
     switch (mode) {
       case 'flight':
         return searchFlightMode(deps, from, to, date);
@@ -132,20 +158,24 @@ export async function searchTransport(
         return searchBusMode(deps, from, to, date);
       case 'self_drive':
         return searchDriveMode(deps, from, to, date);
-      default:
-        return {
-          mode,
-          offers: [],
-          cheapest: null,
-          fastest: null,
-          bestForYou: null,
-          note: noteFrom(
-            'unsupported_capability',
-            'none',
-            MODE_LABEL[mode] ?? mode,
-            `${MODE_LABEL[mode] ?? mode} is possible for this route but no provider is connected for it.`,
-          ),
-        };
+      default: {
+        const note = noteFrom(
+          'unsupported_capability',
+          'none',
+          MODE_LABEL[mode] ?? mode,
+          `${MODE_LABEL[mode] ?? mode} is possible for this route but no provider is connected for it.`,
+        );
+        return { ...emptyMode(mode), note, notes: [note] };
+      }
+    }
+  };
+  const searches = modes.map(async (mode): Promise<ModeResult> => {
+    try {
+      return await searchMode(mode);
+    } catch (err) {
+      const failure = toProviderFailure(err, 'engine', MODE_LABEL[mode] ?? mode);
+      const note = noteFromFailure(failure, MODE_CAPABILITY[mode]);
+      return { ...emptyMode(mode), note, notes: [note] };
     }
   });
 
@@ -153,32 +183,59 @@ export async function searchTransport(
   const filtered: Array<{ offerId: string; reason: string }> = [];
 
   for (const result of settled) {
-    const { kept, dropped } = applyHardConstraints(result.offers.map((o) => o.candidate), constraints, profile);
+    // Currency first: nothing below may compare a rupee price with another.
+    const supported = keepSupportedTransport(
+      result.offers.map((o) => o.candidate),
+      MODE_CAPABILITY[result.mode],
+    );
+    notes.push(...supported.notes);
+    const { kept, dropped } = applyHardConstraints(supported.kept, constraints, profile, {
+      departure: from.timezone,
+      arrival: to.timezone,
+    });
     filtered.push(...dropped);
     const scored = scoreTransportOffers(kept, profile);
-    const enriched: ModeResult = {
+
+    // Why the mode has nothing to show, if it has nothing. A provider's own
+    // explanation comes first; then "everything was in another currency";
+    // then "your requirements ruled everything out". The last two are the
+    // planner's own words, and are added to the notes here.
+    const engineNote: ProviderNote | null =
+      result.note !== null
+        ? null
+        : (supported.kept.length === 0 && result.offers.length > 0 ? (supported.notes[0] ?? null) : null) ??
+          (kept.length === 0 && result.offers.length > 0
+            ? noteFrom(
+                'no_availability',
+                'engine',
+                MODE_LABEL[result.mode] ?? result.mode,
+                `Every ${MODE_LABEL[result.mode] ?? result.mode} option found was ruled out by your requirements.`,
+                MODE_CAPABILITY[result.mode],
+              )
+            : null);
+    notes.push(...result.notes);
+    if (engineNote && !supported.notes.includes(engineNote)) notes.push(engineNote);
+
+    results.push({
       ...result,
       offers: scored,
       cheapest: pickCheapest(kept),
       fastest: pickFastest(kept),
       bestForYou: scored[0]?.candidate ?? null,
-      note:
-        result.note ??
-        (kept.length === 0 && result.offers.length > 0
-          ? noteFrom(
-              'no_availability',
-              'engine',
-              MODE_LABEL[result.mode] ?? result.mode,
-              `Every ${MODE_LABEL[result.mode] ?? result.mode} option found was ruled out by your requirements.`,
-            )
-          : null),
-    };
-    if (enriched.note) notes.push(enriched.note);
-    results.push(enriched);
+      note: result.note ?? engineNote,
+    });
   }
 
   return { direction, date, modes: results, notes, filtered };
 }
+
+/** What each mode's notes are about. */
+const MODE_CAPABILITY: Partial<Record<TransportMode, ProviderCapability>> = {
+  flight: 'flights',
+  train: 'trains',
+  bus: 'buses',
+  self_drive: 'self_drive',
+};
 
 const MODE_LABEL: Record<string, string> = {
   flight: 'Flights',
@@ -190,6 +247,32 @@ const MODE_LABEL: Record<string, string> = {
   ferry: 'Ferry',
 };
 
+/** A mode nothing is connected for: the registry's own words for what is missing. */
+function missingMode(
+  registry: ProviderRegistry,
+  mode: TransportMode,
+  capability: ProviderCapability,
+  ids: string[],
+): ModeResult {
+  const note = noteFromFailure(registry.missingCapabilityNote(capability, ids), capability);
+  return { ...emptyMode(mode), note, notes: [note] };
+}
+
+/** What a sweep of providers means for one mode. */
+function modeFrom<T extends TransportOffer>(
+  mode: TransportMode,
+  capability: ProviderCapability,
+  sweep: { data: T[]; notes: ProviderNote[]; failures: Parameters<typeof primaryFailure>[0] },
+): ModeResult {
+  const primary = sweep.data.length > 0 ? null : primaryFailure(sweep.failures);
+  return {
+    ...emptyMode(mode),
+    offers: sweep.data.map(asUnscored),
+    note: primary ? noteFromFailure(primary, capability) : null,
+    notes: sweep.notes,
+  };
+}
+
 async function searchFlightMode(
   deps: TransportSearchDeps,
   from: Place,
@@ -197,26 +280,22 @@ async function searchFlightMode(
   date: IsoDate,
 ): Promise<ModeResult> {
   const { registry, intent, profile, constraints } = deps;
-  const empty = emptyMode('flight');
-  if (registry.flights.length === 0) {
-    return { ...empty, note: fromFailure(registry.missingCapabilityNote('Flights', ['amadeus'])) };
-  }
+  if (registry.flights.length === 0) return missingMode(registry, 'flight', 'flights', ['amadeus']);
 
   const [origin, destination] = await Promise.all([
-    enrichWithAirports(registry, from),
-    enrichWithAirports(registry, to),
+    enrichWithAirports(registry, from, deps.signal),
+    enrichWithAirports(registry, to, deps.signal),
   ]);
-  if (origin.note) return { ...empty, note: origin.note };
-  if (destination.note) return { ...empty, note: destination.note };
+  const airportNote = origin.note ?? destination.note;
+  if (airportNote) return { ...emptyMode('flight'), note: airportNote, notes: [airportNote] };
 
   const maxStops = findHard(constraints, 'max_stops')?.value ?? profile.transport.maxStops;
-  const transportBudget = constraints.budget.transport;
+  // Only a firm budget asks the provider to filter; a guide leaves every
+  // option in the comparison.
+  const transportBudget = budgetCeiling(constraints, 'transport');
 
-  const all: TransportOffer[] = [];
-  let lastNote: ProviderNote | null = null;
-
-  for (const provider of registry.flights) {
-    const res = await provider.searchFlights({
+  const sweep = await sweepProviders(registry, registry.flights, 'flights', 'searchFlights', (provider) =>
+    provider.searchFlights({
       origin: origin.place,
       destination: destination.place,
       departureDate: date,
@@ -231,12 +310,10 @@ async function searchFlightMode(
       // and it keeps obviously unaffordable inventory out of the comparison.
       maxPrice: transportBudget ? Math.round(toMajor(transportBudget)) : null,
       limit: 20,
-    });
-    if (isOk(res)) all.push(...res.data);
-    else lastNote = fromFailure(res);
-  }
-
-  return { ...emptyMode('flight'), offers: all.map(asUnscored), note: all.length ? null : lastNote };
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    }),
+  );
+  return modeFrom('flight', 'flights', sweep);
 }
 
 async function searchRailMode(
@@ -247,16 +324,9 @@ async function searchRailMode(
 ): Promise<ModeResult> {
   const { registry, intent } = deps;
   const providers = registry.railFor(from.countryCode);
-  if (providers.length === 0) {
-    return {
-      ...emptyMode('train'),
-      note: fromFailure(registry.missingCapabilityNote('Trains', ['rail'])),
-    };
-  }
-  const all: TransportOffer[] = [];
-  let lastNote: ProviderNote | null = null;
-  for (const provider of providers) {
-    const res = await provider.searchTrains({
+  if (providers.length === 0) return missingMode(registry, 'train', 'trains', ['rail']);
+  const sweep = await sweepProviders(registry, providers, 'trains', 'searchTrains', (provider) =>
+    provider.searchTrains({
       origin: from,
       destination: to,
       date,
@@ -264,11 +334,10 @@ async function searchRailMode(
       currency: intent.currency,
       classCode: null,
       limit: 20,
-    });
-    if (isOk(res)) all.push(...res.data);
-    else lastNote = fromFailure(res);
-  }
-  return { ...emptyMode('train'), offers: all.map(asUnscored), note: all.length ? null : lastNote };
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    }),
+  );
+  return modeFrom('train', 'trains', sweep);
 }
 
 async function searchBusMode(
@@ -279,16 +348,9 @@ async function searchBusMode(
 ): Promise<ModeResult> {
   const { registry, intent } = deps;
   const providers = registry.busesFor(from.countryCode);
-  if (providers.length === 0) {
-    return {
-      ...emptyMode('bus'),
-      note: fromFailure(registry.missingCapabilityNote('Buses', ['bus'])),
-    };
-  }
-  const all: TransportOffer[] = [];
-  let lastNote: ProviderNote | null = null;
-  for (const provider of providers) {
-    const res = await provider.searchBuses({
+  if (providers.length === 0) return missingMode(registry, 'bus', 'buses', ['bus']);
+  const sweep = await sweepProviders(registry, providers, 'buses', 'searchBuses', (provider) =>
+    provider.searchBuses({
       origin: from,
       destination: to,
       date,
@@ -296,11 +358,10 @@ async function searchBusMode(
       currency: intent.currency,
       classCode: null,
       limit: 20,
-    });
-    if (isOk(res)) all.push(...res.data);
-    else lastNote = fromFailure(res);
-  }
-  return { ...emptyMode('bus'), offers: all.map(asUnscored), note: all.length ? null : lastNote };
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    }),
+  );
+  return modeFrom('bus', 'buses', sweep);
 }
 
 async function searchDriveMode(
@@ -311,21 +372,19 @@ async function searchDriveMode(
 ): Promise<ModeResult> {
   const { registry, intent, profile } = deps;
   const selfDrive = registry.selfDrive;
-  if (!selfDrive) {
-    return {
-      ...emptyMode('self_drive'),
-      note: fromFailure(registry.missingCapabilityNote('Self-drive', ['osrm', 'google-maps'])),
-    };
-  }
-  const res = await selfDrive.estimate({
-    origin: from,
-    destination: to,
-    date,
-    departLocalTime: profile.transport.earliestDepartureLocal ?? '08:00',
-    currency: intent.currency,
+  if (!selfDrive) return missingMode(registry, 'self_drive', 'self_drive', ['osrm', 'google-maps']);
+  const sweep = await sweepProviders(registry, [selfDrive], 'self_drive', 'estimate', async (provider) => {
+    const res = await provider.estimate({
+      origin: from,
+      destination: to,
+      date,
+      departLocalTime: profile.transport.earliestDepartureLocal ?? '08:00',
+      currency: intent.currency,
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    });
+    return isOk(res) ? { ...res, data: [res.data] } : res;
   });
-  if (!isOk(res)) return { ...emptyMode('self_drive'), note: fromFailure(res) };
-  return { ...emptyMode('self_drive'), offers: [asUnscored(res.data)] };
+  return modeFrom('self_drive', 'self_drive', sweep);
 }
 
 /**
@@ -337,11 +396,13 @@ export function applyHardConstraints(
   offers: TransportOffer[],
   constraints: ConstraintSet,
   profile: TravelerProfile,
+  /** Where the leg starts and ends, so time windows are read in local time. */
+  zones: LegZones,
 ): { kept: TransportOffer[]; dropped: Array<{ offerId: string; reason: string }> } {
   const kept: TransportOffer[] = [];
   const dropped: Array<{ offerId: string; reason: string }> = [];
   const maxStops = findHard(constraints, 'max_stops')?.value ?? null;
-  const transportBudget = constraints.budget.transport;
+  const transportBudget = budgetCeiling(constraints, 'transport');
   const requiredBags = findHard(constraints, 'required_checked_bags')?.value ?? 0;
   const needsRefundable = profile.transport.refundableRequired;
 
@@ -353,16 +414,29 @@ export function applyHardConstraints(
       });
       continue;
     }
-    if (
-      transportBudget &&
-      transportBudget.currency === offer.totalPrice.currency &&
-      compare(offer.totalPrice, transportBudget) > 0
-    ) {
-      dropped.push({
-        offerId: offer.id,
-        reason: 'Costs more than the transport budget on its own.',
-      });
-      continue;
+    if (transportBudget) {
+      // A price that cannot be compared with the budget cannot be shown to
+      // meet it. Skipping the check, as a currency mismatch used to, would
+      // quietly relax a hard constraint.
+      const foreign = [offer.totalPrice, ...offer.itemisedFees.map((f) => f.amount)].find(
+        (m) => m.currency !== transportBudget.currency,
+      );
+      if (foreign) {
+        dropped.push({
+          offerId: offer.id,
+          reason: `Priced in ${foreign.currency}, so it cannot be checked against your ${transportBudget.currency} budget.`,
+        });
+        continue;
+      }
+      // What the option is known to cost, including separately charged
+      // extras, is what has to fit the budget.
+      if (compare(knownTransportCost(offer), transportBudget) > 0) {
+        dropped.push({
+          offerId: offer.id,
+          reason: 'Costs more than your firm budget on its own.',
+        });
+        continue;
+      }
     }
     if (needsRefundable && offer.refundable === false) {
       dropped.push({ offerId: offer.id, reason: 'Non-refundable, and you required flexibility.' });
@@ -375,6 +449,16 @@ export function applyHardConstraints(
       dropped.push({
         offerId: offer.id,
         reason: 'Travels overnight, and you asked to avoid that.',
+      });
+      continue;
+    }
+    // Asked for as a safety preference: a filter, like "no overnight travel",
+    // so the traveller sees what it cost them and can relax it.
+    const lateArrival = profile.transport.avoidRedEyeArrival ? smallHoursArrival(offer, zones) : null;
+    if (lateArrival) {
+      dropped.push({
+        offerId: offer.id,
+        reason: `Arrives at ${lateArrival} local time, in the small hours, and you asked to avoid late arrivals.`,
       });
       continue;
     }
@@ -391,6 +475,11 @@ export function applyHardConstraints(
         continue;
       }
     }
+    const timing = timeWindowViolations(offer, constraints, zones);
+    if (timing.length > 0) {
+      dropped.push({ offerId: offer.id, reason: timing.map((t) => t.reason).join(' ') });
+      continue;
+    }
     kept.push(offer);
   }
   return { kept, dropped };
@@ -398,7 +487,7 @@ export function applyHardConstraints(
 
 function pickCheapest(offers: TransportOffer[]): TransportOffer | null {
   if (offers.length === 0) return null;
-  return [...offers].sort((a, b) => compare(a.totalPrice, b.totalPrice))[0]!;
+  return [...offers].sort((a, b) => compare(knownTransportCost(a), knownTransportCost(b)))[0]!;
 }
 
 function pickFastest(offers: TransportOffer[]): TransportOffer | null {
@@ -407,18 +496,9 @@ function pickFastest(offers: TransportOffer[]): TransportOffer | null {
 }
 
 function emptyMode(mode: TransportMode): ModeResult {
-  return { mode, offers: [], cheapest: null, fastest: null, bestForYou: null, note: null };
+  return { mode, offers: [], cheapest: null, fastest: null, bestForYou: null, note: null, notes: [] };
 }
 
 function asUnscored(offer: TransportOffer): ScoredCandidate<TransportOffer> {
   return { candidate: offer, score: 0, breakdown: {} };
-}
-
-function fromFailure(f: {
-  status: string;
-  provider: string;
-  providerLabel: string;
-  message: string;
-}): ProviderNote {
-  return noteFrom(f.status, f.provider, f.providerLabel, f.message);
 }

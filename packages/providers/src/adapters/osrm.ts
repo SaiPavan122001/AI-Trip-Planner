@@ -1,11 +1,16 @@
 import {
   fail,
+  localParts,
   money,
+  multiply,
   ok,
+  seatedTravelers,
   type ProviderResult,
   type TransferOffer,
 } from '@trip/shared';
 import { httpJson, RequestPacer, toProviderFailure } from '../http.js';
+import { readResponse } from '../guard.js';
+import { OsrmRouteResponse } from '../schemas.js';
 import type {
   GroundTransportProvider,
   ProviderDescriptor,
@@ -21,10 +26,8 @@ import type {
  * not know about traffic or fares, and this adapter never pretends otherwise.
  */
 
-interface OsrmResponse {
-  code: string;
-  routes?: Array<{ distance: number; duration: number; geometry?: string }>;
-}
+/** Passengers one car carries. A larger party is priced as several cars, not one. */
+export const TAXI_SEATS = 4;
 
 const ROUTING_DESCRIPTOR: ProviderDescriptor = {
   id: 'osrm',
@@ -70,11 +73,13 @@ export class OsrmRoutingProvider implements RoutingProvider {
     }
     const coords = `${req.from.lon},${req.from.lat};${req.to.lon},${req.to.lat}`;
     try {
-      const res = await this.pacer.run(() =>
-        httpJson<OsrmResponse>(`${this.config.baseUrl}/route/v1/${req.profile}/${coords}`, {
+      const raw = await this.pacer.run(() =>
+        httpJson<unknown>(`${this.config.baseUrl}/route/v1/${req.profile}/${coords}`, {
           query: { overview: 'simplified', geometries: 'polyline', alternatives: false },
+          ...(req.signal ? { signal: req.signal } : {}),
         }),
       );
+      const res = readResponse(OsrmRouteResponse, raw, 'route');
       const route = res.routes?.[0];
       if (res.code !== 'Ok' || !route) {
         return fail(
@@ -129,7 +134,7 @@ export class OsrmTransferProvider implements GroundTransportProvider {
   readonly descriptor = TRANSFER_DESCRIPTOR;
 
   constructor(
-    private readonly routing: OsrmRoutingProvider,
+    private readonly routing: RoutingProvider,
     private readonly tariffs: Record<string, TaxiTariff>,
   ) {}
 
@@ -154,10 +159,13 @@ export class OsrmTransferProvider implements GroundTransportProvider {
     const offers: TransferOffer[] = [];
     const warnings: string[] = [];
 
-    const price = tariff ? estimateFare(tariff, distanceKm, durationMinutes, req.at) : null;
+    // Cars for the whole party, not one car for any number of people.
+    const vehicles = Math.max(1, Math.ceil(seatedTravelers(req.party) / TAXI_SEATS));
+    const perCar = tariff ? estimateFare(tariff, distanceKm, durationMinutes, req.at, req.timezone) : null;
+    const price = perCar ? multiply(perCar, vehicles) : null;
     if (!tariff) {
       warnings.push(
-        `No taxi tariff configured for ${req.currency}, so this transfer is costed at zero and flagged for the traveller. Set GROUND_TRANSPORT_TARIFFS to include it.`,
+        'No taxi fare is available for this transfer, so it is shown with its distance and time and listed as not included in the total.',
       );
     }
 
@@ -168,12 +176,13 @@ export class OsrmTransferProvider implements GroundTransportProvider {
       to: req.to,
       distanceKm,
       durationMinutes,
+      vehicles,
       price,
       priceIsEstimate: price !== null,
       estimateBasis: tariff
-        ? `Configured ${req.currency} tariff: base ${tariff.baseFare} + ${tariff.perKm}/km + ${tariff.perMinute}/min`
+        ? `Configured ${req.currency} tariff: base ${tariff.baseFare} + ${tariff.perKm}/km + ${tariff.perMinute}/min${vehicles > 1 ? `, for ${vehicles} cars` : ''}`
         : null,
-      accessible: req.accessibleRequired ? null : null,
+      accessible: null,
       provenance: provenance(TRANSFER_DESCRIPTOR),
     });
 
@@ -192,6 +201,7 @@ export class OsrmTransferProvider implements GroundTransportProvider {
           to: req.to,
           distanceKm: walking.data.distanceKm,
           durationMinutes: walking.data.durationMinutes,
+          vehicles: 1,
           price: money(0, req.currency),
           priceIsEstimate: false,
           estimateBasis: null,
@@ -216,8 +226,11 @@ function estimateFare(
   distanceKm: number,
   durationMinutes: number,
   at: string,
+  timezone: string,
 ) {
-  const hour = new Date(at).getHours();
+  // The night tariff follows the clock where the ride happens. `Date#getHours`
+  // would read the clock of whatever machine the planner runs on.
+  const hour = localParts(at, timezone).hour;
   const night = hour >= 22 || hour < 5;
   const base = tariff.baseFare + tariff.perKm * distanceKm + tariff.perMinute * durationMinutes;
   return money(base * (night ? tariff.nightMultiplier : 1), tariff.currency);

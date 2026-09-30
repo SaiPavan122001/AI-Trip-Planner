@@ -3,10 +3,10 @@ import {
   compare,
   findHard,
   haversineKm,
-  isOk,
-  money,
   multiply,
   nightsBetween,
+  noteFromFailure,
+  plannerNote,
   seatedTravelers,
   toMajor,
   type ActivityOffer,
@@ -19,7 +19,12 @@ import {
   type TravelerProfile,
   type TripIntent,
 } from '@trip/shared';
-import { cheapestRoom, scoreHotels, type ScoredCandidate } from './scoring.js';
+import { describeNeeds, unconfirmedHotelNeeds } from './accessibility.js';
+import { budgetCeiling } from './constraints.js';
+import { keepSupportedHotels } from './currency.js';
+import { sweepProviders } from './provider-calls.js';
+import { chooseRoom, styleTargets, withEffectivePriorities } from './optimize.js';
+import { scoreHotels, type ScoredCandidate } from './scoring.js';
 
 /**
  * Accommodation search and selection.
@@ -51,6 +56,8 @@ export interface HotelSearchDeps {
   activities: ActivityOffer[];
   /** Per-km cost used to model local transport. Null when no tariff exists. */
   localTransportPerKm: Money | null;
+  /** Stops every provider call in the search when it fires. */
+  signal?: AbortSignal;
 }
 
 /** The point the trip actually revolves around, used to bias the search. */
@@ -73,35 +80,23 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
     return { ...emptyResult(), notes: [] };
   }
   if (registry.hotels.length === 0) {
-    const missing = registry.missingCapabilityNote('Hotels', ['amadeus']);
-    return {
-      ...emptyResult(),
-      notes: [
-        {
-          provider: missing.provider,
-          providerLabel: missing.providerLabel,
-          status: missing.status,
-          message: missing.message,
-          occurredAt: missing.occurredAt,
-        },
-      ],
-    };
+    const missing = registry.missingCapabilityNote('hotels', ['amadeus']);
+    return { ...emptyResult(), notes: [noteFromFailure(missing, 'hotels')] };
   }
 
   const centre = activityCentroid(activities, intent.destination.coordinates);
-  const accommodationBudget = constraints.budget.accommodation;
+  const accommodationBudget = budgetCeiling(constraints, 'accommodation');
   const maxPerNight = accommodationBudget
     ? Math.round(toMajor(accommodationBudget) / nights)
     : null;
 
-  const notes: ProviderNote[] = [];
-  const offers: HotelOffer[] = [];
-
-  for (const provider of registry.hotels) {
-    const res = await provider.searchHotels({
+  // Narrowed here, because a callback would not keep the check made above.
+  const checkOut = intent.returnDate;
+  const sweep = await sweepProviders(registry, registry.hotels, 'hotels', 'searchHotels', (provider) =>
+    provider.searchHotels({
       destination: intent.destination,
       checkIn: intent.departureDate,
-      checkOut: intent.returnDate,
+      checkOut,
       rooms: profile.accommodation.rooms,
       party: intent.travelers,
       minCategory: profile.accommodation.minCategory,
@@ -112,65 +107,70 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
       near: centre,
       radiusKm: profile.accommodation.maxDistanceToActivitiesKm ?? 15,
       limit: 30,
-    });
-    if (isOk(res)) {
-      offers.push(...res.data);
-      for (const warning of res.warnings) {
-        notes.push({
-          provider: res.provenance.provider,
-          providerLabel: res.provenance.providerLabel,
-          status: 'ok',
-          message: warning,
-          occurredAt: res.provenance.retrievedAt,
-        });
-      }
-    } else {
-      notes.push({
-        provider: res.provider,
-        providerLabel: res.providerLabel,
-        status: res.status,
-        message: res.message,
-        occurredAt: res.occurredAt,
-      });
-    }
-  }
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    }),
+  );
+  const offers: HotelOffer[] = sweep.data;
+  const notes: ProviderNote[] = [...sweep.notes];
 
-  const { kept, filtered } = filterHotels(offers, intent, profile, constraints, nights);
+  // Currency first: nothing below may compare a rupee rate with another.
+  const supported = keepSupportedHotels(offers);
+  notes.push(...supported.notes);
+  const { kept, filtered } = filterHotels(supported.kept, intent, profile, constraints, nights);
 
   const distanceKm = new Map<string, number>();
   const transportCost = new Map<string, Money>();
   for (const hotel of kept) {
     const km = haversineKm(hotel.coordinates, centre);
     distanceKm.set(hotel.id, Number(km.toFixed(2)));
-    transportCost.set(hotel.id, modelLocalTransport(km, nights, deps.localTransportPerKm, intent.currency));
+    const modelled = modelLocalTransport(km, nights, deps.localTransportPerKm);
+    if (modelled) transportCost.set(hotel.id, modelled);
   }
 
-  const candidates = scoreHotels(kept, { profile, distanceKm, transportCost });
+  // Scored on what the traveller ranked, or on what their travel style implies
+  // when they ranked nothing, so a luxury trip is not scored on price alone.
+  const candidates = scoreHotels(kept, {
+    profile: withEffectivePriorities(profile),
+    distanceKm,
+    transportCost,
+    targetCategory: styleTargets(profile).targetCategory,
+  });
   const best = candidates[0]?.candidate ?? null;
 
   const selected: SelectedHotel | null = best
     ? {
         hotel: best,
-        room: cheapestRoom(best),
+        room: chooseRoom(best, {
+          archetype: 'balanced',
+          profile,
+          constraints,
+          rooms: profile.accommodation.rooms,
+          guests: seatedTravelers(intent.travelers),
+        }).room,
         rooms: profile.accommodation.rooms,
         checkIn: intent.departureDate,
         checkOut: intent.returnDate,
         nights,
         distanceToActivitiesKm: distanceKm.get(best.id) ?? null,
         impliedDailyTransportCost: deps.localTransportPerKm
-          ? modelLocalTransport(distanceKm.get(best.id) ?? 0, 1, deps.localTransportPerKm, intent.currency)
+          ? modelLocalTransport(distanceKm.get(best.id) ?? 0, 1, deps.localTransportPerKm)
           : null,
       }
     : null;
 
   if (!selected && offers.length > 0) {
-    notes.push({
-      provider: 'engine',
-      providerLabel: 'Planner',
-      status: 'no_availability',
-      message: `${offers.length} propert${offers.length === 1 ? 'y was' : 'ies were'} found but none met your requirements. Relaxing the star rating or cancellation policy would open more options.`,
-      occurredAt: new Date().toISOString(),
-    });
+    const found = `${offers.length} propert${offers.length === 1 ? 'y was' : 'ies were'} found but none met your requirements; the reason for each is listed.`;
+    const accessibilityNeeds = findHard(constraints, 'required_accessibility')?.value ?? [];
+    const byAccessibility = filtered.some((f) => f.reason.startsWith('Does not publish that it offers'));
+    notes.push(
+      plannerNote(
+        byAccessibility
+          ? `${found} Hotel providers rarely publish accessibility details, so properties that do not state ${describeNeeds(accessibilityNeeds)} were not included. Contacting properties directly is the most reliable way to confirm.`
+          : `${found} Relaxing one of them, such as the star rating or cancellation policy, would open more options.`,
+        'no_availability',
+        'hotels',
+      ),
+    );
   }
 
   return { candidates, selected, notes, filtered, distanceKm, localTransportCost: transportCost };
@@ -197,9 +197,10 @@ export function modelLocalTransport(
   distanceKm: number,
   nights: number,
   perKm: Money | null,
-  currency: string,
-): Money {
-  if (!perKm) return money(0, currency);
+): Money | null {
+  // With no tariff there is no basis for a figure. Unknown is not ₹0: the
+  // hotel ranking then leaves local travel out for every property equally.
+  if (!perKm) return null;
   const dailyKm = distanceKm * 4;
   return multiply(perKm, dailyKm * Math.max(1, nights));
 }
@@ -215,16 +216,29 @@ function filterHotels(
   const filtered: Array<{ hotelId: string; reason: string }> = [];
   const requiredRooms = findHard(constraints, 'required_rooms')?.value ?? profile.accommodation.rooms;
   const needsFreeCancellation = Boolean(findHard(constraints, 'required_free_cancellation'));
-  const accommodationBudget = constraints.budget.accommodation;
+  const accommodationBudget = budgetCeiling(constraints, 'accommodation');
   const minCategory = profile.accommodation.minCategory;
   const rooms = Math.max(1, requiredRooms);
   const guests = seatedTravelers(intent.travelers);
+
+  const accessibilityNeeds = findHard(constraints, 'required_accessibility')?.value ?? [];
 
   for (const hotel of offers) {
     if (minCategory !== null && hotel.category !== null && hotel.category < minCategory) {
       filtered.push({
         hotelId: hotel.id,
         reason: `Rated ${hotel.category}; you asked for ${minCategory} or above.`,
+      });
+      continue;
+    }
+
+    // Accessibility is a hard requirement, so a property is only kept when
+    // it publishes that it meets every stated need. Silence is not a yes.
+    const unconfirmed = unconfirmedHotelNeeds(hotel, accessibilityNeeds);
+    if (unconfirmed.length > 0) {
+      filtered.push({
+        hotelId: hotel.id,
+        reason: `Does not publish that it offers ${describeNeeds(unconfirmed)}. This is missing information, not a statement that the property is inaccessible.`,
       });
       continue;
     }
@@ -243,31 +257,42 @@ function filterHotels(
       continue;
     }
 
-    const cheapest = [...usableRooms].sort((a, b) => compare(a.totalPrice, b.totalPrice))[0]!;
-    if (
-      accommodationBudget &&
-      accommodationBudget.currency === cheapest.totalPrice.currency &&
-      compare(cheapest.totalPrice, accommodationBudget) > 0
-    ) {
-      filtered.push({
-        hotelId: hotel.id,
-        reason: `Cheapest rate for ${nights} night(s) exceeds the accommodation budget.`,
-      });
-      continue;
-    }
-
     // Occupancy is a hard requirement: four people do not go into one double
-    // just because the rate is attractive.
-    const occupancyOk = cheapest.maxOccupancy === null || cheapest.maxOccupancy * rooms >= guests;
-    if (!occupancyOk) {
+    // just because the rate is attractive. It is checked room by room, so a
+    // property whose cheapest room is too small is still kept for the larger
+    // room it also has, and only dropped when none of its rooms will do.
+    const sleepsParty = usableRooms.filter((r) => r.maxOccupancy === null || r.maxOccupancy * rooms >= guests);
+    if (sleepsParty.length === 0) {
+      const largest = Math.max(...usableRooms.map((r) => r.maxOccupancy ?? 0));
       filtered.push({
         hotelId: hotel.id,
-        reason: `Rooms here sleep ${cheapest.maxOccupancy}, which is not enough for ${guests} guest(s) in ${rooms} room(s).`,
+        reason: `Rooms here sleep ${largest} at most, which is not enough for ${guests} guest(s) in ${rooms} room(s).`,
       });
       continue;
     }
 
-    kept.push({ ...hotel, rooms: usableRooms });
+    const cheapest = [...sleepsParty].sort((a, b) => compare(a.totalPrice, b.totalPrice))[0]!;
+    if (accommodationBudget) {
+      // A rate that cannot be compared with the budget cannot be shown to
+      // meet it; skipping the check would quietly relax a hard constraint.
+      if (cheapest.totalPrice.currency !== accommodationBudget.currency) {
+        filtered.push({
+          hotelId: hotel.id,
+          reason: `Priced in ${cheapest.totalPrice.currency}, so it cannot be checked against your ${accommodationBudget.currency} budget.`,
+        });
+        continue;
+      }
+      // Every room booked is paid for, so it is the whole booking that has to fit.
+      if (compare(multiply(cheapest.totalPrice, rooms), accommodationBudget) > 0) {
+        filtered.push({
+          hotelId: hotel.id,
+          reason: `Cheapest rate for ${nights} night(s)${rooms > 1 ? ` in ${rooms} rooms` : ''} is more than your firm budget on its own.`,
+        });
+        continue;
+      }
+    }
+
+    kept.push({ ...hotel, rooms: sleepsParty });
   }
   return { kept, filtered };
 }

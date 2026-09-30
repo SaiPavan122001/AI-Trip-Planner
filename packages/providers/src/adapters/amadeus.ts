@@ -1,4 +1,5 @@
 import {
+  SingleFlight,
   fail,
   money,
   ok,
@@ -11,7 +12,21 @@ import {
   type TransportOffer,
   type TransportSegment,
 } from '@trip/shared';
-import { httpJson, RequestPacer, toProviderFailure } from '../http.js';
+import { InvalidResponseError, httpJson, RequestPacer, toProviderFailure } from '../http.js';
+import { droppedWarning, readItems, readResponse } from '../guard.js';
+import {
+  AmadeusAirport,
+  AmadeusAirportsResponse,
+  AmadeusFlightOffer,
+  AmadeusFlightSearchResponse,
+  AmadeusHotel,
+  AmadeusHotelListResponse,
+  AmadeusHotelOffer,
+  AmadeusHotelOffersResponse,
+  AmadeusPricingResponse,
+  AmadeusSingleHotelOfferResponse,
+  AmadeusToken,
+} from '../schemas.js';
 import type {
   FlightProvider,
   FlightSearchRequest,
@@ -46,98 +61,12 @@ export interface AmadeusConfig {
   minIntervalMs: number;
 }
 
-interface TokenResponse {
-  access_token: string;
-  expires_in: number;
-}
-
-interface AmadeusFlightOffer {
-  id: string;
-  itineraries: Array<{
-    duration: string;
-    segments: Array<{
-      departure: { iataCode: string; terminal?: string; at: string };
-      arrival: { iataCode: string; terminal?: string; at: string };
-      carrierCode: string;
-      number: string;
-      aircraft?: { code: string };
-      duration?: string;
-      numberOfStops?: number;
-    }>;
-  }>;
-  price: {
-    currency: string;
-    total: string;
-    base?: string;
-    grandTotal?: string;
-    fees?: Array<{ amount: string; type: string }>;
-  };
-  numberOfBookableSeats?: number;
-  validatingAirlineCodes?: string[];
-  travelerPricings?: Array<{
-    price: { total: string; currency: string };
-    fareDetailsBySegment: Array<{
-      cabin?: string;
-      class?: string;
-      includedCheckedBags?: { quantity?: number; weight?: number };
-    }>;
-  }>;
-  pricingOptions?: { refundableFare?: boolean };
-}
-
-interface AmadeusHotel {
-  hotelId: string;
-  name: string;
-  geoCode: { latitude: number; longitude: number };
-  address?: { countryCode?: string; lines?: string[]; cityName?: string };
-  rating?: string;
-  amenities?: string[];
-  distance?: { value: number; unit: string };
-}
-
-interface AmadeusHotelOffer {
-  hotel: {
-    hotelId: string;
-    name: string;
-    rating?: string;
-    latitude?: number;
-    longitude?: number;
-    cityCode?: string;
-    amenities?: string[];
-    address?: { lines?: string[]; cityName?: string };
-  };
-  available: boolean;
-  offers: Array<{
-    id: string;
-    checkInDate: string;
-    checkOutDate: string;
-    rateFamilyEstimated?: { code?: string; type?: string };
-    boardType?: string;
-    room?: {
-      type?: string;
-      typeEstimated?: { category?: string; beds?: number; bedType?: string };
-      description?: { text?: string };
-    };
-    guests?: { adults?: number };
-    price: {
-      currency: string;
-      base?: string;
-      total: string;
-      taxes?: Array<{ included?: boolean }>;
-    };
-    policies?: {
-      cancellations?: Array<{ deadline?: string; description?: { text?: string }; amount?: string }>;
-      paymentType?: string;
-      refundable?: { cancellationRefund?: string };
-    };
-  }>;
-}
-
 export class AmadeusProvider implements FlightProvider, HotelProvider {
   readonly descriptor: ProviderDescriptor;
   private readonly baseUrl: string;
   private readonly pacer: RequestPacer;
   private token: { value: string; expiresAt: number } | null = null;
+  private readonly tokenFlight = new SingleFlight<string>();
 
   constructor(private readonly config: AmadeusConfig) {
     this.descriptor = FLIGHT_DESCRIPTOR(config.environment);
@@ -180,7 +109,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
     }
 
     try {
-      const res = await this.get<{ data: AmadeusFlightOffer[]; dictionaries?: { carriers?: Record<string, string> } }>(
+      const raw = await this.get<unknown>(
         '/v2/shopping/flight-offers',
         {
           originLocationCode: originCode,
@@ -202,10 +131,18 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           maxPrice: req.maxPrice ?? undefined,
           max: req.limit,
         },
+        req.signal,
       );
 
+      const res = readResponse(AmadeusFlightSearchResponse, raw, 'flight search');
       const carriers = res.dictionaries?.carriers ?? {};
-      const offers = res.data.map((o) => this.toTransportOffer(o, carriers, req.party));
+      const items = readItems(res.data, AmadeusFlightOffer);
+      if (items.allInvalid) throw new InvalidResponseError('flight search', 'no offer had the documented shape');
+      // Each offer keeps the payload Amadeus sent: re-pricing needs every field of it back.
+      // Amadeus numbers offers within one response ("1", "2", ...), so the same number
+      // comes back for the outward and the return search. The search is part of the id.
+      const scope = `${originCode}-${destinationCode}-${req.departureDate}`;
+      const offers = items.valid.map((o) => this.toTransportOffer(o.data, carriers, req.party, o.raw, scope));
       if (offers.length === 0) {
         return fail(
           'no_availability',
@@ -214,7 +151,11 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           `No flights were returned for ${originCode} to ${destinationCode} on ${req.departureDate}.`,
         );
       }
-      return ok(offers, this.provenance(`${originCode}-${destinationCode}-${req.departureDate}`));
+      return ok(
+        offers,
+        this.provenance(`${originCode}-${destinationCode}-${req.departureDate}`),
+        droppedWarning(this.descriptor.label, items.dropped, 'flight offer(s)'),
+      );
     } catch (err) {
       return toProviderFailure(err, this.descriptor.id, this.descriptor.label);
     }
@@ -226,11 +167,13 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
    * `price_changed` failure so the booking machine can ask the traveller
    * before charging a different amount.
    */
-  async revalidateFlight(offerId: string, token: string): Promise<ProviderResult<TransportOffer>> {
+  async revalidateFlight(token: string): Promise<ProviderResult<TransportOffer>> {
     if (!this.isConfigured()) return this.notConfigured();
     let payload: AmadeusFlightOffer;
+    let rawPayload: unknown;
     try {
-      payload = JSON.parse(token) as AmadeusFlightOffer;
+      rawPayload = JSON.parse(token);
+      payload = AmadeusFlightOffer.parse(rawPayload);
     } catch {
       return fail(
         'invalid_request',
@@ -240,12 +183,15 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
       );
     }
     try {
-      const res = await this.post<{ data: { flightOffers: AmadeusFlightOffer[] } }>(
-        '/v1/shopping/flight-offers/pricing',
-        { data: { type: 'flight-offers-pricing', flightOffers: [payload] } },
+      const res = readResponse(
+        AmadeusPricingResponse,
+        await this.post<unknown>('/v1/shopping/flight-offers/pricing', {
+          data: { type: 'flight-offers-pricing', flightOffers: [rawPayload] },
+        }),
+        'flight pricing',
       );
-      const priced = res.data.flightOffers[0];
-      if (!priced) {
+      const rawPriced = res.data.flightOffers[0];
+      if (rawPriced === undefined) {
         return fail(
           'booking_unavailable',
           this.descriptor.id,
@@ -253,8 +199,9 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           'Amadeus no longer offers this fare. Choose another option.',
         );
       }
+      const priced = readResponse(AmadeusFlightOffer, rawPriced, 'flight pricing');
       const party = inferParty(payload);
-      return ok(this.toTransportOffer(priced, {}, party), this.provenance(offerId));
+      return ok(this.toTransportOffer(priced, {}, party, rawPriced, 'priced'), this.provenance(payload.id));
     } catch (err) {
       return toProviderFailure(err, this.descriptor.id, this.descriptor.label);
     }
@@ -264,6 +211,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
   async nearestAirports(
     coords: Coordinates,
     radiusKm = 300,
+    signal?: AbortSignal,
   ): Promise<
     ProviderResult<
       Array<{ iataCode: string; name: string; distanceKm: number; coordinates: Coordinates | null }>
@@ -271,22 +219,21 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
   > {
     if (!this.isConfigured()) return this.notConfigured();
     try {
-      const res = await this.get<{
-        data: Array<{
-          iataCode: string;
-          name: string;
-          geoCode?: { latitude: number; longitude: number };
-          distance?: { value: number; unit: string };
-        }>;
-      }>('/v1/reference-data/locations/airports', {
-        latitude: coords.lat,
-        longitude: coords.lon,
-        radius: Math.min(radiusKm, 500),
-        'page[limit]': 5,
-        sort: 'distance',
-      });
-      const airports = res.data
-        .filter((a) => a.iataCode)
+      const res = readResponse(
+        AmadeusAirportsResponse,
+        await this.get<unknown>('/v1/reference-data/locations/airports', {
+          latitude: coords.lat,
+          longitude: coords.lon,
+          radius: Math.min(radiusKm, 500),
+          'page[limit]': 5,
+          sort: 'distance',
+        }, signal),
+        'airport search',
+      );
+      const items = readItems(res.data, AmadeusAirport);
+      if (items.allInvalid) throw new InvalidResponseError('airport search', 'no airport had the documented shape');
+      const airports = items.valid
+        .map((v) => v.data)
         .map((a) => ({
           iataCode: a.iataCode,
           name: a.name,
@@ -304,7 +251,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           'No airport was found within range of this location.',
         );
       }
-      return ok(airports, this.provenance());
+      return ok(airports, this.provenance(), droppedWarning(this.descriptor.label, items.dropped, 'airport(s)'));
     } catch (err) {
       return toProviderFailure(err, this.descriptor.id, this.descriptor.label);
     }
@@ -316,8 +263,21 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
     if (!this.isConfigured()) return this.notConfigured();
     const centre = req.near ?? req.destination.coordinates;
 
+    // Amadeus takes guests per room, not for the whole booking. Sending the
+    // whole party for each of several rooms asked for far more people than
+    // the traveller has, and priced (or hid) rooms accordingly.
+    const perRoom = guestsPerRoom(req.party, req.rooms);
+    if (perRoom > MAX_GUESTS_PER_ROOM) {
+      return fail(
+        'invalid_request',
+        this.descriptor.id,
+        this.descriptor.label,
+        `${perRoom} guests per room is more than a room search allows (${MAX_GUESTS_PER_ROOM}). Add rooms to search for this group.`,
+      );
+    }
+
     try {
-      const list = await this.get<{ data: AmadeusHotel[] }>(
+      const listRaw = await this.get<unknown>(
         '/v1/reference-data/locations/hotels/by-geocode',
         {
           latitude: centre.lat,
@@ -327,7 +287,11 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           ratings: req.minCategory ? ratingsAtOrAbove(req.minCategory).join(',') : undefined,
           hotelSource: 'ALL',
         },
+        req.signal,
       );
+      const listed = readItems(readResponse(AmadeusHotelListResponse, listRaw, 'hotel list').data, AmadeusHotel);
+      if (listed.allInvalid) throw new InvalidResponseError('hotel list', 'no property had the documented shape');
+      const list = { data: listed.valid.map((v) => v.data) };
       const hotelIds = list.data.slice(0, 40).map((h) => h.hotelId);
       if (hotelIds.length === 0) {
         return fail(
@@ -339,11 +303,11 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
       }
 
       const geoById = new Map(list.data.map((h) => [h.hotelId, h]));
-      const offersRes = await this.get<{ data: AmadeusHotelOffer[]; warnings?: Array<{ detail?: string }> }>(
+      const offersRaw = await this.get<unknown>(
         '/v3/shopping/hotel-offers',
         {
           hotelIds: hotelIds.join(','),
-          adults: Math.max(1, req.party.adults),
+          adults: perRoom,
           checkInDate: req.checkIn,
           checkOutDate: req.checkOut,
           roomQuantity: req.rooms,
@@ -351,9 +315,14 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           bestRateOnly: false,
           priceRange: req.maxPricePerNight ? `0-${req.maxPricePerNight}` : undefined,
         },
+        req.signal,
       );
 
-      const hotels = offersRes.data
+      const offersRes = readResponse(AmadeusHotelOffersResponse, offersRaw, 'hotel offers');
+      const offerItems = readItems(offersRes.data, AmadeusHotelOffer);
+      if (offerItems.allInvalid) throw new InvalidResponseError('hotel offers', 'no offer had the documented shape');
+      const hotels = offerItems.valid
+        .map((v) => v.data)
         .filter((h) => h.available && h.offers.length > 0)
         .map((h) => this.toHotelOffer(h, geoById.get(h.hotel.hotelId), req))
         .filter((h): h is HotelOffer => h !== null)
@@ -371,17 +340,35 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
       const warnings = (offersRes.warnings ?? [])
         .map((w) => w.detail)
         .filter((d): d is string => Boolean(d));
+      warnings.push(...droppedWarning(this.descriptor.label, offerItems.dropped + listed.dropped, 'property listing(s)'));
+      if (req.party.children > 0) {
+        // The search has no children or ages, so children are counted as
+        // guests. Child rates and free-child policies are not requested.
+        warnings.push(
+          'Children are counted as guests when searching rooms; child ages and child rates are not requested, so prices may differ at the property.',
+        );
+      }
       return ok(hotels, this.provenance(`${req.checkIn}-${req.checkOut}`), warnings);
     } catch (err) {
       return toProviderFailure(err, this.descriptor.id, this.descriptor.label);
     }
   }
 
-  async revalidateHotel(offerId: string): Promise<ProviderResult<HotelOffer>> {
+  /**
+   * For Amadeus the hotel token is the offer id from the search. It is
+   * encoded before it goes into the path, because it can arrive from a
+   * client and must not be able to address a different endpoint.
+   */
+  async revalidateHotel(token: string): Promise<ProviderResult<HotelOffer>> {
     if (!this.isConfigured()) return this.notConfigured();
+    const offerId = token;
     try {
-      const res = await this.get<{ data: AmadeusHotelOffer }>(`/v3/shopping/hotel-offers/${offerId}`, {});
-      const hotel = this.toHotelOffer(res.data, undefined, null);
+      const res = readResponse(
+        AmadeusSingleHotelOfferResponse,
+        await this.get<unknown>(`/v3/shopping/hotel-offers/${encodeURIComponent(offerId)}`, {}),
+        'hotel offer',
+      );
+      const hotel = this.toHotelOffer(readResponse(AmadeusHotelOffer, res.data, 'hotel offer'), undefined, null);
       if (!hotel) {
         return fail(
           'booking_unavailable',
@@ -402,6 +389,8 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
     o: AmadeusFlightOffer,
     carriers: Record<string, string>,
     party: { adults: number; children: number; infants: number },
+    rawOffer: unknown,
+    scope: string,
   ): TransportOffer {
     const segments: TransportSegment[] = o.itineraries.flatMap((it) =>
       it.segments.map((s) => ({
@@ -463,14 +452,22 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
     });
 
     return {
-      id: `amadeus-flight:${o.id}`,
+      id: `amadeus-flight:${scope}:${o.id}`,
       mode: 'flight',
       segments,
       totalPrice: total,
       pricePerTraveler: money(Number(o.price.grandTotal ?? o.price.total) / paying, currency),
       itemisedFees: (o.price.fees ?? [])
         .filter((f) => Number(f.amount) > 0)
-        .map((f) => ({ label: humaniseFee(f.type), amount: money(Number(f.amount), currency), included: true })),
+        .map((f) => ({
+          label: humaniseFee(f.type),
+          amount: money(Number(f.amount), currency),
+          // Already inside the quoted grand total, and quoted, not modelled.
+          included: true,
+          isEstimate: false,
+          basis: null,
+        })),
+      unpricedCosts: [],
       fareClasses,
       selectedFareCode: fareClasses[0]?.code ?? null,
       totalDurationMinutes: o.itineraries.reduce(
@@ -487,7 +484,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           : null,
       // The full offer payload is the only accepted input to Amadeus pricing,
       // so it is carried along verbatim for revalidation.
-      revalidationToken: JSON.stringify(o),
+      revalidationToken: JSON.stringify(rawOffer),
       provenance: this.provenance(o.id),
     };
   }
@@ -517,10 +514,14 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
           offer.room?.typeEstimated?.beds !== undefined
             ? `${offer.room.typeEstimated.beds} ${offer.room.typeEstimated.bedType ?? 'bed'}`
             : null,
-        maxOccupancy: offer.guests?.adults ?? null,
+        // `guests.adults` is how many guests this rate was priced for, which
+        // is what was asked, not how many the room sleeps. Amadeus does not
+        // state room capacity, so it stays unknown rather than borrowing a
+        // number that looks like one.
+        maxOccupancy: null,
         boardType: offer.boardType ?? null,
         breakfastIncluded: offer.boardType ? /BREAKFAST/i.test(offer.boardType) : null,
-        refundable: cancellation ? cancellation.amount === undefined || Number(cancellation.amount) === 0 : null,
+        refundable: mapRefundable(offer.policies),
         cancellationDeadline: cancellation?.deadline ?? null,
         cancellationPolicy: cancellation?.description?.text ?? null,
         totalPrice: total,
@@ -536,7 +537,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
       id: `amadeus-hotel:${h.hotel.hotelId}`,
       name: h.hotel.name,
       propertyType: null,
-      category: h.hotel.rating ? Number(h.hotel.rating) : geo?.rating ? Number(geo.rating) : null,
+      category: finiteOrNull(h.hotel.rating ?? geo?.rating),
       guestRating: null,
       guestRatingCount: null,
       coordinates: { lat, lon },
@@ -553,29 +554,43 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
 
   // ------------------------------------------------------------- transport
 
-  private async accessToken(): Promise<string> {
-    if (this.token && this.token.expiresAt > Date.now() + 30_000) return this.token.value;
-    const res = await httpJson<TokenResponse>(`${this.baseUrl}/v1/security/oauth2/token`, {
-      method: 'POST',
-      form: true,
-      body: {
-        grant_type: 'client_credentials',
-        client_id: this.config.clientId,
-        client_secret: this.config.clientSecret,
-      },
-      retries: 1,
-    });
+  /**
+   * One token request at a time: a search asks for a token from every call it
+   * makes in parallel, and each fetching its own would be a burst of identical
+   * requests to an endpoint that is itself rate limited.
+   */
+  private accessToken(): Promise<string> {
+    if (this.token && this.token.expiresAt > Date.now() + 30_000) return Promise.resolve(this.token.value);
+    return this.tokenFlight.run('token', () => this.fetchToken());
+  }
+
+  private async fetchToken(): Promise<string> {
+    const res = readResponse(
+      AmadeusToken,
+      await httpJson<unknown>(`${this.baseUrl}/v1/security/oauth2/token`, {
+        method: 'POST',
+        form: true,
+        body: {
+          grant_type: 'client_credentials',
+          client_id: this.config.clientId,
+          client_secret: this.config.clientSecret,
+        },
+        retries: 1,
+      }),
+      'token',
+    );
     this.token = { value: res.access_token, expiresAt: Date.now() + res.expires_in * 1000 };
     return this.token.value;
   }
 
-  private async get<T>(path: string, query: Record<string, unknown>): Promise<T> {
+  private async get<T>(path: string, query: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
     const token = await this.accessToken();
     return this.pacer.run(() =>
       httpJson<T>(`${this.baseUrl}${path}`, {
         query: query as Record<string, string | number | boolean | undefined>,
         headers: { Authorization: `Bearer ${token}` },
         timeoutMs: 20_000,
+        ...(signal ? { signal } : {}),
       }),
     );
   }
@@ -617,6 +632,42 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
 }
 
 // -------------------------------------------------------------- helpers
+
+/** Most guests per room the Amadeus hotel search accepts. */
+const MAX_GUESTS_PER_ROOM = 9;
+
+/**
+ * Guests to price each room for: everyone who takes a bed (infants on a lap
+ * do not), spread over the rooms, rounded up so nobody is left out.
+ */
+export function guestsPerRoom(party: { adults: number; children: number }, rooms: number): number {
+  return Math.max(1, Math.ceil((party.adults + party.children) / Math.max(1, rooms)));
+}
+
+/**
+ * Whether a rate can be cancelled for a refund, only as far as the provider
+ * says so. Amadeus states this in `policies.refundable.cancellationRefund`;
+ * anything else, including a policy with no amount on it, is unknown. A rate
+ * whose refund deadline has already passed is no longer refundable.
+ */
+export function mapRefundable(
+  policies: AmadeusHotelOffer['offers'][number]['policies'],
+  now: Date = new Date(),
+): boolean | null {
+  const stated = policies?.refundable?.cancellationRefund;
+  if (stated === 'NON_REFUNDABLE') return false;
+  if (stated !== 'REFUNDABLE_UP_TO_DEADLINE') return null;
+  const deadline = policies?.cancellations?.[0]?.deadline;
+  if (deadline && Date.parse(deadline) < now.getTime()) return false;
+  return true;
+}
+
+/** A rating vendors send as "4" or 4, or nothing usable. */
+function finiteOrNull(value: string | number | undefined): number | null {
+  if (value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
 
 function pickIata(place: { iataCityCode?: string; airports: Array<{ iataCode: string }> }): string | null {
   return place.iataCityCode ?? place.airports[0]?.iataCode ?? null;

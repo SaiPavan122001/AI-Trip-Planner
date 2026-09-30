@@ -74,3 +74,68 @@ describe('rule-based modification interpretation', () => {
     }
   });
 });
+
+describe('stating how firm a budget is', () => {
+  const parameters = (text: string) => interpretModificationByRules(text).request;
+
+  it('reads "do not exceed" as a firm limit, with the amount', () => {
+    const request = parameters("Please don't exceed ₹80,000");
+    expect(request.intent).toBe('change_budget');
+    expect(request.parameters.budgetTotal).toEqual({ amount: 8_000_000, currency: 'INR' });
+    expect(request.parameters.budgetFirm).toBe(true);
+  });
+
+  it('understands lakh and k, and never exceed', () => {
+    expect(parameters('never exceed 1.5 lakh').parameters.budgetTotal?.amount).toBe(15_000_000);
+    expect(parameters('do not go over 90k').parameters.budgetTotal?.amount).toBe(9_000_000);
+  });
+
+  it('reads a plain budget as a guide, with no firm flag', () => {
+    const request = parameters('make the budget ₹80,000');
+    expect(request.parameters.budgetTotal?.amount).toBe(8_000_000);
+    expect(request.parameters.budgetFirm).toBeUndefined();
+  });
+
+  it('can make an existing budget firm or a guide without an amount', () => {
+    expect(parameters('treat my budget as a hard limit').parameters).toEqual({ budgetFirm: true });
+    expect(parameters('my budget is only a guide').parameters).toEqual({ budgetFirm: false });
+  });
+
+  it('does not invent an amount when none is given', () => {
+    expect(parameters('do not exceed my budget').parameters.budgetTotal).toBeUndefined();
+  });
+});
+
+describe('regression: change-request budgets are read only when the words say money', () => {
+  it('does not turn a date into a budget', () => {
+    for (const text of [
+      'keep the budget as it is but leave on 12 December',
+      'budget trip, move it to 12 December',
+      'the budget is fine, I want to go on 5 January instead',
+    ]) {
+      const { request } = interpretModificationByRules(text);
+      expect(request.parameters.budgetTotal, text).toBeUndefined();
+    }
+  });
+
+  it('does not turn a head count into a budget', () => {
+    const { request } = interpretModificationByRules('budget for 4 people please');
+    expect(request.parameters.budgetTotal).toBeUndefined();
+  });
+
+  it('still reads real amounts, firm and guide', () => {
+    const guide = interpretModificationByRules('make the budget ₹80,000').request;
+    expect(guide.intent).toBe('change_budget');
+    expect(guide.parameters.budgetTotal).toEqual({ amount: 8_000_000, currency: 'INR' });
+    expect(guide.parameters.budgetFirm).toBeUndefined();
+    const firm = interpretModificationByRules('do not exceed 90000').request;
+    expect(firm.parameters.budgetTotal).toEqual({ amount: 9_000_000, currency: 'INR' });
+    expect(firm.parameters.budgetFirm).toBe(true);
+  });
+
+  it('does not read "confirm" as a firm limit', () => {
+    const { request } = interpretModificationByRules('please confirm the budget is ₹80,000');
+    expect(request.parameters.budgetTotal).toEqual({ amount: 8_000_000, currency: 'INR' });
+    expect(request.parameters.budgetFirm).toBeUndefined();
+  });
+});

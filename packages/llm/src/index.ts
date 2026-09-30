@@ -20,6 +20,8 @@ export function llmFromEnv(env: NodeJS.ProcessEnv = process.env): TripLlm {
   const wantsOpenAi = explicit === 'openai' || (!explicit && Boolean(env['LLM_BASE_URL']));
 
   let provider: LlmProvider | null = null;
+  // One ceiling for either provider; see AnthropicConfig.timeoutMs.
+  const timeoutMs = Number(env['LLM_TIMEOUT_MS'] ?? 20_000);
 
   if (wantsOpenAi && env['LLM_BASE_URL']) {
     provider = new OpenAiCompatibleProvider({
@@ -27,6 +29,7 @@ export function llmFromEnv(env: NodeJS.ProcessEnv = process.env): TripLlm {
       apiKey: env['LLM_API_KEY'] ?? null,
       model: env['LLM_MODEL'] ?? 'gpt-4o-mini',
       maxOutputTokens: Number(env['LLM_MAX_OUTPUT_TOKENS'] ?? 2048),
+      timeoutMs,
       label: env['LLM_LABEL'] ?? 'Self-hosted LLM',
     });
   } else if (env['ANTHROPIC_API_KEY']) {
@@ -34,8 +37,14 @@ export function llmFromEnv(env: NodeJS.ProcessEnv = process.env): TripLlm {
       apiKey: env['ANTHROPIC_API_KEY'],
       model: env['ANTHROPIC_MODEL'] ?? 'claude-opus-5',
       maxOutputTokens: Number(env['LLM_MAX_OUTPUT_TOKENS'] ?? 2048),
+      timeoutMs,
     });
   }
 
-  return new TripLlm(provider && provider.isConfigured() ? provider : null);
+  // Prices are only ever the operator's own; with none given no cost is estimated.
+  const inputPrice = Number(env['LLM_PRICE_INPUT_PER_MTOK']);
+  const outputPrice = Number(env['LLM_PRICE_OUTPUT_PER_MTOK']);
+  const pricing = inputPrice > 0 && outputPrice > 0 ? { inputPerMillion: inputPrice, outputPerMillion: outputPrice } : undefined;
+
+  return new TripLlm(provider && provider.isConfigured() ? provider : null, pricing ? { pricing } : {});
 }

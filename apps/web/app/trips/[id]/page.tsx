@@ -2,44 +2,85 @@
 
 import { use, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { CAPABILITY_LABEL, statusLabel } from '@trip/shared/provider-status';
 import {
   ApiClientError,
   api,
   formatMoney,
+  isActiveRun,
   type ModifyResponse,
-  type PlanResponse,
+  type PlanningRun,
   type TripPlan,
   type TripSession,
 } from '@/lib/api';
+import { useRunWatcher } from '@/lib/useRunWatcher';
 import { BudgetPanel } from '@/components/BudgetPanel';
+import { FeasibilityPanel } from '@/components/FeasibilityPanel';
 import { ItineraryTimeline } from '@/components/ItineraryTimeline';
 import { ModifyBar } from '@/components/ModifyBar';
+import { AgentTrace, NarrativeCard } from '@/components/NarrativeCard';
+import { PinsPanel } from '@/components/PinsPanel';
 import { PlanCards } from '@/components/PlanCards';
+import { PlanningProgress } from '@/components/PlanningProgress';
 import { QuestionCard } from '@/components/QuestionCard';
+import { SayItBox } from '@/components/SayItBox';
 import { TransportComparison } from '@/components/TransportComparison';
 
 /**
  * The trip workspace. It has two modes, and which one it is in is decided by
  * the engine, not by this component: while there is a next question, it is an
  * interview; once the engine says it has enough, it is a plan.
+ *
+ * Searching happens in the background on the server. This page starts a
+ * search, follows its progress, and reads the plans from the trip when it is
+ * done, so leaving the page, reloading it, or opening it on another device
+ * finds the search exactly where it is.
  */
 export default function TripPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [trip, setTrip] = useState<TripSession | null>(null);
-  const [planResult, setPlanResult] = useState<PlanResponse | null>(null);
+  const [run, setRun] = useState<PlanningRun | null>(null);
   const [lastModification, setLastModification] = useState<ModifyResponse | null>(null);
   const [busy, setBusy] = useState(false);
-  const [planning, setPlanning] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Kept parts that could not be kept, each with the reason: never dropped silently. */
+  const [released, setReleased] = useState<Array<{ component: string; reason: string }>>([]);
+  const [pinRefusals, setPinRefusals] = useState<Array<{ component: string; reason: string }>>([]);
+
+  const searching = isActiveRun(run);
+
+  const refresh = useCallback(async () => {
+    const { trip: loaded, run: latest } = await api.getTrip(id);
+    setTrip(loaded);
+    setRun(latest);
+  }, [id]);
 
   useEffect(() => {
     api
       .getTrip(id)
-      .then(({ trip: loaded }) => setTrip(loaded))
+      .then(({ trip: loaded, run: latest }) => {
+        setTrip(loaded);
+        setRun(latest);
+      })
       .catch((err) =>
         setError(err instanceof ApiClientError ? err.message : 'This trip could not be loaded.'),
       );
   }, [id]);
+
+  // Follow a running search. When it ends, read the plans it saved.
+  useRunWatcher(
+    id,
+    run,
+    (latest) => {
+      setRun(latest);
+      if (!isActiveRun(latest)) {
+        setCancelling(false);
+        refresh().catch(() => setError('The search finished, but the trip could not be reloaded.'));
+      }
+    },
+    (message) => setError(message),
+  );
 
   const answer = useCallback(
     async (value: unknown, skipped = false) => {
@@ -64,51 +105,93 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
   );
 
   const runPlan = useCallback(async () => {
-    setPlanning(true);
+    setBusy(true);
     setError(null);
+    setReleased([]);
     try {
-      const result = await api.plan(id);
-      setPlanResult(result);
-      setTrip(result.trip);
+      const started = await api.plan(id);
+      setTrip(started.trip);
+      setRun(started.run);
+      setReleased(started.pinsReleased);
     } catch (err) {
-      setError(
-        err instanceof ApiClientError ? err.message : 'The search could not be completed.',
-      );
+      const active = err instanceof ApiClientError ? (err.failure.details as { run?: PlanningRun } | undefined)?.run : undefined;
+      if (active) setRun(active);
+      setError(err instanceof ApiClientError ? err.message : 'The search could not be started.');
     } finally {
-      setPlanning(false);
+      setBusy(false);
     }
   }, [id]);
 
-  const modify = useCallback(
-    async (utterance: string) => {
-      setBusy(true);
-      setError(null);
-      try {
-        const result = await api.modify(id, utterance);
-        setLastModification(result);
-        setTrip(result.trip);
-        if (result.plans.length > 0) {
-          setPlanResult((current) =>
-            current
-              ? { ...current, plans: result.plans, budgetConflict: result.budgetConflict, trip: result.trip }
-              : current,
-          );
-        }
-      } catch (err) {
-        setError(err instanceof ApiClientError ? err.message : 'That change could not be applied.');
-      } finally {
-        setBusy(false);
+  const cancelSearch = useCallback(async () => {
+    if (!run) return;
+    setCancelling(true);
+    try {
+      const { run: updated } = await api.cancelRun(id, run.id);
+      setRun(updated);
+      if (!isActiveRun(updated)) {
+        setCancelling(false);
+        await refresh();
       }
-    },
-    [id],
+    } catch (err) {
+      setCancelling(false);
+      setError(err instanceof ApiClientError ? err.message : 'The search could not be stopped.');
+    }
+  }, [id, run, refresh]);
+
+  // One path for a change and for the answer to its question. Plans always
+  // follow the response: when a change clears plans that no longer fit the
+  // trip (new dates, a different group), the old ones must not stay on screen.
+  const applyModification = useCallback(async (request: () => Promise<ModifyResponse>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await request();
+      setLastModification(result);
+      setTrip(result.trip);
+      setReleased(result.released);
+      if (result.run) setRun(result.run);
+    } catch (err) {
+      const active = err instanceof ApiClientError ? (err.failure.details as { run?: PlanningRun } | undefined)?.run : undefined;
+      if (active) setRun(active);
+      setError(err instanceof ApiClientError ? err.message : 'That change could not be applied.');
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const modify = useCallback(
+    (utterance: string) => applyModification(() => api.modify(id, utterance)),
+    [id, applyModification],
+  );
+
+  const answerModification = useCallback(
+    (pendingId: string, accept: boolean) =>
+      applyModification(() => api.answerModification(id, pendingId, accept)),
+    [id, applyModification],
   );
 
   const selectPlan = useCallback(
     async (planId: string) => {
       setTrip((current) => (current ? { ...current, selectedPlanId: planId } : current));
+      // Pins are about the selected plan's parts, so they are looked at again.
       await api.selectPlan(id, planId).catch(() => undefined);
     },
     [id],
+  );
+
+  const changePins = useCallback(
+    async (pins: string[]) => {
+      setTrip((current) => (current ? { ...current, pins } : current));
+      try {
+        const result = await api.setPins(id, pins);
+        setTrip(result.trip);
+        setPinRefusals(result.refused);
+      } catch (err) {
+        setError(err instanceof ApiClientError ? err.message : 'That could not be saved.');
+        await refresh().catch(() => undefined);
+      }
+    },
+    [id, refresh],
   );
 
   if (error && !trip) {
@@ -129,9 +212,10 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
     );
   }
 
-  const plans = planResult?.plans ?? trip.plans;
+  const plans = trip.plans;
   const selectedPlan = plans.find((p) => p.id === trip.selectedPlanId) ?? plans[0] ?? null;
   const question = trip.questionnaire?.next ?? null;
+  const search = trip.lastSearch;
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6">
@@ -141,6 +225,17 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
         <p role="alert" className="mt-5 rounded-xl bg-clay/10 px-4 py-3 text-sm text-clay">
           {error}
         </p>
+      ) : null}
+
+      {released.length > 0 ? (
+        <div role="status" className="mt-5 rounded-xl bg-clay/10 px-4 py-3 text-sm text-clay">
+          <p className="font-medium">Some of what you asked to keep could not be kept:</p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            {released.map((r) => (
+              <li key={r.component}>{r.reason}</li>
+            ))}
+          </ul>
+        </div>
       ) : null}
 
       {question ? (
@@ -154,6 +249,7 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
           />
           <aside className="space-y-4">
             <ClassificationCard trip={trip} />
+            <SayItBox tripId={id} disabled={searching} onTrip={setTrip} />
             {trip.questionnaire?.canPlan ? (
               <div className="card p-5">
                 <p className="text-sm text-ink-soft">
@@ -163,38 +259,51 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
                   type="button"
                   className="btn-ghost mt-3 w-full"
                   onClick={() => void runPlan()}
-                  disabled={planning}
+                  disabled={busy || searching}
                 >
-                  {planning ? 'Searching…' : 'Skip ahead and search now'}
+                  {searching ? 'Searching…' : 'Skip ahead and search now'}
                 </button>
               </div>
+            ) : null}
+            {searching && run ? (
+              <PlanningProgress run={run} onCancel={() => void cancelSearch()} cancelling={cancelling} />
             ) : null}
           </aside>
         </div>
       ) : (
         <div className="mt-8 space-y-8">
-          {plans.length === 0 ? (
+          {searching && run ? (
+            <PlanningProgress run={run} onCancel={() => void cancelSearch()} cancelling={cancelling} />
+          ) : null}
+
+          {!searching && run ? <RunOutcome run={run} /> : null}
+
+          {!searching ? <NarrativeCard trip={trip} planId={selectedPlan?.id ?? null} /> : null}
+
+          {plans.length === 0 && !searching ? (
             <section className="card p-6">
               <h2 className="font-display text-xl tracking-tight">Ready to search</h2>
               <p className="mt-2 text-sm text-ink-soft">
                 Every connected provider will be searched for each mode that suits this journey.
-                This usually takes a few seconds.
+                It runs in the background, so you can leave this page open or come back later.
               </p>
               <button
                 type="button"
                 className="btn-primary mt-4"
                 onClick={() => void runPlan()}
-                disabled={planning}
+                disabled={busy}
               >
-                {planning ? 'Searching providers…' : 'Build my plans'}
+                {run && run.status !== 'succeeded' ? 'Search again' : 'Build my plans'}
               </button>
             </section>
           ) : null}
 
-          {planResult ? (
+          {search ? <FeasibilityPanel report={search.feasibility} hasPlans={plans.length > 0} /> : null}
+
+          {search && plans.length > 0 ? (
             <TransportComparison
-              modes={planResult.comparison.outbound.modes}
-              filtered={planResult.comparison.outbound.filteredByYourRequirements}
+              modes={search.outbound.modes}
+              filtered={search.outbound.filteredByYourRequirements}
               timezone={trip.classification.originTimezone}
             />
           ) : null}
@@ -204,29 +313,58 @@ export default function TripPage({ params }: { params: Promise<{ id: string }> }
           {selectedPlan ? (
             <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
               <div className="space-y-6">
-                {selectedPlan.hotels[0] ? <StayCard plan={selectedPlan} /> : null}
+                {selectedPlan.hotels[0] ? <StayCard plan={selectedPlan} pinned={trip.pins.includes('hotel')} /> : null}
                 <ItineraryTimeline plan={selectedPlan} />
               </div>
               <aside className="space-y-4 lg:sticky lg:top-6 lg:self-start">
                 <BudgetPanel
                   plan={selectedPlan}
-                  conflict={planResult?.budgetConflict ?? null}
+                  conflict={search?.budgetConflict ?? null}
+                  firm={trip.constraints.budget.firm}
                   onApply={(utterance) => void modify(utterance)}
                 />
+                <PinsPanel
+                  plan={selectedPlan}
+                  pins={trip.pins}
+                  disabled={busy || searching}
+                  refused={pinRefusals}
+                  onChange={(pins) => void changePins(pins)}
+                />
+                <SayItBox tripId={id} disabled={searching} onTrip={setTrip} />
                 <ModifyBar
-                  busy={busy}
+                  busy={busy || searching}
                   lastResult={lastModification}
+                  pending={trip.pendingModification}
                   onSubmit={(utterance) => void modify(utterance)}
+                  onAnswer={(pendingId, accept) => void answerModification(pendingId, accept)}
                 />
               </aside>
             </div>
           ) : null}
 
           <ProviderNotes trip={trip} />
+          <AgentTrace trip={trip} />
           <DecisionLog trip={trip} />
         </div>
       )}
     </div>
+  );
+}
+
+/** What became of the last search, when it did not end with plans. */
+function RunOutcome({ run }: { run: PlanningRun }) {
+  const text: Record<string, string> = {
+    failed: run.error?.message ?? 'The search did not finish. Nothing was booked or charged.',
+    cancelled: 'You stopped that search. Your trip is unchanged.',
+    superseded:
+      'The trip changed while it was being searched, so those results were thrown away rather than shown against the wrong trip. Search again to see plans for the trip as it is now.',
+  };
+  const message = text[run.status];
+  if (!message) return null;
+  return (
+    <p role="status" className="rounded-xl bg-sand-100 px-4 py-3 text-sm text-ink-soft">
+      {message}
+    </p>
   );
 }
 
@@ -302,13 +440,20 @@ function ClassificationCard({ trip }: { trip: TripSession }) {
   );
 }
 
-function StayCard({ plan }: { plan: TripPlan }) {
+function StayCard({ plan, pinned }: { plan: TripPlan; pinned: boolean }) {
   const stay = plan.hotels[0];
   if (!stay) return null;
 
   return (
     <section className="card p-5">
-      <h2 className="font-display text-xl tracking-tight">Where you stay</h2>
+      <h2 className="font-display text-xl tracking-tight">
+        Where you stay
+        {pinned ? (
+          <span className="ml-2 rounded-full bg-teal-500/10 px-2.5 py-1 align-middle text-xs font-normal text-teal-700">
+            kept as you asked
+          </span>
+        ) : null}
+      </h2>
       <div className="mt-4 flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <h3 className="text-base font-semibold">
@@ -382,6 +527,12 @@ function Tag({ children, tone = 'neutral' }: { children: React.ReactNode; tone?:
   );
 }
 
+/** What the note is about, then who said it: two capabilities from one vendor read as two notes. */
+function noteHeading(note: TripSession['providerNotes'][number]): string {
+  const about = note.capability ? CAPABILITY_LABEL[note.capability as keyof typeof CAPABILITY_LABEL] : undefined;
+  return about && about !== note.providerLabel ? `${about} (${note.providerLabel})` : note.providerLabel;
+}
+
 function ProviderNotes({ trip }: { trip: TripSession }) {
   if (trip.providerNotes.length === 0) return null;
   return (
@@ -392,9 +543,9 @@ function ProviderNotes({ trip }: { trip: TripSession }) {
       </p>
       <ul className="mt-4 space-y-3">
         {trip.providerNotes.map((note, i) => (
-          <li key={`${note.provider}-${i}`} className="border-l-2 border-sand-300 pl-3">
+          <li key={`${note.provider}-${note.capability ?? ''}-${i}`} className="border-l-2 border-sand-300 pl-3">
             <p className="text-xs uppercase tracking-wide text-ink-faint">
-              {note.providerLabel} · {note.status.replace(/_/g, ' ')}
+              {noteHeading(note)} · {statusLabel(note.status)}
             </p>
             <p className="mt-0.5 text-sm text-ink-soft">{note.message}</p>
           </li>

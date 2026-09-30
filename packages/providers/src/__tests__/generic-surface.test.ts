@@ -153,7 +153,8 @@ describe('generic surface provider', () => {
     });
     const result = await new GenericRailProvider(config).searchTrains(request);
 
-    expect(result.status).toBe('unavailable');
+    // A malformed answer is its own outcome (unusable), not an outage.
+    expect(result.status).toBe('invalid_response');
     if (!isOk(result)) expect(result.message).toMatch(/documented provider contract/i);
   });
 

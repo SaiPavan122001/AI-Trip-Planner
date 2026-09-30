@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PROVIDER_CAPABILITIES } from './provider-status.js';
 
 /**
  * Every provider call returns one of these. There is no code path that turns a
@@ -14,12 +15,21 @@ export const ProviderStatus = z.enum([
   'rate_limited',
   'timeout',
   'invalid_request',
+  /** The provider answered, but with something this planner cannot use. */
+  'invalid_response',
   'price_changed',
   'booking_unavailable',
   'unsupported_route',
   'unsupported_capability',
 ]);
 export type ProviderStatus = z.infer<typeof ProviderStatus>;
+
+export { CAPABILITY_LABEL, PROVIDER_CAPABILITIES, PROVIDER_STATUS_CLASSES, statusClass, statusLabel } from './provider-status.js';
+export type { ProviderStatusClass } from './provider-status.js';
+
+/** What a provider is asked for; see `provider-status.ts`. */
+export const ProviderCapability = z.enum(PROVIDER_CAPABILITIES);
+export type ProviderCapability = z.infer<typeof ProviderCapability>;
 
 export const ProviderProvenance = z.object({
   /** Adapter id, e.g. "amadeus", "osrm". */
@@ -49,10 +59,19 @@ export type ProviderFailure = {
   status: Exclude<ProviderStatus, 'ok'>;
   provider: string;
   providerLabel: string;
+  /** What was being asked for, when the caller knows. */
+  capability?: ProviderCapability;
   /** Message intended for the traveller, plain language, no stack traces. */
   message: string;
   /** Present when the adapter can say when a retry might help. */
   retryAfterSeconds?: number;
+  /**
+   * True when this planner's own limits caused the failure (its time budget, a
+   * cancelled search, a spent allowance of requests, a full line), not the
+   * provider. It says nothing about the provider's health, so a circuit breaker
+   * does not count it.
+   */
+  local?: boolean;
   occurredAt: string;
 };
 
@@ -85,6 +104,11 @@ export function fail(
     ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
     occurredAt: new Date().toISOString(),
   };
+}
+
+/** The same failure, tagged with what was being asked for. */
+export function forCapability(failure: ProviderFailure, capability: ProviderCapability): ProviderFailure {
+  return failure.capability ? failure : { ...failure, capability };
 }
 
 export function notConfigured(

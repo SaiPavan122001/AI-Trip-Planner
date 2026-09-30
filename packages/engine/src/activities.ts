@@ -1,15 +1,20 @@
 import type { ProviderRegistry } from '@trip/providers';
 import {
+  ACTIVITIES_PER_DAY,
   haversineKm,
-  isOk,
+  noteFromFailure,
+  type ActivityInterest,
   type ActivityOffer,
+  type ActivityPace,
   type Coordinates,
   type OpeningHours,
   type Place,
   type ProviderNote,
   type TravelerProfile,
 } from '@trip/shared';
-import { localParts } from './time.js';
+import { supportedPriceOrUnknown } from './currency.js';
+import { sweepProviders } from './provider-calls.js';
+import { localParts, utcFromLocal } from './time.js';
 
 /**
  * Activity discovery and day clustering.
@@ -43,6 +48,33 @@ const DURATION_BY_CATEGORY: Record<string, number> = {
 
 const DEFAULT_DURATION_MINUTES = 90;
 
+/**
+ * What a traveller's interests mean to a place provider. The mapping lives here,
+ * in code, so a model can only ever choose an interest from a closed list and
+ * never puts a string of its own into a provider request.
+ */
+const PLACE_TYPES_BY_INTEREST: Record<ActivityInterest, string[]> = {
+  museums: ['museum', 'art_gallery'],
+  history: ['historical_landmark', 'tourist_attraction'],
+  nature: ['park', 'national_park', 'hiking_area'],
+  beaches: ['beach'],
+  adventure: ['amusement_park', 'hiking_area'],
+  religious: ['place_of_worship', 'hindu_temple', 'church', 'mosque'],
+  shopping: ['shopping_mall', 'market'],
+  nightlife: ['night_club'],
+  family: ['zoo', 'aquarium', 'amusement_park', 'park'],
+};
+
+export function placeTypesFor(interests: readonly ActivityInterest[]): string[] {
+  return [...new Set(interests.flatMap((i) => PLACE_TYPES_BY_INTEREST[i] ?? []))];
+}
+
+/** What the activity search may be steered by. Both parts are optional and closed-vocabulary. */
+export interface ActivityGuidance {
+  interests?: readonly ActivityInterest[];
+  pace?: ActivityPace;
+}
+
 export function assumedDuration(activity: ActivityOffer): {
   minutes: number;
   assumed: boolean;
@@ -60,57 +92,42 @@ export async function planActivities(
   profile: TravelerProfile,
   days: number,
   currency: string,
+  signal?: AbortSignal,
+  guidance: ActivityGuidance = {},
 ): Promise<ActivityPlanResult> {
   const notes: ProviderNote[] = [];
   if (days <= 0) return { activities: [], clusters: [], notes };
 
   if (registry.activities.length === 0) {
-    const missing = registry.missingCapabilityNote('Things to do', ['google-maps']);
-    notes.push({
-      provider: missing.provider,
-      providerLabel: missing.providerLabel,
-      status: missing.status,
-      message: missing.message,
-      occurredAt: missing.occurredAt,
-    });
+    notes.push(noteFromFailure(registry.missingCapabilityNote('activities', ['google-maps']), 'activities'));
     return { activities: [], clusters: [], notes };
   }
 
   // Roughly two anchored activities a day, which leaves room for meals, rest
   // and the unplanned wandering that is usually the best part of a trip.
-  const target = Math.max(3, days * 2);
+  const perDay = ACTIVITIES_PER_DAY[guidance.pace ?? 'balanced'];
+  const target = Math.max(3, days * perDay);
+  const categories = placeTypesFor(guidance.interests ?? []);
   const found: ActivityOffer[] = [];
 
-  for (const provider of registry.activities) {
-    const res = await provider.searchActivities({
+  const sweep = await sweepProviders(registry, registry.activities, 'activities', 'searchActivities', (provider) =>
+    provider.searchActivities({
       destination,
       near: destination.coordinates,
       radiusKm: 12,
-      categories: [],
+      categories,
       accessibilityNeeds: profile.special.accessibility,
       currency,
       limit: Math.min(20, target * 2),
-    });
-    if (isOk(res)) {
-      found.push(...res.data);
-      for (const warning of res.warnings) {
-        notes.push({
-          provider: res.provenance.provider,
-          providerLabel: res.provenance.providerLabel,
-          status: 'ok',
-          message: warning,
-          occurredAt: res.provenance.retrievedAt,
-        });
-      }
-    } else {
-      notes.push({
-        provider: res.provider,
-        providerLabel: res.providerLabel,
-        status: res.status,
-        message: res.message,
-        occurredAt: res.occurredAt,
-      });
-    }
+      ...(signal ? { signal } : {}),
+    }),
+  );
+  notes.push(...sweep.notes);
+  for (const activity of sweep.data) {
+    // A foreign entry price becomes unknown; the place is still worth visiting.
+    const priced = supportedPriceOrUnknown(activity.price, activity.provenance, 'activities');
+    if (priced.note && !notes.some((n) => n.message === priced.note!.message)) notes.push(priced.note);
+    found.push(priced.price === activity.price ? activity : { ...activity, price: null, priceIsEstimate: false });
   }
 
   const ranked = rankActivities(found).slice(0, target);
@@ -187,6 +204,51 @@ function withinWindow(time: string, hours: OpeningHours): boolean {
   // A window that ends before it starts crosses midnight.
   if (hours.closes < hours.opens) return time >= hours.opens || time <= hours.closes;
   return time >= hours.opens && time <= hours.closes;
+}
+
+/** "HH:MM" as minutes past midnight; "24:00" (an end-of-day close) is allowed. */
+function minutesOf(time: string): number {
+  const [h, m] = time.split(':').map(Number);
+  return (h ?? 0) * 60 + (m ?? 0);
+}
+
+export type OpenStart =
+  /** The source publishes no hours: nothing can be said either way. */
+  | { status: 'unknown' }
+  /** The visit can start at this instant (the asked-for one, or the moment the place opens). */
+  | { status: 'open'; startUtc: string }
+  | { status: 'closed' };
+
+/**
+ * The earliest moment at or after `notBeforeUtc` that a visit of `minutes`
+ * can start and finish inside the place's opening hours that day. Being open
+ * at the start is not enough: a place that shuts at 10:30 is not open for a
+ * three-hour visit beginning at 10:00. A place that opens later in the day is
+ * waited for (the start moves to its opening time); one that cannot fit the
+ * visit at all that day is closed for this purpose.
+ */
+export function earliestOpenStart(
+  activity: ActivityOffer,
+  notBeforeUtc: string,
+  minutes: number,
+  timeZone: string,
+): OpenStart {
+  if (!activity.openingHours || activity.openingHours.length === 0) return { status: 'unknown' };
+  const local = localParts(notBeforeUtc, timeZone);
+  const wanted = minutesOf(local.time);
+  const windows = activity.openingHours
+    .filter((h) => h.weekday === local.weekday)
+    .map((h) => ({ opens: minutesOf(h.opens), closes: h.closes < h.opens ? 24 * 60 : minutesOf(h.closes) }))
+    .sort((a, b) => a.opens - b.opens);
+  for (const w of windows) {
+    const start = Math.max(wanted, w.opens);
+    if (start + minutes <= w.closes) {
+      const hh = String(Math.floor(start / 60)).padStart(2, '0');
+      const mm = String(start % 60).padStart(2, '0');
+      return { status: 'open', startUtc: start === wanted ? notBeforeUtc : utcFromLocal(local.date, `${hh}:${mm}`, timeZone) };
+    }
+  }
+  return { status: 'closed' };
 }
 
 export function centroidOf(activities: ActivityOffer[], fallback: Coordinates): Coordinates {

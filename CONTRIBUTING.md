@@ -41,7 +41,17 @@ not as a scoring penalty. If you are adding something that only nudges, it belon
 structured output. Do not add a free-text completion method. Do not let a model produce a price, a
 schedule, a service number or an availability.
 
-**6. Deterministic validation has the last word.** Anything that decides whether an itinerary is
+**6. Treat model output as untrusted input.** Anything a model returns, including what a keyword
+fallback returns in its place, passes the same domain validation a form would (see
+`sanitizeModificationParameters`) before it touches a trip, and text shown to a traveller is written
+from validated data, never taken from a model. A new field a model may fill needs its own rule and a
+test that feeds it hostile values.
+
+**7. Unknown is not zero, and there is one currency.** A cost nobody can price goes in
+`cost.notIncluded`, not into the total as ₹0. Everything is INR; do not compare, add or convert
+amounts in another currency, and do not invent an exchange rate.
+
+**8. Deterministic validation has the last word.** Anything that decides whether an itinerary is
 physically possible goes in `validate.ts`, as arithmetic over instants and constraints.
 
 ## Code conventions
@@ -56,16 +66,34 @@ physically possible goes in `validate.ts`, as arithmetic over instants and const
 
 ## Tests
 
-Run `npm test`. New behaviour needs a test; the ones worth writing here assert a *guarantee* rather
-than an implementation:
+Run `npm test`; it needs nothing installed or running. `npm run test:integration` runs the store
+contract and the request path against a real PostgreSQL (started for you, no Docker), and `npm run
+smoke` drives the built API and worker end to end. Anything that touches storage belongs in the store
+contract (`apps/api/src/__tests__/support/store-contract.ts`), which runs against both the in-memory
+store and PostgreSQL; a schema change needs a new, additive migration and must keep them passing. New
+behaviour needs a test; the ones worth writing here assert a *guarantee* rather than an implementation:
 
 - that a confirmed booking is unreachable without a provider reference
 - that a skipped question leaves no preference behind
 - that an excluded mode carries a reason
 - that a DST boundary does not shift an itinerary
+- that a trip is not reachable by anyone but its owner
+- that a search for a trip that changed meanwhile is discarded, not shown
 
 `packages/engine/src/__tests__/fixtures.ts` has real places with real coordinates and timezones. Use
 them rather than inventing convenient geography.
+
+**Knowledge and evaluation** (`packages/knowledge`, [docs/knowledge.md](docs/knowledge.md)). Its tests include an evaluation
+that is compared, exactly, with a committed baseline (`packages/knowledge/eval/baseline.json`). If you change the chunker, a
+retrieval setting, the system prompt, the embedder, the screen's rules, the verifier or the evaluation data, that test fails by
+design and names what changed. Look at the numbers (`npm run build && npm run eval -w @trip/knowledge`), decide whether the change
+is an improvement you can defend (the `holdout` split is the honest check), and only then record it with `-- --write-baseline` in
+the same commit. Never edit the baseline by hand, and never delete a dataset case to make a number better. A new store must pass
+`describeKnowledgeStore` from `@trip/knowledge/testing`. Nothing about a traveller may go in the knowledge index, and evaluation
+corpus text must stay fictional.
+
+Telemetry has its own rule: a new span, metric or log field uses closed labels and no id, prompt, cookie or traveller's words;
+add the leakage check to `apps/api/src/__tests__/observability.test.ts` ([docs/observability.md](docs/observability.md)).
 
 ## Adding a provider
 
@@ -82,8 +110,9 @@ your agreement.
 
 - One concern per PR.
 - Say what a reviewer should check by hand, especially anything touching provider calls.
-- `npm run typecheck && npm test && npm run build` should pass before you open it. CI runs the same
-  plus a secret scan and a dependency audit.
+- `npm run lint && npm run typecheck && npm test && npm run build` should pass before you open it. CI
+  runs the same plus the PostgreSQL integration tests and smoke run, a secret scan and a dependency audit. Do not silence a lint rule or a type
+  error to make it pass; fix the cause.
 - Never commit a filled-in `.env`. CI fails the build if one is tracked.
 
 ## Reporting security issues

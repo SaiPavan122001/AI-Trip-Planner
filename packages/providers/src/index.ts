@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './http.js';
+export * from './guard.js';
 export * from './config.js';
 export * from './registry.js';
 export * from './adapters/nominatim.js';
@@ -8,3 +9,8 @@ export * from './adapters/amadeus.js';
 export * from './adapters/google-maps.js';
 export * from './adapters/generic-surface.js';
 export * from './adapters/self-drive.js';
+export * from './call-scope.js';
+export * from './ssrf.js';
+export * from './policy.js';
+export * from './cache.js';
+export * from './fallback.js';

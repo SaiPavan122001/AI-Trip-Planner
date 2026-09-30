@@ -1,10 +1,12 @@
-import type { ProviderRegistry } from '@trip/providers';
+import { passthroughPolicy, withBudget, type ProviderRegistry } from '@trip/providers';
 import {
   add,
   divide,
   haversineKm,
   isOk,
   multiply,
+  noteFromFailure,
+  noteFromWarning,
   seatedTravelers,
   zero,
   type ActivityOffer,
@@ -15,13 +17,15 @@ import {
   type Money,
   type Place,
   type ProviderNote,
+  type ProviderResult,
   type SelectedHotel,
   type TransferOffer,
   type TransportOffer,
   type TravelerProfile,
   type TripIntent,
 } from '@trip/shared';
-import { assumedDuration, isOpenAt } from './activities.js';
+import { assumedDuration, earliestOpenStart } from './activities.js';
+import { supportedPriceOrUnknown } from './currency.js';
 import { addMinutes, instantFrom, localParts, minutesBetween, utcFromLocal } from './time.js';
 
 /**
@@ -64,9 +68,19 @@ const DEFAULT_CHECK_OUT = '11:00';
 const DAY_START = '09:30';
 const LUNCH_AT = '13:00';
 const LUNCH_MINUTES = 60;
+/** The longest one transfer lookup may take before the itinerary carries on with an assumed time. */
+const TRANSFER_LOOKUP_MS = 10_000;
 const DINNER_AT = '19:30';
 const DINNER_MINUTES = 90;
 const DAY_END = '21:30';
+/** How long the check-out desk takes, and the least time left between it and setting off. */
+const CHECK_OUT_MINUTES = 20;
+
+/**
+ * Transfer lookups already made (or in flight) during one search, by request.
+ * Plans built side by side often need the same leg; it is asked for once.
+ */
+export type TransferMemo = Map<string, Promise<ProviderResult<TransferOffer[]>>>;
 
 export interface ScheduleInput {
   registry: ProviderRegistry;
@@ -80,6 +94,8 @@ export interface ScheduleInput {
   clusters: ActivityOffer[][];
   /** Per-person, per-day allowance for meals, used to cost meal items. */
   dailyMealBudget: Money | null;
+  /** Shared by every itinerary built in one search. Optional: without it every leg is asked for. */
+  transferMemo?: TransferMemo;
 }
 
 export interface ScheduleResult {
@@ -275,25 +291,10 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
       );
       items.push(...dayItems);
     }
-
-    // ------------------------------------------------------ checkout + home
-    const checkOutLocal = hotel.hotel.checkOutTime ?? DEFAULT_CHECK_OUT;
-    const checkoutUtc = utcFromLocal(hotel.checkOut, checkOutLocal, destinationTz);
-    items.push({
-      id: itemId('checkout'),
-      kind: 'check_out',
-      title: `Check out of ${hotel.hotel.name}`,
-      description: null,
-      startUtc: checkoutUtc,
-      endUtc: addMinutes(checkoutUtc, 20),
-      timezone: destinationTz,
-      locationName: hotel.hotel.name,
-      cost: null,
-      costIsEstimate: false,
-      offerRef: null,
-      notes: [],
-    });
   }
+
+  /** When the traveller has to leave the hotel for the journey home. */
+  let leaveHotelUtc: string | null = null;
 
   if (inbound) {
     const firstSegment = inbound.segments[0]!;
@@ -331,6 +332,7 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
       if (toTerminal.offer) transfers.push(toTerminal.offer);
 
       const leaveUtc = addMinutes(departUtc, -(buffer + toTerminal.durationMinutes));
+      leaveHotelUtc = leaveUtc;
       items.push({
         ...toTerminal.item,
         startUtc: leaveUtc,
@@ -351,10 +353,45 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
         notes: [],
       });
     }
+    // Your own car leaves from the hotel door.
+    leaveHotelUtc ??= departUtc;
     items.push(transportItem(inbound, departUtc, arriveUtc, destinationTz, originTz));
   }
 
+  // ------------------------------------------------------ check-out
+  // The property's usual time, unless the journey home leaves before it: you
+  // cannot check out after you have left.
+  if (hotel && arrivalAtDestination) {
+    const checkOutLocal = hotel.hotel.checkOutTime ?? DEFAULT_CHECK_OUT;
+    const usual = utcFromLocal(hotel.checkOut, checkOutLocal, destinationTz);
+    const latest = leaveHotelUtc === null ? null : addMinutes(leaveHotelUtc, -CHECK_OUT_MINUTES);
+    const checkoutUtc = latest !== null && Date.parse(latest) < Date.parse(usual) ? latest : usual;
+    const early = checkoutUtc !== usual;
+    items.push({
+      id: itemId('checkout'),
+      kind: 'check_out',
+      title: `Check out of ${hotel.hotel.name}`,
+      description: null,
+      startUtc: checkoutUtc,
+      endUtc: addMinutes(checkoutUtc, CHECK_OUT_MINUTES),
+      timezone: destinationTz,
+      locationName: hotel.hotel.name,
+      cost: null,
+      costIsEstimate: false,
+      offerRef: null,
+      notes: early
+        ? [`Your journey home leaves before the usual ${checkOutLocal} check-out, so check out before you go.`]
+        : [],
+    });
+  }
+
   items.sort((a, b) => Date.parse(a.startUtc) - Date.parse(b.startUtc));
+  // Numbered in time order once everything is placed, so the same trip always
+  // gets the same ids (they were a process-wide counter, which differed from
+  // one search to the next and depended on what else had been planned).
+  items.forEach((item, i) => {
+    item.id = `${item.kind}-${i + 1}`;
+  });
   return {
     days: groupIntoDays(items, intent.currency),
     items,
@@ -366,6 +403,32 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
 }
 
 // ------------------------------------------------------------------ days
+
+/** Whether two half-open time ranges share any time. */
+function overlaps(aStart: string, aEnd: string, bStart: string, bEnd: string): boolean {
+  return Date.parse(aStart) < Date.parse(bEnd) && Date.parse(bStart) < Date.parse(aEnd);
+}
+
+/**
+ * Visits in the order that keeps the day short: from the hotel, always the
+ * nearest place not yet visited. Not a tour-optimiser, and it does not claim
+ * to be; it removes the zig-zag, which is what costs a day its hours.
+ */
+export function orderByNearest(from: Coordinates, places: ActivityOffer[]): ActivityOffer[] {
+  const remaining = [...places];
+  const ordered: ActivityOffer[] = [];
+  let here = from;
+  while (remaining.length > 0) {
+    let best = 0;
+    for (let i = 1; i < remaining.length; i += 1) {
+      if (haversineKm(here, remaining[i]!.coordinates) < haversineKm(here, remaining[best]!.coordinates)) best = i;
+    }
+    const next = remaining.splice(best, 1)[0]!;
+    ordered.push(next);
+    here = next.coordinates;
+  }
+  return ordered;
+}
 
 async function scheduleDay(
   input: ScheduleInput,
@@ -379,28 +442,78 @@ async function scheduleDay(
   notes: ProviderNote[],
 ): Promise<ItineraryItem[]> {
   const items: ItineraryItem[] = [];
+  const dayStart = utcFromLocal(date, DAY_START, timezone);
   const dayEnd = utcFromLocal(date, DAY_END, timezone);
-  let cursor = utcFromLocal(date, DAY_START, timezone);
+  // Meals are fixed points in the day. A visit, and the journey to it, is
+  // planned around them instead of running through them.
+  const lunch = { start: utcFromLocal(date, LUNCH_AT, timezone) };
+  const lunchEnd = addMinutes(lunch.start, LUNCH_MINUTES);
+  const dinner = { start: utcFromLocal(date, DINNER_AT, timezone) };
+  const dinnerEnd = addMinutes(dinner.start, DINNER_MINUTES);
+  const reserved = [
+    { start: lunch.start, end: lunchEnd },
+    { start: dinner.start, end: dinnerEnd },
+  ];
+
+  let cursor = dayStart;
   let lastPoint: Coordinates = hotel.hotel.coordinates;
   let lastName = hotel.hotel.name;
-  let lunchPlaced = false;
+  let nearLunch = { name: hotel.hotel.name };
+  let lunchKnown = false;
 
   const mealCost = input.dailyMealBudget
     ? divide(multiply(input.dailyMealBudget, seatedTravelers(input.intent.travelers)), 2)
     : null;
 
-  for (const activity of cluster) {
+  for (const activity of orderByNearest(hotel.hotel.coordinates, cluster)) {
     const legMinutes = estimateLocalLegMinutes(lastPoint, activity.coordinates);
-    const arriveAt = addMinutes(cursor, legMinutes);
+    const { minutes, assumed } = assumedDuration(activity);
 
+    // Find the earliest start that works: after the journey there, inside the
+    // opening hours for the whole visit, and clear of both meals. Each fix can
+    // invalidate another, so it is repeated until the start stops moving.
+    let start = addMinutes(cursor, legMinutes);
+    let hours: 'unknown' | 'open' | 'closed' = 'unknown';
+    for (let pass = 0; pass < 6; pass += 1) {
+      const open = earliestOpenStart(activity, start, minutes, timezone);
+      hours = open.status;
+      if (open.status === 'closed') break;
+      let next = open.status === 'open' ? open.startUtc : start;
+      const end = addMinutes(next, minutes);
+      const leaves = addMinutes(next, -legMinutes);
+      const meal = reserved.find((r) => overlaps(leaves, end, r.start, r.end));
+      if (meal) next = addMinutes(meal.end, legMinutes);
+      if (next === start) break;
+      start = next;
+    }
+    const end = addMinutes(start, minutes);
+
+    if (hours === 'closed') {
+      unscheduled.push({
+        activity,
+        reason: `${activity.name} cannot be visited on ${date} within its published hours.`,
+      });
+      continue;
+    }
+    if (Date.parse(end) > Date.parse(dayEnd) || reserved.some((r) => overlaps(addMinutes(start, -legMinutes), end, r.start, r.end))) {
+      unscheduled.push({
+        activity,
+        reason: `There was no room left on ${date} without running past ${DAY_END} or through a meal.`,
+      });
+      continue;
+    }
+
+    // The journey is timed to arrive when the visit starts, so waiting for a
+    // place to open is spent where you are, not on the road.
     if (legMinutes > 0) {
+      const leaves = addMinutes(start, -legMinutes);
       items.push({
         id: itemId('localtransfer'),
         kind: 'transfer',
         title: `Travel to ${activity.name}`,
         description: `About ${haversineKm(lastPoint, activity.coordinates).toFixed(1)}km from ${lastName}.`,
-        startUtc: cursor,
-        endUtc: arriveAt,
+        startUtc: leaves,
+        endUtc: start,
         timezone,
         locationName: activity.name,
         cost: null,
@@ -410,39 +523,13 @@ async function scheduleDay(
       });
     }
 
-    const { minutes, assumed } = assumedDuration(activity);
-    const open = isOpenAt(activity, arriveAt, timezone);
-
-    if (open === false) {
-      // Try the afternoon before giving up on the day entirely.
-      const retryAt = utcFromLocal(date, '15:00', timezone);
-      if (isOpenAt(activity, retryAt, timezone) === true && Date.parse(retryAt) > Date.parse(arriveAt)) {
-        cursor = retryAt;
-      } else {
-        unscheduled.push({
-          activity,
-          reason: `${activity.name} is closed on ${date} according to its published hours.`,
-        });
-        continue;
-      }
-    }
-
-    const endAt = addMinutes(cursor === arriveAt ? arriveAt : cursor, minutes);
-    if (Date.parse(endAt) > Date.parse(dayEnd)) {
-      unscheduled.push({
-        activity,
-        reason: `There was no room left on ${date} without running past ${DAY_END}.`,
-      });
-      continue;
-    }
-
     const activityNotes: string[] = [];
     if (assumed) {
       activityNotes.push(
         `No visit length is published for this place; ${minutes} minutes is assumed and can be adjusted.`,
       );
     }
-    if (open === null) {
+    if (hours === 'unknown') {
       activityNotes.push(
         'Opening hours are not published for this place. Check before you go rather than relying on this slot.',
       );
@@ -453,8 +540,8 @@ async function scheduleDay(
       kind: 'activity',
       title: activity.name,
       description: activity.description,
-      startUtc: cursor === arriveAt ? arriveAt : cursor,
-      endUtc: endAt,
+      startUtc: start,
+      endUtc: end,
       timezone,
       locationName: activity.address ?? activity.name,
       cost: activity.price,
@@ -464,24 +551,16 @@ async function scheduleDay(
     });
     scheduled.push(activity);
 
-    cursor = endAt;
+    cursor = end;
     lastPoint = activity.coordinates;
     lastName = activity.name;
-
-    const lunchUtc = utcFromLocal(date, LUNCH_AT, timezone);
-    if (!lunchPlaced && Date.parse(cursor) >= Date.parse(lunchUtc)) {
-      items.push(mealItem('Lunch', cursor, LUNCH_MINUTES, timezone, lastName, mealCost));
-      cursor = addMinutes(cursor, LUNCH_MINUTES);
-      lunchPlaced = true;
-    }
+    // Lunch is eaten near wherever the morning ended.
+    if (!lunchKnown && Date.parse(end) <= Date.parse(lunch.start)) nearLunch = { name: activity.name };
+    if (Date.parse(end) > Date.parse(lunch.start)) lunchKnown = true;
   }
 
-  if (!lunchPlaced) {
-    const lunchUtc = utcFromLocal(date, LUNCH_AT, timezone);
-    items.push(mealItem('Lunch', lunchUtc, LUNCH_MINUTES, timezone, lastName, mealCost));
-  }
-  const dinnerUtc = utcFromLocal(date, DINNER_AT, timezone);
-  items.push(mealItem('Dinner', dinnerUtc, DINNER_MINUTES, timezone, lastName, mealCost));
+  items.push(mealItem('Lunch', lunch.start, LUNCH_MINUTES, timezone, nearLunch.name, mealCost));
+  items.push(mealItem('Dinner', dinner.start, DINNER_MINUTES, timezone, lastName, mealCost));
 
   if (cluster.length === 0) {
     items.push({
@@ -548,6 +627,7 @@ async function transferItem(
   notes: ProviderNote[],
 ): Promise<TransferItemResult> {
   const provider = input.registry.groundTransport[0];
+  const policy = input.registry.policy ?? passthroughPolicy;
   const baseItem: ItineraryItem = {
     id: itemId('transfer'),
     kind: 'transfer',
@@ -564,15 +644,9 @@ async function transferItem(
   };
 
   if (!provider) {
-    const missing = input.registry.missingCapabilityNote('Transfers', ['osrm', 'google-maps']);
-    if (!notes.some((n) => n.provider === missing.provider && n.status === missing.status)) {
-      notes.push({
-        provider: missing.provider,
-        providerLabel: missing.providerLabel,
-        status: missing.status,
-        message: missing.message,
-        occurredAt: missing.occurredAt,
-      });
+    const missing = noteFromFailure(input.registry.missingCapabilityNote('transfers', ['osrm', 'google-maps']), 'transfers');
+    if (!notes.some((n) => n.provider === missing.provider && n.capability === missing.capability && n.status === missing.status)) {
+      notes.push(missing);
     }
     return {
       item: {
@@ -586,27 +660,43 @@ async function transferItem(
     };
   }
 
-  const res = await provider.searchTransfers({
+  const request = {
     from,
     to,
     at,
+    timezone,
     party: input.intent.travelers,
     luggagePieces:
       input.profile.transport.checkedBagsPerTraveler * seatedTravelers(input.intent.travelers),
     accessibleRequired: input.profile.special.accessibility.length > 0,
     currency: input.intent.currency,
-  });
+  };
+  // A transfer is a short lookup, and an itinerary needs several: one that
+  // hangs may not take the time the others (and the rest of the search) need.
+  const ask = () =>
+    withBudget({ ms: TRANSFER_LOOKUP_MS }, () =>
+      policy.execute(
+        {
+          provider: provider.descriptor?.id ?? 'transfers',
+          providerLabel: provider.descriptor?.label ?? 'Transfers',
+          capability: 'transfers',
+          operation: 'searchTransfers',
+        },
+        () => provider.searchTransfers(request),
+      ),
+    );
+  // Every field the answer depends on is in the key, so only a genuinely
+  // identical question shares an answer.
+  const memoKey = JSON.stringify(request);
+  let pending = input.transferMemo?.get(memoKey);
+  if (!pending) {
+    pending = ask();
+    input.transferMemo?.set(memoKey, pending);
+  }
+  const res = await pending;
 
   if (!isOk(res) || res.data.length === 0) {
-    if (!isOk(res)) {
-      notes.push({
-        provider: res.provider,
-        providerLabel: res.providerLabel,
-        status: res.status,
-        message: res.message,
-        occurredAt: res.occurredAt,
-      });
-    }
+    if (!isOk(res)) notes.push(noteFromFailure(res, 'transfers'));
     return {
       item: {
         ...baseItem,
@@ -619,16 +709,16 @@ async function transferItem(
 
   // Prefer a car for terminal transfers: walking an airport run with luggage
   // is not a realistic default whatever the distance says.
-  const offer = res.data.find((o) => o.mode === 'taxi') ?? res.data[0]!;
-  for (const warning of res.warnings) {
-    notes.push({
-      provider: res.provenance.provider,
-      providerLabel: res.provenance.providerLabel,
-      status: 'ok',
-      message: warning,
-      occurredAt: res.provenance.retrievedAt,
-    });
-  }
+  const chosen = res.data.find((o) => o.mode === 'taxi') ?? res.data[0]!;
+  // The route and time are still right when the fare is in another currency;
+  // only the fare becomes unknown.
+  const priced = supportedPriceOrUnknown(chosen.price, chosen.provenance, 'transfers');
+  if (priced.note && !notes.some((n) => n.message === priced.note!.message)) notes.push(priced.note);
+  const offer: TransferOffer =
+    priced.price === chosen.price
+      ? chosen
+      : { ...chosen, price: null, priceIsEstimate: false, estimateBasis: null };
+  for (const warning of res.warnings) notes.push(noteFromWarning(res.provenance, warning, 'transfers'));
 
   return {
     item: {
@@ -680,8 +770,10 @@ function transportItem(
     endUtc: arriveUtc,
     timezone: first.origin.timezone ?? fromTz,
     locationName: first.origin.name,
+    // The fare itself. For your own car it is an exact ₹0; its estimated
+    // running costs are separate fees, counted in the cost breakdown.
     cost: offer.totalPrice,
-    costIsEstimate: offer.mode === 'self_drive',
+    costIsEstimate: false,
     offerRef: { kind: 'transport', offerId: offer.id },
     notes,
   };

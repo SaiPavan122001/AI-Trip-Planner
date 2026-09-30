@@ -1,0 +1,35 @@
+{
+  "services": [
+    {
+      "id": "12785",
+      "currency": "INR",
+      "transfers": 0,
+      "legs": [
+        {
+          "operatorCode": "IR",
+          "operatorName": "Indian Railways",
+          "serviceNumber": "12785",
+          "originName": "Kacheguda",
+          "originCode": "KCG",
+          "destinationName": "KSR Bengaluru",
+          "destinationCode": "SBC",
+          "departureAt": "2030-11-10T19:05:00+05:30",
+          "arrivalAt": "2030-11-11T05:40:00+05:30",
+          "durationMinutes": 635,
+          "vehicleType": "Express"
+        }
+      ],
+      "fares": [
+        { "code": "SL", "label": "Sleeper", "priceMajor": 495, "availability": 42, "refundable": true },
+        { "code": "3A", "label": "AC 3 Tier", "priceMajor": 1310, "availability": 8, "refundable": true },
+        { "code": "2A", "label": "AC 2 Tier", "priceMajor": 1875, "availabilityLabel": "RAC 3" }
+      ],
+      "cancellationPolicy": "Free until 48h before departure.",
+      "baggageSummary": "No fixed limit",
+      "revalidationToken": "opaque-string"
+    }
+  ],
+  "validUntil": "2030-11-01T12:30:00.000Z",
+  "searchId": "fixture-search",
+  "warnings": []
+}

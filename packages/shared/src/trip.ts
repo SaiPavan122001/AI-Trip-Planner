@@ -1,17 +1,35 @@
 import { z } from 'zod';
 import { Place } from './geo.js';
+import { SUPPORTED_CURRENCY } from './money.js';
 
 /** ISO date, no time component: the traveller thinks in dates, not instants. */
-export const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD');
+export const IsoDate = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD')
+  // The shape alone accepts "2026-02-30" and "2026-13-45". A real calendar
+  // date survives a round trip through the calendar unchanged.
+  .refine((d) => {
+    const [y, m, day] = d.split('-').map(Number);
+    const t = new Date(Date.UTC(y!, m! - 1, day!));
+    return t.getUTCFullYear() === y && t.getUTCMonth() === m! - 1 && t.getUTCDate() === day;
+  }, 'not a real calendar date');
 export type IsoDate = z.infer<typeof IsoDate>;
+
+/**
+ * A local time of day, "HH:MM" on the 24-hour clock. Compared as text, so the
+ * shape is strict: "9:00" or "25:00" would compare wrongly and are refused.
+ */
+export const LocalTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'HH:MM, 24-hour clock');
+export type LocalTime = z.infer<typeof LocalTime>;
 
 /**
  * Step 1 of the funnel. Deliberately minimal: nothing else may be asked before
  * these five facts exist, because every later question depends on them.
  */
 export const TripIntentInput = z.object({
-  originQuery: z.string().min(1),
-  destinationQuery: z.string().min(1),
+  // Typed by a person and sent to a place lookup: bounded, so a request cannot make it carry a novel.
+  originQuery: z.string().trim().min(1).max(200),
+  destinationQuery: z.string().trim().min(1).max(200),
   departureDate: IsoDate,
   returnDate: IsoDate.nullable().default(null),
   travelers: z.object({
@@ -19,11 +37,13 @@ export const TripIntentInput = z.object({
     children: z.number().int().min(0).max(20).default(0),
     infants: z.number().int().min(0).max(10).default(0),
   }),
-  /** Currency the traveller thinks in. Host-configured default, never guessed silently. */
+  /** Always INR: see SUPPORTED_CURRENCY. Accepted in the request so the API
+   *  contract can widen later without changing shape. */
   currency: z
-    .string()
-    .regex(/^[A-Z]{3}$/)
-    .default('INR'),
+    .literal(SUPPORTED_CURRENCY, {
+      errorMap: () => ({ message: 'Trips are planned in Indian rupees (INR).' }),
+    })
+    .default(SUPPORTED_CURRENCY),
 });
 export type TripIntentInput = z.infer<typeof TripIntentInput>;
 

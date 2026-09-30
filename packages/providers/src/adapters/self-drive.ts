@@ -1,8 +1,11 @@
 import {
-  divide,
+  addMinutes,
   fail,
+  isoWithOffset,
+  localParts,
   money,
   ok,
+  utcFromLocal,
   type IsoDate,
   type Place,
   type ProviderResult,
@@ -54,6 +57,7 @@ export interface SelfDriveOptions {
   departLocalTime: string;
   /** Currency the trip is costed in; a drive with no profile is still summed. */
   currency: string;
+  signal?: AbortSignal;
 }
 
 export class SelfDriveProvider implements BaseProvider {
@@ -82,12 +86,25 @@ export class SelfDriveProvider implements BaseProvider {
       );
     }
 
-    const departureAt = `${opts.date}T${opts.departLocalTime}:00`;
+    if (!/^\d{2}:\d{2}$/.test(opts.departLocalTime)) {
+      return fail(
+        'invalid_request',
+        DESCRIPTOR.id,
+        DESCRIPTOR.label,
+        'The departure time for this drive is not a valid time of day.',
+      );
+    }
+
+    // The departure is a wall-clock time where the traveller starts, so it is
+    // resolved in the origin's zone. Parsing it with `new Date()` would use
+    // whatever zone the server happens to run in.
+    const departUtc = utcFromLocal(opts.date, opts.departLocalTime, opts.origin.timezone);
     const route = await this.routing.route({
       from: opts.origin.coordinates,
       to: opts.destination.coordinates,
       profile: 'driving',
-      departAt: new Date(departureAt).toISOString(),
+      departAt: departUtc,
+      ...(opts.signal ? { signal: opts.signal } : {}),
     });
     if (route.status !== 'ok') return route;
 
@@ -102,22 +119,56 @@ export class SelfDriveProvider implements BaseProvider {
     const breakMinutes = breaks * (profile?.breakMinutes ?? 30);
     const totalMinutes = durationMinutes + breakMinutes;
 
-    const warnings: string[] = [];
-    let total = null as ReturnType<typeof money> | null;
+    // Driving your own car has no fare: nobody sells you a ticket, so the
+    // transport cost is a known ₹0. What it does cost is shown separately,
+    // and only where it can be calculated. Fuel and wear come from the
+    // operator's configured vehicle profile, as labelled estimates; tolls and
+    // parking have no data source, so they are named as not calculated
+    // rather than counted as zero.
+    // What the routing source said about itself comes first: which provider
+    // measured the drive, and (when a preferred one failed and another answered)
+    // what went wrong, so a degraded answer is never presented as an ordinary one.
+    const warnings: string[] = [`Distance and time come from ${route.provenance.providerLabel}.`, ...route.warnings];
+    const itemisedFees: TransportOffer['itemisedFees'] = [];
+    const unpricedCosts: string[] = [];
     if (profile) {
-      const energy = (distanceKm / 100) * profile.consumptionPer100Km * profile.energyPrice;
-      const wear = distanceKm * profile.perKmAllowance;
-      total = money(energy + wear, profile.currency);
-      warnings.push(
-        'Tolls, parking and fines are not included: no toll data source is configured for this route.',
-      );
+      const basis = `Estimated from the configured vehicle profile over ${Math.round(distanceKm)} km`;
+      const fuel = money((distanceKm / 100) * profile.consumptionPer100Km * profile.energyPrice, profile.currency);
+      itemisedFees.push({
+        label: 'Fuel',
+        amount: fuel,
+        included: false,
+        isEstimate: true,
+        basis: `${basis}: ${profile.consumptionPer100Km} per 100 km at ${profile.energyPrice} per unit`,
+      });
+      if (profile.perKmAllowance > 0) {
+        itemisedFees.push({
+          label: 'Wear and tear',
+          amount: money(distanceKm * profile.perKmAllowance, profile.currency),
+          included: false,
+          isEstimate: true,
+          basis: `${basis}: ${profile.perKmAllowance} per km`,
+        });
+      }
     } else {
+      unpricedCosts.push('Fuel', 'Wear and tear');
       warnings.push(
-        'No vehicle profile is configured (SELF_DRIVE_PROFILE), so this drive is shown with distance and time only, without a cost.',
+        'Fuel and wear are not calculated for this drive because no vehicle profile is configured.',
       );
     }
+    unpricedCosts.push('Tolls', 'Parking');
+    warnings.push('Tolls and parking are not calculated: no source for them is connected.');
 
-    const arrivalAt = new Date(Date.parse(departureAt) + totalMinutes * 60_000).toISOString();
+    // Arithmetic on the instant, then each end written as local wall time in
+    // its own zone with its offset, the same shape every other transport
+    // segment uses. A drive across a zone boundary arrives in the
+    // destination's local time, not the origin's.
+    const arriveUtc = addMinutes(departUtc, totalMinutes);
+    const departureAt = isoWithOffset(departUtc, opts.origin.timezone);
+    const arrivalAt = isoWithOffset(arriveUtc, opts.destination.timezone);
+    const overnight =
+      localParts(departUtc, opts.origin.timezone).date !==
+      localParts(arriveUtc, opts.destination.timezone).date;
 
     const offer: TransportOffer = {
       id: `self-drive:${opts.origin.id}-${opts.destination.id}-${opts.date}`,
@@ -148,16 +199,15 @@ export class SelfDriveProvider implements BaseProvider {
           vehicleType: 'own_vehicle',
         },
       ],
-      totalPrice: total ?? money(0, opts.currency),
-      pricePerTraveler: total
-        ? divide(total, Math.max(1, profile?.averageOccupancy ?? 1))
-        : money(0, opts.currency),
-      itemisedFees: [],
+      totalPrice: money(0, opts.currency),
+      pricePerTraveler: money(0, opts.currency),
+      itemisedFees,
+      unpricedCosts,
       fareClasses: [],
       selectedFareCode: null,
       totalDurationMinutes: totalMinutes,
       transfers: 0,
-      overnight: departureAt.slice(0, 10) !== arrivalAt.slice(0, 10),
+      overnight,
       refundable: null,
       cancellationPolicy: null,
       baggageSummary: 'Limited only by the vehicle',
@@ -168,9 +218,7 @@ export class SelfDriveProvider implements BaseProvider {
         retrievedAt: new Date().toISOString(),
         validUntil: null,
         searchId: null,
-        attribution: profile
-          ? `Cost modelled from the configured vehicle profile: ${profile.consumptionPer100Km}/100km at ${profile.energyPrice}/unit plus ${profile.perKmAllowance}/km wear`
-          : null,
+        attribution: null,
       },
     };
 
