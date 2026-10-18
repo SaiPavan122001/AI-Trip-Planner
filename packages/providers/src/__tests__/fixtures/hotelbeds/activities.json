@@ -1,0 +1,42 @@
+{
+  "operationId": "synthetic-fixture",
+  "pagination": { "itemsPerPage": 100, "page": 1, "totalItems": 3 },
+  "activities": [
+    {
+      "activityCode": "ACT-100",
+      "currencyName": "INR",
+      "content": { "code": "ACT-100", "name": "Fixture Heritage Walk", "type": "TICKET", "currency": "INR" },
+      "amountsFrom": [{ "paxType": "ADULT", "amount": 1500.0 }],
+      "modalities": [
+        {
+          "code": "STD",
+          "name": "Standard",
+          "duration": { "value": "2.5", "metric": "HOURS" },
+          "rates": [
+            {
+              "rateCode": "STANDARD",
+              "rateClass": "NRF",
+              "freeCancellation": false,
+              "rateDetails": [{ "totalAmount": { "amount": 3000.0 } }, { "totalAmount": { "amount": 3600.0 } }]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "activityCode": "ACT-200",
+      "currencyName": "INR",
+      "content": { "code": "ACT-200", "name": "Fixture Spice Tour", "type": "TICKET" },
+      "amountsFrom": [
+        { "paxType": "ADULT", "amount": 800.0 },
+        { "paxType": "CHILD", "amount": 400.0 }
+      ],
+      "modalities": [{ "code": "STD", "name": "Standard", "duration": 3 }]
+    },
+    {
+      "activityCode": "ACT-300",
+      "content": { "name": "Fixture Unpriced Tour" },
+      "modalities": []
+    }
+  ]
+}

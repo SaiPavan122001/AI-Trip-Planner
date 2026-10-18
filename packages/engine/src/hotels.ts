@@ -80,7 +80,7 @@ export async function searchHotels(deps: HotelSearchDeps): Promise<HotelSearchRe
     return { ...emptyResult(), notes: [] };
   }
   if (registry.hotels.length === 0) {
-    const missing = registry.missingCapabilityNote('hotels', ['amadeus']);
+    const missing = registry.missingCapabilityNote('hotels', ['amadeus', 'hotelbeds-hotels']);
     return { ...emptyResult(), notes: [noteFromFailure(missing, 'hotels')] };
   }
 

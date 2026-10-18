@@ -6,14 +6,10 @@ Wayfare (AI Trip Planner): a TypeScript monorepo, India-focused, INR only. Read,
 
 ## Hard environment rules (from the user; absolute)
 
-- The project is on a USB drive: `H:\Projects\Mutli Agent AI Trip Planner\AI-Trip-Planner`
-  (note the spelling "Mutli"). C: is nearly full (345 MB free at the end of Phase 1; 2.5 GB after the user freed space during Phase 2).
-- **Nothing project-related may be written to C:** — no node_modules, npm cache, TEMP/TMP output,
-  databases, logs, builds, virtualenvs, or global installs. Before installing anything, work out
-  where it will be written; if it cannot stay on H:, stop and ask.
-- Before every npm/node command in a shell: `source "/h/Projects/Mutli Agent AI Trip Planner/.devcache/env.sh"`
-  (PowerShell: `.devcache\env.ps1`). It points the npm cache, TEMP/TMP and APPDATA at
-  `H:\...\.devcache` (a sibling of the repo, not versioned) and disables telemetry.
+- The project lives on the local drive: `C:\Users\adusu\Projects\AI-Trip-Planner`. The old USB drive (H:) is no
+  longer used (changed by the user after C: space was freed). Run everything on C:; do not use H:.
+- No special environment script is needed: run npm/node directly (default npm cache and TEMP). Do not install
+  global packages.
 - Do not reinstall or relocate system software (Node, Git, Docker, VS Code, Claude Code).
 - If C: free space is low or shrinking, tell the user; do not start heavy work.
 
@@ -42,7 +38,8 @@ Wayfare (AI Trip Planner): a TypeScript monorepo, India-focused, INR only. Read,
 - Never delete the old npm cache on C: (the user asked for it to be left alone).
 - No destructive DB commands. Do not weaken tests, lint or TypeScript. Never claim a check passed
   unless it was executed.
-- Do not upgrade major dependencies (Next.js, Vitest, …).
+- Do not upgrade major dependencies (Next.js, …) without the user's say-so. The user approved Vitest 2 → 5 and
+  Tailwind 3 → 4 to clear the dependency audit (see DECISIONS.md); Next.js stays on 15.
 - Ask the user only if a decision (1) changes an explicit product requirement, (2) has materially
   different interpretations, (3) needs an external credential/service that is unavailable, or
   (4) blocks safe progress. Otherwise decide, and record important decisions in `DECISIONS.md`.
@@ -70,7 +67,8 @@ answers with citations, the vector store interface, the evaluation harness; noth
 (deterministic planner: `plans.ts` orchestrates, `optimize.ts` chooses, `feasibility.ts` reports,
 `provider-calls.ts` asks providers safely) → `packages/agents` (planning agents, budget and validation services,
 orchestrator; Phase 2) → `apps/api` (Fastify 5, Prisma 5.22, Zod) and `apps/web` (Next 15.5,
-React 18, Tailwind 3). Tests: Vitest 2.1. Lint: ESLint 10 flat config at the root. Node ≥ 22.
+React 18, Tailwind 4 with its theme in `app/globals.css`). Tests: Vitest 5 (each package has a `vitest.config.ts`
+that runs `src/**/*.test.ts` only). Lint: ESLint 10 flat config at the root. Node ≥ 22.
 Docs: `README.md`, `docs/api.md`, `docs/architecture.md`, `docs/providers.md`, `docs/reliability.md`,
 `docs/threat-model.md`, `docs/observability.md`, `docs/knowledge.md`, `docs/booking.md`, `SECURITY.md`, `CONTRIBUTING.md`.
 
@@ -175,6 +173,9 @@ see their changes.
   from code points at run time (`prompt-safety.ts` does the latter), and scan changed files for invisible characters
   before finishing. Never use `/tmp` in a command: Git Bash maps it to C:.
 - The API package's `tsc` build also compiles its tests, so a type error in a test fails `npm run build`.
+- **Do not run `npm run build` (it includes `next build`) while `next dev` is running**: both use `apps/web/.next`, and the
+  dev server then fails with `Cannot find module './NNN.js'`. Stop the web dev server, `rm -rf apps/web/.next`, restart it.
+  To rebuild the packages only while the web app runs: `npm run build -w @trip/shared -w @trip/telemetry -w @trip/providers -w @trip/llm -w @trip/knowledge -w @trip/engine -w @trip/agents -w @trip/api`.
 - Measure before optimising: `npx tsx packages/engine/scripts/measure-plan.ts` (fake providers, 150 ms per call).
 
 ## When a new session starts

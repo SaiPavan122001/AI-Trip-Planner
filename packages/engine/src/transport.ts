@@ -99,20 +99,20 @@ export async function enrichWithAirports(
   signal?: AbortSignal,
 ): Promise<{ place: Place; note: ProviderNote | null }> {
   if (place.airports.length > 0 || place.iataCityCode) return { place, note: null };
-  const amadeus = registry.amadeus;
-  if (!amadeus) {
+  const duffel = registry.duffel;
+  if (!duffel) {
     return {
       place,
       note: noteFrom(
         'not_configured',
-        'amadeus',
-        'Amadeus',
-        `No airport reference data is available for ${place.name}: set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search flights.`,
+        'duffel',
+        'Duffel',
+        `No airport reference data is available for ${place.name}: set DUFFEL_ACCESS_TOKEN to search flights.`,
         'flights',
       ),
     };
   }
-  const res = await amadeus.nearestAirports(place.coordinates, undefined, signal);
+  const res = await duffel.nearestAirports(place.coordinates, undefined, signal);
   if (!isOk(res)) {
     return {
       place,
@@ -280,7 +280,7 @@ async function searchFlightMode(
   date: IsoDate,
 ): Promise<ModeResult> {
   const { registry, intent, profile, constraints } = deps;
-  if (registry.flights.length === 0) return missingMode(registry, 'flight', 'flights', ['amadeus']);
+  if (registry.flights.length === 0) return missingMode(registry, 'flight', 'flights', ['duffel']);
 
   const [origin, destination] = await Promise.all([
     enrichWithAirports(registry, from, deps.signal),

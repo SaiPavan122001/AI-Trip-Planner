@@ -31,79 +31,6 @@ export const AmadeusToken = z.object({
   expires_in: z.number().positive(),
 });
 
-const AmadeusEndpoint = z.object({
-  iataCode: z.string().min(2).max(4),
-  terminal: z.string().optional(),
-  at: LocalDateTime,
-});
-
-export const AmadeusFlightOffer = z.object({
-  id: z.string().min(1),
-  itineraries: z
-    .array(
-      z.object({
-        duration: z.string(),
-        segments: z
-          .array(
-            z.object({
-              departure: AmadeusEndpoint,
-              arrival: AmadeusEndpoint,
-              carrierCode: z.string().min(1),
-              number: z.string().min(1),
-              aircraft: z.object({ code: z.string() }).optional(),
-              duration: z.string().optional(),
-              numberOfStops: z.number().optional(),
-            }),
-          )
-          .min(1),
-      }),
-    )
-    .min(1),
-  price: z.object({
-    currency: Currency,
-    total: Amount,
-    base: Amount.optional(),
-    grandTotal: Amount.optional(),
-    fees: z.array(z.object({ amount: Amount, type: z.string() })).optional(),
-  }),
-  numberOfBookableSeats: z.number().int().optional(),
-  travelerPricings: z
-    .array(
-      z.object({
-        price: z.object({ total: Amount, currency: Currency }),
-        fareDetailsBySegment: z.array(
-          z.object({
-            cabin: z.string().optional(),
-            class: z.string().optional(),
-            includedCheckedBags: z
-              .object({ quantity: z.number().optional(), weight: z.number().optional() })
-              .optional(),
-          }),
-        ),
-      }),
-    )
-    .optional(),
-  pricingOptions: z.object({ refundableFare: z.boolean().optional() }).optional(),
-});
-export type AmadeusFlightOffer = z.infer<typeof AmadeusFlightOffer>;
-
-export const AmadeusFlightSearchResponse = z.object({
-  data: z.array(z.unknown()),
-  dictionaries: z.object({ carriers: z.record(z.string(), z.string()).optional() }).optional(),
-});
-
-export const AmadeusPricingResponse = z.object({
-  data: z.object({ flightOffers: z.array(z.unknown()) }),
-});
-
-export const AmadeusAirport = z.object({
-  iataCode: z.string().min(2).max(4),
-  name: z.string(),
-  geoCode: z.object({ latitude: Latitude, longitude: Longitude }).optional(),
-  distance: z.object({ value: z.number().nonnegative(), unit: z.string() }).optional(),
-});
-export const AmadeusAirportsResponse = z.object({ data: z.array(z.unknown()) });
-
 export const AmadeusHotel = z.object({
   hotelId: z.string().min(1),
   name: z.string(),
@@ -173,6 +100,257 @@ export const AmadeusHotelOffersResponse = z.object({
   warnings: z.array(z.object({ detail: z.string().optional() })).optional(),
 });
 export const AmadeusSingleHotelOfferResponse = z.object({ data: z.unknown() });
+
+// ------------------------------------------------------------------- Duffel
+//
+// Taken from https://duffel.com/docs/api: an offer request is answered with
+// `data.offers`; amounts are decimal strings; segment times carry no offset
+// (they are local to the airport). Only the fields the adapter reads are listed.
+
+const DuffelAirport = z.object({
+  iata_code: z.string().min(2).max(4),
+  name: z.string().optional(),
+  latitude: z.number().nullish(),
+  longitude: z.number().nullish(),
+  time_zone: z.string().nullish(),
+});
+
+const DuffelCarrier = z.object({
+  iata_code: z.string().min(2).max(3).nullish(),
+  name: z.string().nullish(),
+});
+
+export const DuffelOffer = z.object({
+  id: z.string().min(1),
+  total_amount: Amount,
+  total_currency: Currency,
+  expires_at: z.string().nullish(),
+  owner: DuffelCarrier.nullish(),
+  passengers: z.array(z.unknown()).nullish(),
+  slices: z
+    .array(
+      z.object({
+        duration: z.string().nullish(),
+        segments: z
+          .array(
+            z.object({
+              marketing_carrier: DuffelCarrier,
+              operating_carrier: DuffelCarrier.nullish(),
+              marketing_carrier_flight_number: z.string().min(1),
+              origin: DuffelAirport,
+              destination: DuffelAirport,
+              origin_terminal: z.string().nullish(),
+              destination_terminal: z.string().nullish(),
+              departing_at: LocalDateTime,
+              arriving_at: LocalDateTime,
+              duration: z.string().nullish(),
+              aircraft: z.object({ name: z.string().nullish(), iata_code: z.string().nullish() }).nullish(),
+              passengers: z
+                .array(
+                  z.object({
+                    cabin_class: z.string().nullish(),
+                    cabin_class_marketing_name: z.string().nullish(),
+                    fare_basis_code: z.string().nullish(),
+                    baggages: z.array(z.object({ type: z.string(), quantity: z.number() })).nullish(),
+                  }),
+                )
+                .nullish(),
+            }),
+          )
+          .min(1),
+      }),
+    )
+    .min(1),
+  conditions: z
+    .object({
+      refund_before_departure: z
+        .object({
+          allowed: z.boolean(),
+          penalty_amount: z.string().nullish(),
+          penalty_currency: z.string().nullish(),
+        })
+        .nullish(),
+    })
+    .nullish(),
+});
+export type DuffelOffer = z.infer<typeof DuffelOffer>;
+
+export const DuffelOfferRequestResponse = z.object({
+  data: z.object({ offers: z.array(z.unknown()) }),
+});
+
+export const DuffelSingleOfferResponse = z.object({ data: z.unknown() });
+
+export const DuffelPlace = z.object({
+  type: z.string(),
+  iata_code: z.string().min(2).max(4),
+  name: z.string(),
+  latitude: Latitude.nullish(),
+  longitude: Longitude.nullish(),
+});
+export const DuffelPlacesResponse = z.object({ data: z.array(z.unknown()) });
+
+// --------------------------------------------------------------- Hotelbeds
+//
+// From https://developer.hotelbeds.com/documentation. Hotelbeds sends amounts
+// and coordinates as strings in some places and numbers in others, so both are
+// read. Only the fields the adapters use are listed; Hotelbeds' own examples
+// were the reference, not a recorded response.
+
+const HbNumberLike = z.union([z.string(), z.number()]);
+const HbAmount = HbNumberLike.refine(
+  (v) => String(v).trim() !== '' && Number.isFinite(Number(v)) && Number(v) >= 0,
+  'not a non-negative amount',
+);
+const HbCoordinate = HbNumberLike.refine((v) => Number.isFinite(Number(v)), 'not a coordinate');
+
+export const HotelbedsRate = z.object({
+  rateKey: z.string().min(1),
+  rateClass: z.string().nullish(),
+  rateType: z.string().nullish(),
+  net: HbAmount,
+  sellingRate: HbAmount.nullish(),
+  hotelMandatory: z.boolean().nullish(),
+  allotment: z.number().nullish(),
+  paymentType: z.string().nullish(),
+  packaging: z.boolean().nullish(),
+  boardCode: z.string().nullish(),
+  boardName: z.string().nullish(),
+  rooms: z.number().int().positive().nullish(),
+  adults: z.number().nullish(),
+  children: z.number().nullish(),
+  cancellationPolicies: z.array(z.object({ amount: HbAmount, from: z.string() })).nullish(),
+  taxes: z
+    .object({
+      allIncluded: z.boolean().nullish(),
+      taxes: z
+        .array(
+          z.object({
+            included: z.boolean().nullish(),
+            amount: HbAmount.nullish(),
+            currency: z.string().nullish(),
+            type: z.string().nullish(),
+          }),
+        )
+        .nullish(),
+    })
+    .nullish(),
+});
+export type HotelbedsRate = z.infer<typeof HotelbedsRate>;
+
+export const HotelbedsHotel = z.object({
+  code: HbNumberLike,
+  name: z.string(),
+  categoryCode: z.string().nullish(),
+  categoryName: z.string().nullish(),
+  destinationName: z.string().nullish(),
+  zoneName: z.string().nullish(),
+  latitude: HbCoordinate.nullish(),
+  longitude: HbCoordinate.nullish(),
+  currency: z.string().length(3),
+  rooms: z.array(
+    z.object({
+      code: z.string(),
+      name: z.string().nullish(),
+      rates: z.array(z.unknown()),
+    }),
+  ),
+});
+export type HotelbedsHotel = z.infer<typeof HotelbedsHotel>;
+
+export const HotelbedsAvailabilityResponse = z.object({
+  hotels: z.object({ hotels: z.array(z.unknown()).nullish() }).nullish(),
+});
+export const HotelbedsCheckRateResponse = z.object({ hotel: z.unknown() });
+
+export const HotelbedsContentResponse = z.object({ hotels: z.array(z.unknown()).nullish() });
+export const HotelbedsContentHotel = z.object({
+  code: HbNumberLike,
+  description: z.object({ content: z.string().nullish() }).nullish(),
+  address: z.object({ content: z.string().nullish() }).nullish(),
+  city: z.object({ content: z.string().nullish() }).nullish(),
+});
+
+export const HotelbedsActivity = z.object({
+  activityCode: z.string().nullish(),
+  currencyName: z.string().nullish(),
+  content: z
+    .object({
+      code: z.string().nullish(),
+      name: z.string().nullish(),
+      currency: z.string().nullish(),
+      activityCode: z.string().nullish(),
+    })
+    .nullish(),
+  amountsFrom: z
+    .array(z.object({ paxType: z.string(), amount: HbAmount.nullish() }))
+    .nullish(),
+  modalities: z
+    .array(
+      z.object({
+        code: z.string().nullish(),
+        name: z.string().nullish(),
+        duration: z
+          .union([HbNumberLike, z.object({ value: HbNumberLike.nullish(), metric: z.string().nullish() })])
+          .nullish(),
+        rates: z
+          .array(
+            z.object({
+              rateCode: z.string().nullish(),
+              rateClass: z.string().nullish(),
+              freeCancellation: z.boolean().nullish(),
+              rateDetails: z
+                .array(
+                  z.object({
+                    totalAmount: z.object({ amount: HbAmount }).nullish(),
+                  }),
+                )
+                .nullish(),
+            }),
+          )
+          .nullish(),
+      }),
+    )
+    .nullish(),
+}).refine((a) => Boolean(a.activityCode ?? a.content?.code ?? a.content?.activityCode), 'an activity needs a code');
+export type HotelbedsActivity = z.infer<typeof HotelbedsActivity>;
+export const HotelbedsActivitiesResponse = z.object({ activities: z.array(z.unknown()).nullish() });
+
+export const HotelbedsTransferService = z.object({
+  id: z.number().or(z.string()),
+  direction: z.string().nullish(),
+  transferType: z.string().nullish(),
+  vehicle: z.object({ code: z.string().nullish(), name: z.string().nullish() }).nullish(),
+  category: z.object({ code: z.string().nullish(), name: z.string().nullish() }).nullish(),
+  minPaxCapacity: z.number().nullish(),
+  maxPaxCapacity: z.number().nullish(),
+  rateKey: z.string().min(1),
+  price: z.object({
+    totalAmount: HbAmount,
+    netAmount: HbAmount.nullish(),
+    currencyId: z.string().length(3),
+  }),
+  cancellationPolicies: z
+    .array(z.object({ amount: HbAmount.nullish(), from: z.string().nullish(), currencyId: z.string().nullish() }))
+    .nullish(),
+  content: z
+    .object({
+      transferDetailInfo: z
+        .array(
+          z.object({
+            name: z.string().nullish(),
+            description: z.string().nullish(),
+            type: z.string().nullish(),
+            value: HbNumberLike.nullish(),
+            metric: z.string().nullish(),
+          }),
+        )
+        .nullish(),
+    })
+    .nullish(),
+});
+export type HotelbedsTransferService = z.infer<typeof HotelbedsTransferService>;
+export const HotelbedsTransfersResponse = z.object({ services: z.array(z.unknown()).nullish() });
 
 // --------------------------------------------------------------------- OSRM
 

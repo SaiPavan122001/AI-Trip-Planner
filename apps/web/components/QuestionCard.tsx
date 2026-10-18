@@ -311,7 +311,7 @@ function MoneyInput({
       <div className="flex items-center rounded-xl border border-sand-300 bg-white">
         <span className="px-3 text-sm text-ink-faint">{currency}</span>
         <input
-          className="w-40 border-0 bg-transparent py-3 pr-4 text-sm tabular-nums focus:outline-none"
+          className="w-40 border-0 bg-transparent py-3 pr-4 text-sm tabular-nums focus:outline-hidden"
           inputMode="decimal"
           value={value}
           onChange={(e) => setValue(e.target.value.replace(/[^\d.]/g, ''))}

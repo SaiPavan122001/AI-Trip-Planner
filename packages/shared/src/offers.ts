@@ -123,6 +123,12 @@ export const HotelRoomOffer = z.object({
   totalPrice: Money,
   pricePerNight: Money,
   taxesIncluded: z.boolean().nullable().default(null),
+  /**
+   * Taxes or fees the provider says are collected at the property and are not
+   * inside `totalPrice`, for ONE room over the stay. Null means the provider
+   * stated none (not that there are none). The plan's cost adds it.
+   */
+  payAtProperty: Money.nullable().default(null),
   revalidationToken: z.string().nullable().default(null),
 });
 export type HotelRoomOffer = z.infer<typeof HotelRoomOffer>;
@@ -131,6 +137,8 @@ export const HotelOffer = z.object({
   id: z.string(),
   name: z.string(),
   propertyType: z.string().nullable().default(null),
+  /** Static descriptive text from the provider's content service; never a source of price or availability. */
+  description: z.string().nullable().default(null),
   /** Star/category exactly as the provider reports it. Null when unrated. */
   category: z.number().nullable().default(null),
   guestRating: z.number().nullable().default(null),
@@ -149,7 +157,7 @@ export type HotelOffer = z.infer<typeof HotelOffer>;
 
 export const TransferOffer = z.object({
   id: z.string(),
-  mode: z.enum(['taxi', 'ride_hail', 'shuttle', 'public_transit', 'walk', 'rental_car', 'drive']),
+  mode: z.enum(['taxi', 'auto_rickshaw', 'ride_hail', 'shuttle', 'public_transit', 'walk', 'rental_car', 'drive']),
   from: z.object({ name: z.string(), coordinates: Coordinates }),
   to: z.object({ name: z.string(), coordinates: Coordinates }),
   distanceKm: z.number(),
@@ -162,6 +170,21 @@ export const TransferOffer = z.object({
   /** Where an estimate comes from, e.g. a configured per-km tariff. */
   estimateBasis: z.string().nullable().default(null),
   accessible: z.boolean().nullable().default(null),
+  /**
+   * Set only when a transfer provider quoted this exact service (the price is
+   * then not an estimate). Distance and time still come from routing.
+   */
+  quote: z
+    .object({
+      vehicle: z.string().nullable().default(null),
+      serviceType: z.string().nullable().default(null),
+      maxPassengers: z.number().int().nullable().default(null),
+      luggage: z.string().nullable().default(null),
+      cancellationPolicy: z.string().nullable().default(null),
+      revalidationToken: z.string().nullable().default(null),
+    })
+    .nullable()
+    .default(null),
   provenance: ProviderProvenance,
 });
 export type TransferOffer = z.infer<typeof TransferOffer>;

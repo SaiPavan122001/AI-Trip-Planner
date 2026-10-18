@@ -22,6 +22,28 @@ const TariffSchema = z.object({
   perKm: z.number().nonnegative(),
   perMinute: z.number().nonnegative(),
   nightMultiplier: z.number().min(1).default(1.25),
+  minimumFare: z.number().nonnegative().default(0),
+  source: z.string().min(1).max(200).optional(),
+  asOf: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'a date such as 2026-01-31').optional(),
+});
+
+// A bus fare MODEL, never a default: the numbers must come from the operator, who
+// also says where they are from and when they were checked.
+const BusCategorySchema = z.object({
+  label: z.string().min(1).max(60),
+  perKm: z.number().nonnegative(),
+  averageSpeedKmh: z.number().positive(),
+  minimumFare: z.number().nonnegative().default(0),
+});
+const BusFareSchema = z.object({
+  currency: InrOnly,
+  source: z.string().min(3).max(200),
+  asOf: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'a date such as 2026-01-31'),
+  baseFare: z.number().nonnegative().default(0),
+  assumedDepartureTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'a time such as 08:00').default('08:00'),
+  categories: z
+    .record(z.string().regex(/^[a-z_]{2,30}$/), BusCategorySchema)
+    .refine((c) => Object.keys(c).length > 0, 'at least one category'),
 });
 
 const VehicleProfileSchema = z.object({
@@ -67,6 +89,8 @@ export interface ProvidersEnv {
     environment: 'test' | 'production';
     minIntervalMs: number;
   } | null;
+  /** Flights. `environment` is what the token is: `test` is the default and must match a `duffel_test_` token. */
+  duffel: { accessToken: string; environment: 'test' | 'live'; minIntervalMs: number } | null;
   google: { apiKey: string; minIntervalMs: number } | null;
   rail: {
     baseUrl: string;
@@ -85,6 +109,21 @@ export interface ProvidersEnv {
     timeoutMs: number;
   } | null;
   taxiTariffs: Record<string, z.infer<typeof TariffSchema>>;
+  autoTariffs: Record<string, z.infer<typeof TariffSchema>>;
+  /** The operator's bus fare assumptions; with none, no bus estimate is made. */
+  busFare: z.infer<typeof BusFareSchema> | null;
+  /**
+   * Hotelbeds Hotel, Activities and Transfers are three capabilities that may
+   * share one key pair. Each is on only when ITS credentials resolve and it has
+   * not been switched off, and reported on its own.
+   */
+  hotelbeds: {
+    environment: 'test' | 'live';
+    minIntervalMs: number;
+    hotels: { apiKey: string; secret: string } | null;
+    activities: { apiKey: string; secret: string } | null;
+    transfers: { apiKey: string; secret: string } | null;
+  };
   selfDriveProfile: z.infer<typeof VehicleProfileSchema> | null;
   /** Limits that apply to every provider call, whichever adapter makes it. */
   policy: {
@@ -132,6 +171,66 @@ function coverageFrom(raw: string | undefined): 'global' | string[] {
     .filter(Boolean);
 }
 
+/**
+ * Duffel has one base URL; the token's prefix says whether it is a test or a
+ * live token. Test mode is the default, and the token must match the mode the
+ * operator names, so a live token can never be used by leaving a setting out
+ * and a test token can never pass as live. The token is never put in a message.
+ */
+function loadDuffel(env: NodeJS.ProcessEnv): ProvidersEnv['duffel'] {
+  const token = env['DUFFEL_ACCESS_TOKEN']?.trim();
+  const rawMode = (env['DUFFEL_ENVIRONMENT'] ?? 'test').trim().toLowerCase();
+  if (rawMode !== 'test' && rawMode !== 'live') {
+    throw new Error('DUFFEL_ENVIRONMENT must be "test" or "live".');
+  }
+  if (!token) return null;
+  const prefix = token.startsWith('duffel_test_') ? 'test' : token.startsWith('duffel_live_') ? 'live' : null;
+  if (prefix === null) {
+    throw new Error('DUFFEL_ACCESS_TOKEN must be a Duffel access token (it starts with duffel_test_ or duffel_live_).');
+  }
+  if (prefix !== rawMode) {
+    throw new Error(
+      `DUFFEL_ACCESS_TOKEN is a ${prefix} token but DUFFEL_ENVIRONMENT is "${rawMode}". Set DUFFEL_ENVIRONMENT=${prefix} to use it on purpose.`,
+    );
+  }
+  return {
+    accessToken: token,
+    environment: rawMode,
+    minIntervalMs: wholeNumber(env['DUFFEL_MIN_INTERVAL_MS'], 500, 0, 'DUFFEL_MIN_INTERVAL_MS'),
+  };
+}
+
+/**
+ * Hotelbeds: one account, three APIs. HOTELBEDS_API_KEY + HOTELBEDS_SECRET are the
+ * shared pair; HOTELBEDS_<HOTELS|ACTIVITIES|TRANSFERS>_API_KEY + _SECRET give one
+ * API its own pair (Hotelbeds issues keys per API suite), and
+ * HOTELBEDS_<...>_ENABLED=false switches one API off. Half a pair stops start-up,
+ * naming the setting, never a value.
+ */
+function loadHotelbeds(env: NodeJS.ProcessEnv): ProvidersEnv['hotelbeds'] {
+  const mode = (env['HOTELBEDS_ENV'] ?? 'test').trim().toLowerCase();
+  if (mode !== 'test' && mode !== 'live') throw new Error('HOTELBEDS_ENV must be "test" or "live".');
+  const pair = (prefix: string): { apiKey: string; secret: string } | null => {
+    const apiKey = env[`${prefix}_API_KEY`]?.trim();
+    const secret = env[`${prefix}_SECRET`]?.trim();
+    if (!apiKey && !secret) return null;
+    if (!apiKey || !secret) throw new Error(`${prefix}_API_KEY and ${prefix}_SECRET must be set together.`);
+    return { apiKey, secret };
+  };
+  const shared = pair('HOTELBEDS');
+  const forApi = (name: 'HOTELS' | 'ACTIVITIES' | 'TRANSFERS') => {
+    if ((env[`HOTELBEDS_${name}_ENABLED`] ?? 'true').trim().toLowerCase() === 'false') return null;
+    return pair(`HOTELBEDS_${name}`) ?? shared;
+  };
+  return {
+    environment: mode,
+    minIntervalMs: wholeNumber(env['HOTELBEDS_MIN_INTERVAL_MS'], 250, 0, 'HOTELBEDS_MIN_INTERVAL_MS'),
+    hotels: forApi('HOTELS'),
+    activities: forApi('ACTIVITIES'),
+    transfers: forApi('TRANSFERS'),
+  };
+}
+
 export function loadProvidersEnv(env: NodeJS.ProcessEnv = process.env): ProvidersEnv {
   // A base URL is operator configuration, so it may name a host on the
   // operator's own network, but it must be plain http(s), carry no credentials,
@@ -141,6 +240,9 @@ export function loadProvidersEnv(env: NodeJS.ProcessEnv = process.env): Provider
   const tariffList = parseJsonEnv(env['GROUND_TRANSPORT_TARIFFS'], z.array(TariffSchema), 'GROUND_TRANSPORT_TARIFFS');
   const taxiTariffs: ProvidersEnv['taxiTariffs'] = {};
   for (const t of tariffList ?? []) taxiTariffs[t.currency] = t;
+  const autoList = parseJsonEnv(env['AUTO_RICKSHAW_TARIFFS'], z.array(TariffSchema), 'AUTO_RICKSHAW_TARIFFS');
+  const autoTariffs: ProvidersEnv['autoTariffs'] = {};
+  for (const t of autoList ?? []) autoTariffs[t.currency] = t;
 
   return {
     nominatim: {
@@ -163,6 +265,7 @@ export function loadProvidersEnv(env: NodeJS.ProcessEnv = process.env): Provider
             minIntervalMs: Number(env['AMADEUS_MIN_INTERVAL_MS'] ?? 120),
           }
         : null,
+    duffel: loadDuffel(env),
     google: env['GOOGLE_MAPS_API_KEY']
       ? {
           apiKey: env['GOOGLE_MAPS_API_KEY'],
@@ -190,6 +293,9 @@ export function loadProvidersEnv(env: NodeJS.ProcessEnv = process.env): Provider
         }
       : null,
     taxiTariffs,
+    autoTariffs,
+    busFare: parseJsonEnv(env['BUS_FARE_ESTIMATE'], BusFareSchema, 'BUS_FARE_ESTIMATE'),
+    hotelbeds: loadHotelbeds(env),
     selfDriveProfile: parseJsonEnv(env['SELF_DRIVE_PROFILE'], VehicleProfileSchema, 'SELF_DRIVE_PROFILE'),
     policy: {
       callTimeoutMs: positiveNumber(env['PROVIDER_CALL_TIMEOUT_MS'], 45_000, 'PROVIDER_CALL_TIMEOUT_MS'),

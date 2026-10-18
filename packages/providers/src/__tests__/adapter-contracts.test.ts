@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isOk, statusClass, type Place, type ProviderFailure, type ProviderResult } from '@trip/shared';
+import { isOk, statusClass, type Place, type ProviderResult } from '@trip/shared';
 import { AmadeusProvider } from '../adapters/amadeus.js';
 import { GooglePlacesProvider, GoogleRoutesProvider } from '../adapters/google-maps.js';
 import { GenericRailProvider } from '../adapters/generic-surface.js';
@@ -49,184 +49,15 @@ const bengaluru = place('Bengaluru', 12.9716, 77.5946, {
 
 /** The outcome the traveller sees, as a class. */
 const classOf = (r: ProviderResult<unknown>) => statusClass(r.status);
-const failure = (r: ProviderResult<unknown>): ProviderFailure => {
-  if (isOk(r)) throw new Error('expected a failure, got ok');
-  return r;
-};
 
 // ---------------------------------------------------------------- Amadeus
 
 const amadeus = () =>
   new AmadeusProvider({ clientId: 'placeholder-id', clientSecret: 'placeholder-secret', environment: 'test', minIntervalMs: 0 });
 
-const flightRequest = {
-  origin: hyderabad,
-  destination: bengaluru,
-  departureDate: '2030-11-10',
-  returnDate: null,
-  party: { adults: 2, children: 0, infants: 0 },
-  cabinClass: null,
-  maxStops: null,
-  preferredCarriers: [],
-  excludedCarriers: [],
-  currency: 'INR',
-  maxPrice: null,
-  limit: 20,
-};
-
 const withToken = (search: Parameters<typeof serve>[0]) => ({
   '/oauth2/token': json(fixture('amadeus/token.json')),
   ...search,
-});
-
-describe('Amadeus flights', () => {
-  it('maps the documented response and keeps the payload needed to re-price it', async () => {
-    const { requests } = serve(withToken({ '/flight-offers': json(fixture('amadeus/flight-offers.json')) }));
-    const res = await settle(amadeus().searchFlights(flightRequest));
-
-    expect(isOk(res)).toBe(true);
-    if (!isOk(res)) return;
-    expect(res.data).toHaveLength(2);
-    const [direct, viaChennai] = res.data;
-    expect(direct!.mode).toBe('flight');
-    expect(direct!.totalPrice).toEqual({ amount: 960_000, currency: 'INR' });
-    expect(direct!.pricePerTraveler).toEqual({ amount: 480_000, currency: 'INR' });
-    expect(direct!.refundable).toBe(false);
-    expect(direct!.segments[0]!.operatorName).toBe('INDIGO');
-    expect(direct!.fareClasses[0]).toMatchObject({ cabin: 'economy', checkedBagsIncluded: 1 });
-    expect(viaChennai!.transfers).toBe(1);
-    expect(viaChennai!.refundable).toBe(true);
-    // Fields this planner does not read must survive in the token: the pricing
-    // endpoint takes the offer back exactly as it was sent.
-    expect(JSON.parse(direct!.revalidationToken!)).toMatchObject({ source: 'GDS', id: '1' });
-    expect(res.provenance.provider).toBe('amadeus');
-
-    const search = requests.find((r) => r.url.pathname.endsWith('/flight-offers'))!;
-    expect(search.url.searchParams.get('originLocationCode')).toBe('HYD');
-    expect(search.url.searchParams.get('destinationLocationCode')).toBe('BLR');
-    expect(search.url.searchParams.get('currencyCode')).toBe('INR');
-    expect(search.headers['authorization']).toBe('Bearer fixture-access-token');
-  });
-
-  it('gives the outward and the return search different offer ids, though Amadeus numbers offers 1, 2 in each', async () => {
-    serve(withToken({ '/flight-offers': json(fixture('amadeus/flight-offers.json')) }));
-    const out = await settle(amadeus().searchFlights(flightRequest));
-    const back = await settle(
-      amadeus().searchFlights({ ...flightRequest, origin: bengaluru, destination: hyderabad, departureDate: '2030-11-14' }),
-    );
-    if (!isOk(out) || !isOk(back)) throw new Error('expected both searches to succeed');
-    expect(out.data[0]!.id).toBe('amadeus-flight:HYD-BLR-2030-11-10:1');
-    expect(back.data[0]!.id).toBe('amadeus-flight:BLR-HYD-2030-11-14:1');
-    expect(new Set([...out.data, ...back.data].map((o) => o.id)).size).toBe(4);
-  });
-
-  it('reports an empty answer as empty, not as a failure', async () => {
-    serve(withToken({ '/flight-offers': json({ data: [] }) }));
-    const res = await settle(amadeus().searchFlights(flightRequest));
-    expect(res.status).toBe('no_availability');
-    expect(classOf(res)).toBe('empty');
-  });
-
-  it('keeps the good offers and says how many were left out', async () => {
-    const body = fixture<{ data: Array<Record<string, unknown>> }>('amadeus/flight-offers.json');
-    delete body.data[0]!['price'];
-    serve(withToken({ '/flight-offers': json(body) }));
-    const res = await settle(amadeus().searchFlights(flightRequest));
-    expect(isOk(res)).toBe(true);
-    if (isOk(res)) {
-      expect(res.data).toHaveLength(1);
-      expect(res.warnings.join(' ')).toMatch(/1 flight offer\(s\) from .* could not be read/);
-    }
-  });
-
-  it('is unusable when no offer has the documented shape', async () => {
-    const body = fixture<{ data: Array<Record<string, unknown>> }>('amadeus/flight-offers.json');
-    body.data = body.data.map((o) => ({ ...o, price: { currency: 'INR', total: 'not-a-number' } }));
-    serve(withToken({ '/flight-offers': json(body) }));
-    const res = await settle(amadeus().searchFlights(flightRequest));
-    expect(res.status).toBe('invalid_response');
-    expect(classOf(res)).toBe('unusable');
-  });
-
-  it('is unusable when the list is missing altogether', async () => {
-    serve(withToken({ '/flight-offers': json({ meta: { count: 0 } }) }));
-    expect((await settle(amadeus().searchFlights(flightRequest))).status).toBe('invalid_response');
-  });
-
-  it('is unusable when the body is not JSON, and does not say the provider was unreachable', async () => {
-    serve(withToken({ '/flight-offers': text('<html>Bad gateway page</html>') }));
-    const res = failure(await settle(amadeus().searchFlights(flightRequest)));
-    expect(res.status).toBe('invalid_response');
-    expect(res.message).not.toMatch(/could not be reached/);
-  });
-
-  it('reports rate limiting with when to try again', async () => {
-    serve(withToken({ '/flight-offers': json({ errors: [] }, 429, { 'retry-after': '3' }) }));
-    const res = failure(await settle(amadeus().searchFlights(flightRequest)));
-    expect(res.status).toBe('rate_limited');
-    expect(res.retryAfterSeconds).toBe(3);
-    expect(classOf(res)).toBe('rate_limited');
-  });
-
-  it('reports a server error as a failure', async () => {
-    serve(withToken({ '/flight-offers': json({ errors: [{ status: 500 }] }, 500) }));
-    const res = await settle(amadeus().searchFlights(flightRequest));
-    expect(res.status).toBe('unavailable');
-    expect(classOf(res)).toBe('failed');
-  });
-
-  it('reports a call that never answers as a timeout', async () => {
-    serve(withToken({ '/flight-offers': hang }));
-    const res = await settle(amadeus().searchFlights(flightRequest), 5_000);
-    expect(res.status).toBe('timeout');
-    expect(classOf(res)).toBe('timed_out');
-  });
-
-  it('reports a connection that fails as unreachable', async () => {
-    serve(withToken({ '/flight-offers': networkError }));
-    const res = failure(await settle(amadeus().searchFlights(flightRequest)));
-    expect(res.status).toBe('unavailable');
-    expect(res.message).toMatch(/could not be reached/);
-  });
-
-  it('reports refused credentials as a configuration problem, not an outage', async () => {
-    serve({ '/oauth2/token': json({ error: 'invalid_client' }, 401) });
-    const res = failure(await settle(amadeus().searchFlights(flightRequest)));
-    expect(res.status).toBe('not_configured');
-    expect(res.message).toMatch(/rejected the configured credentials/);
-  });
-
-  it('says so when it has no credentials, and makes no request', async () => {
-    const { requests } = serve({});
-    const bare = new AmadeusProvider({ clientId: '', clientSecret: '', environment: 'test', minIntervalMs: 0 });
-    const res = await bare.searchFlights(flightRequest);
-    expect(res.status).toBe('not_configured');
-    expect(classOf(res)).toBe('not_available');
-    expect(requests).toHaveLength(0);
-  });
-
-  it('cannot search without an airport code and says which place lacks one', async () => {
-    serve({});
-    const res = failure(await amadeus().searchFlights({ ...flightRequest, origin: place('Nowhere', 1, 1) }));
-    expect(res.status).toBe('unsupported_route');
-    expect(res.message).toContain('Nowhere');
-  });
-});
-
-describe('Amadeus airports', () => {
-  it('maps the documented response', async () => {
-    serve(withToken({ '/airports': json(fixture('amadeus/airports.json')) }));
-    const res = await settle(amadeus().nearestAirports({ lat: 17.385, lon: 78.4867 }));
-    expect(isOk(res)).toBe(true);
-    if (isOk(res)) expect(res.data.map((a) => a.iataCode)).toEqual(['HYD', 'BPM']);
-  });
-
-  it('distinguishes empty from unusable', async () => {
-    serve(withToken({ '/airports': json({ data: [] }) }));
-    expect((await settle(amadeus().nearestAirports({ lat: 0, lon: 0 }))).status).toBe('no_availability');
-    serve(withToken({ '/airports': json({ data: [{ nope: true }] }) }));
-    expect((await settle(amadeus().nearestAirports({ lat: 0, lon: 0 }))).status).toBe('invalid_response');
-  });
 });
 
 describe('Amadeus hotels', () => {

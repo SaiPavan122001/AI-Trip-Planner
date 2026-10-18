@@ -27,6 +27,7 @@ export type ProviderKind =
   | 'ground_transport'
   | 'car_rental'
   | 'activity'
+  | 'transfer_quote'
   | 'routing';
 
 export interface ProviderDescriptor {
@@ -175,6 +176,47 @@ export interface GroundTransportProvider extends BaseProvider {
   searchTransfers(req: TransferSearchRequest): Promise<ProviderResult<TransferOffer[]>>;
 }
 
+/** A place a priced transfer starts or ends: an airport by IATA code, or a hotel by the provider's own code. */
+export interface TransferLocation {
+  type: 'IATA' | 'ATLAS';
+  code: string;
+}
+
+export interface QuotedTransferRequest {
+  from: TransferLocation;
+  to: TransferLocation;
+  /** Pick-up instant. */
+  at: string;
+  /** IANA zone of the pick-up, because the provider wants the local clock time. */
+  timezone: string;
+  party: PartySize;
+  currency: string;
+  signal?: AbortSignal;
+}
+
+export interface QuotedTransfer {
+  id: string;
+  kind: 'private' | 'shared';
+  vehicle: string | null;
+  category: string | null;
+  minPassengers: number | null;
+  maxPassengers: number | null;
+  luggage: string | null;
+  price: import('@trip/shared').Money;
+  cancellationPolicy: string | null;
+  /** The provider's own key for this exact service. */
+  token: string;
+}
+
+/**
+ * A transfer a provider will actually sell between two places it knows by code
+ * (an airport and a hotel). It is not a taxi-on-demand search: where it has
+ * nothing, the planner falls back to its routing estimate and says so.
+ */
+export interface QuotedTransferProvider extends BaseProvider {
+  quoteTransfers(req: QuotedTransferRequest): Promise<ProviderResult<QuotedTransfer[]>>;
+}
+
 export interface CarRentalSearchRequest {
   pickup: Place;
   dropoff: Place;
@@ -197,6 +239,12 @@ export interface ActivitySearchRequest {
   accessibilityNeeds: string[];
   currency: string;
   limit: number;
+  /**
+   * The days the trip covers and who is going. Places do not need them;
+   * bookable activities are priced and checked for dates and a party, so a
+   * provider that needs them declines to search without.
+   */
+  window?: { from: IsoDate; to: IsoDate; party: PartySize };
   signal?: AbortSignal;
 }
 
@@ -213,6 +261,7 @@ export type AnyProvider =
   | RoutingProvider
   | GroundTransportProvider
   | CarRentalProvider
+  | QuotedTransferProvider
   | ActivityProvider;
 
 export function supports(p: BaseProvider, kind: ProviderKind): boolean {

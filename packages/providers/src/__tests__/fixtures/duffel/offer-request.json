@@ -1,0 +1,90 @@
+{
+  "data": {
+    "id": "orq_fixture0001",
+    "live_mode": false,
+    "cabin_class": "economy",
+    "offers": [
+      {
+        "id": "off_fixture_direct",
+        "live_mode": false,
+        "total_amount": "9600.00",
+        "total_currency": "INR",
+        "base_amount": "8100.00",
+        "tax_amount": "1500.00",
+        "expires_at": "2030-11-01T12:00:00.000Z",
+        "owner": { "name": "Fixture Air", "iata_code": "FX" },
+        "passengers": [{ "id": "pas_1", "type": "adult" }, { "id": "pas_2", "type": "adult" }],
+        "conditions": {
+          "refund_before_departure": { "allowed": false, "penalty_amount": null, "penalty_currency": null }
+        },
+        "slices": [
+          {
+            "duration": "PT01H15M",
+            "segments": [
+              {
+                "marketing_carrier": { "iata_code": "FX", "name": "Fixture Air" },
+                "operating_carrier": { "iata_code": "FX", "name": "Fixture Air" },
+                "marketing_carrier_flight_number": "123",
+                "origin": { "iata_code": "HYD", "name": "Rajiv Gandhi International Airport", "latitude": 17.2403, "longitude": 78.4294, "time_zone": "Asia/Kolkata" },
+                "destination": { "iata_code": "BLR", "name": "Kempegowda International Airport", "latitude": 13.1986, "longitude": 77.7066, "time_zone": "Asia/Kolkata" },
+                "origin_terminal": "1",
+                "destination_terminal": "2",
+                "departing_at": "2030-11-10T08:00:00",
+                "arriving_at": "2030-11-10T09:15:00",
+                "duration": "PT01H15M",
+                "aircraft": { "name": "Airbus A320", "iata_code": "320" },
+                "passengers": [
+                  {
+                    "cabin_class": "economy",
+                    "cabin_class_marketing_name": "Economy Basic",
+                    "fare_basis_code": "Y",
+                    "baggages": [{ "type": "checked", "quantity": 1 }, { "type": "carry_on", "quantity": 1 }]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "off_fixture_oneStop",
+        "live_mode": false,
+        "total_amount": "7200.50",
+        "total_currency": "INR",
+        "expires_at": "2030-11-01T12:00:00.000Z",
+        "owner": { "name": "Other Air", "iata_code": "OA" },
+        "passengers": [{ "id": "pas_1", "type": "adult" }, { "id": "pas_2", "type": "adult" }],
+        "conditions": {
+          "refund_before_departure": { "allowed": true, "penalty_amount": "500.00", "penalty_currency": "INR" }
+        },
+        "slices": [
+          {
+            "duration": "PT04H30M",
+            "segments": [
+              {
+                "marketing_carrier": { "iata_code": "OA", "name": "Other Air" },
+                "marketing_carrier_flight_number": "88",
+                "origin": { "iata_code": "HYD", "name": "Rajiv Gandhi International Airport", "latitude": 17.2403, "longitude": 78.4294, "time_zone": "Asia/Kolkata" },
+                "destination": { "iata_code": "MAA", "name": "Chennai International Airport", "latitude": 12.99, "longitude": 80.1693, "time_zone": "Asia/Kolkata" },
+                "departing_at": "2030-11-10T06:00:00",
+                "arriving_at": "2030-11-10T07:25:00",
+                "duration": "PT01H25M",
+                "passengers": [{ "cabin_class": "economy", "cabin_class_marketing_name": "Economy Saver", "baggages": [] }]
+              },
+              {
+                "marketing_carrier": { "iata_code": "OA", "name": "Other Air" },
+                "marketing_carrier_flight_number": "412",
+                "origin": { "iata_code": "MAA", "name": "Chennai International Airport", "latitude": 12.99, "longitude": 80.1693, "time_zone": "Asia/Kolkata" },
+                "destination": { "iata_code": "BLR", "name": "Kempegowda International Airport", "latitude": 13.1986, "longitude": 77.7066, "time_zone": "Asia/Kolkata" },
+                "departing_at": "2030-11-10T09:30:00",
+                "arriving_at": "2030-11-10T10:30:00",
+                "duration": "PT01H00M",
+                "passengers": [{ "cabin_class": "economy", "cabin_class_marketing_name": "Economy Saver", "baggages": [] }]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

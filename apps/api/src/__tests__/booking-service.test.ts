@@ -129,6 +129,7 @@ describe('re-pricing names the provider offer, never an internal id', () => {
     id: 'amadeus-hotel:TESTHTL1',
     name: 'Test Hotel',
     propertyType: null,
+    description: null,
     category: 4,
     guestRating: null,
     guestRatingCount: null,
@@ -144,7 +145,7 @@ describe('re-pricing names the provider offer, never an internal id', () => {
         id: 'OFFER-ABC-1', description: 'Room', roomType: null, beds: null, maxOccupancy: null, boardType: null,
         breakfastIncluded: null, refundable, cancellationDeadline: null, cancellationPolicy: null,
         totalPrice: { amount: 960000, currency: 'INR' }, pricePerNight: { amount: 240000, currency: 'INR' },
-        taxesIncluded: null, revalidationToken: 'OFFER-ABC-1',
+        taxesIncluded: null, payAtProperty: null, revalidationToken: 'OFFER-ABC-1',
       },
     ],
     provenance: {

@@ -82,7 +82,7 @@ export function PinsPanel({
               <label
                 htmlFor={id}
                 className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 text-sm transition ${
-                  checked ? 'border-teal-500 bg-teal-500/[0.06]' : 'border-sand-200 bg-white'
+                  checked ? 'border-teal-500 bg-teal-500/6' : 'border-sand-200 bg-white'
                 } ${disabled ? 'opacity-60' : ''}`}
               >
                 <input

@@ -19,7 +19,8 @@
     "db:generate": "npm run prisma:generate -w @trip/api",
     "dev:worker": "npm run dev:worker -w @trip/api",
     "test:integration": "npm run test:integration -w @trip/api",
-    "smoke": "npm run smoke -w @trip/api"
+    "smoke": "npm run smoke -w @trip/api",
+    "live:check": "node scripts/live-check.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -31,10 +32,16 @@
     "tsx": "^4.19.1",
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.70.1",
-    "vitest": "^2.1.3"
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
   },
   "workspaces": [
     "packages/*",
     "apps/*"
-  ]
+  ],
+  "overrides": {
+    "next": {
+      "postcss": "^8.5.28"
+    }
+  }
 }

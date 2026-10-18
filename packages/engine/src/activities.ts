@@ -1,4 +1,4 @@
-import type { ProviderRegistry } from '@trip/providers';
+import type { PartySize, ProviderRegistry } from '@trip/providers';
 import {
   ACTIVITIES_PER_DAY,
   haversineKm,
@@ -94,12 +94,13 @@ export async function planActivities(
   currency: string,
   signal?: AbortSignal,
   guidance: ActivityGuidance = {},
+  window?: { from: string; to: string; party: PartySize },
 ): Promise<ActivityPlanResult> {
   const notes: ProviderNote[] = [];
   if (days <= 0) return { activities: [], clusters: [], notes };
 
   if (registry.activities.length === 0) {
-    notes.push(noteFromFailure(registry.missingCapabilityNote('activities', ['google-maps']), 'activities'));
+    notes.push(noteFromFailure(registry.missingCapabilityNote('activities', ['google-maps', 'hotelbeds-activities']), 'activities'));
     return { activities: [], clusters: [], notes };
   }
 
@@ -119,6 +120,7 @@ export async function planActivities(
       accessibilityNeeds: profile.special.accessibility,
       currency,
       limit: Math.min(20, target * 2),
+      ...(window ? { window } : {}),
       ...(signal ? { signal } : {}),
     }),
   );

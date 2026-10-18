@@ -6,7 +6,9 @@ import {
   type ActivityProvider,
   type BusProvider,
   type FlightProvider,
+  type GroundTransportProvider,
   type HotelProvider,
+  type QuotedTransferProvider,
   type ProviderDescriptor,
   type RailProvider,
   type RoutingProvider,
@@ -104,6 +106,8 @@ export interface RegistryParts {
   rail?: RailProvider[];
   buses?: BusProvider[];
   activities?: ActivityProvider[];
+  groundTransport?: GroundTransportProvider[];
+  quotedTransfers?: QuotedTransferProvider[];
   /** Adds a self-drive provider over a routing provider that measures this drive. */
   selfDrive?: { distanceKm: number; durationMinutes: number; profile?: VehicleProfile | null };
   /** The deadline the registry's policy puts on one provider call. Defaults to none. */
@@ -117,6 +121,8 @@ export function registryWith(parts: RegistryParts = {}): ProviderRegistry {
   registry.rail.push(...(parts.rail ?? []));
   registry.buses.push(...(parts.buses ?? []));
   registry.activities.push(...(parts.activities ?? []));
+  registry.groundTransport.push(...(parts.groundTransport ?? []));
+  registry.quotedTransfers.push(...(parts.quotedTransfers ?? []));
   if (parts.selfDrive) {
     const routing = routingProvider('routing', parts.selfDrive.distanceKm, parts.selfDrive.durationMinutes);
     registry.routing.push(routing);

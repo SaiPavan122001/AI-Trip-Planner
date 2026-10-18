@@ -207,6 +207,8 @@ async function planWithinBudget(deps: PlanGenerationDeps): Promise<PlanGeneratio
           intent.currency,
           signal,
           deps.activityGuidance,
+          // Bookable activities are priced for the dates and the party.
+          { from: intent.departureDate, to: intent.returnDate ?? intent.departureDate, party: intent.travelers },
         ),
   ])));
   checkpoint();

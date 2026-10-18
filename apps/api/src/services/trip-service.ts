@@ -913,9 +913,9 @@ export class TripService {
   }
 
   private async withAirports(place: Place): Promise<Place> {
-    const amadeus = this.deps.registry.amadeus;
-    if (!amadeus) return place;
-    const res = await this.lookup(amadeus, (a) => a.nearestAirports(place.coordinates), 'geocoding');
+    const duffel = this.deps.registry.duffel;
+    if (!duffel) return place;
+    const res = await this.lookup(duffel, (a) => a.nearestAirports(place.coordinates), 'geocoding');
     if (!isOk(res)) return place;
     return {
       ...place,

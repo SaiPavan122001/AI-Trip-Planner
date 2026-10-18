@@ -103,7 +103,7 @@ export function BudgetPanel({
       ) : null}
 
       {cost.remainingBudget && !conflict ? (
-        <p className="mt-4 rounded-xl bg-teal-500/[0.08] px-4 py-3 text-sm text-teal-700">
+        <p className="mt-4 rounded-xl bg-teal-500/8 px-4 py-3 text-sm text-teal-700">
           {formatMoney(cost.remainingBudget)} left against your {firm ? 'firm budget' : 'budget guide'}
           {cost.notIncluded.length > 0 ? ', before the costs listed above as not included.' : '.'}
         </p>

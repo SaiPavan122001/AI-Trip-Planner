@@ -11,6 +11,12 @@ import { type ProviderPolicy } from './guard.js';
 import { configureHttp } from './http.js';
 import { ResilientPolicy, type PolicyEvent } from './policy.js';
 import { AmadeusProvider } from './adapters/amadeus.js';
+import { BusEstimateProvider } from './adapters/bus-estimate.js';
+import { DuffelProvider } from './adapters/duffel.js';
+import { HotelbedsActivitiesProvider } from './adapters/hotelbeds-activities.js';
+import { HotelbedsClient } from './adapters/hotelbeds-client.js';
+import { HotelbedsHotelsProvider } from './adapters/hotelbeds-hotels.js';
+import { HotelbedsTransfersProvider } from './adapters/hotelbeds-transfers.js';
 import { GenericBusProvider, GenericRailProvider } from './adapters/generic-surface.js';
 import { GooglePlacesProvider, GoogleRoutesProvider } from './adapters/google-maps.js';
 import { NominatimProvider } from './adapters/nominatim.js';
@@ -25,6 +31,7 @@ import type {
   GeocodingProvider,
   GroundTransportProvider,
   HotelProvider,
+  QuotedTransferProvider,
   RailProvider,
   RoutingProvider,
 } from './types.js';
@@ -43,7 +50,7 @@ export interface DisabledProvider {
   requiredEnv: string[];
   /**
    * What its absence means for each capability it would serve, in words for a
-   * traveller. One vendor can serve several (Amadeus does flights and hotels),
+   * traveller. One vendor can serve several,
    * and each is reported on its own so the two are never merged into one note.
    */
   capabilities: Partial<Record<ProviderCapability, string>>;
@@ -66,12 +73,14 @@ export class ProviderRegistry {
   readonly buses: BusProvider[] = [];
   readonly routing: RoutingProvider[] = [];
   readonly groundTransport: GroundTransportProvider[] = [];
+  /** Providers that sell a transfer between places they know by code (Hotelbeds Transfers); not a replacement for routing. */
+  readonly quotedTransfers: QuotedTransferProvider[] = [];
   readonly activities: ActivityProvider[] = [];
   /** Populated for every adapter that exists but cannot run. Surfaced in the UI. */
   readonly disabled: DisabledProvider[] = [];
   readonly selfDrive: SelfDriveProvider | null = null;
-  /** Kept separately because airport lookup is an Amadeus-specific capability. */
-  readonly amadeus: AmadeusProvider | null = null;
+  /** Kept separately because airport lookup is a Duffel-specific capability. */
+  readonly duffel: DuffelProvider | null = null;
   /** Operator-configured ground tariffs, by currency. The planner uses these
    *  to model local transport cost; with none configured it models nothing. */
   readonly taxiTariffs: ProvidersEnv['taxiTariffs'];
@@ -117,7 +126,6 @@ export class ProviderRegistry {
       const rawOsrm = new OsrmRoutingProvider(env.osrm);
       const osrmRouting = cache ? new CachedRoutingProvider(rawOsrm, cache) : rawOsrm;
       this.routing.push(osrmRouting);
-      this.groundTransport.push(new OsrmTransferProvider(osrmRouting, env.taxiTariffs));
     } else {
       this.disable(
         'osrm',
@@ -154,21 +162,66 @@ export class ProviderRegistry {
       );
     }
 
+    if (env.duffel) {
+      const duffel = new DuffelProvider(env.duffel);
+      this.duffel = duffel;
+      this.flights.push(duffel);
+    } else {
+      this.disable(
+        'duffel',
+        'Duffel',
+        'Set DUFFEL_ACCESS_TOKEN (a duffel_test_ token for test mode) to search flights.',
+        ['DUFFEL_ACCESS_TOKEN'],
+        { flights: 'No flight provider is connected: set DUFFEL_ACCESS_TOKEN to search flights.' },
+      );
+    }
+
     if (env.amadeus) {
-      const amadeus = new AmadeusProvider(env.amadeus);
-      this.amadeus = amadeus;
-      this.flights.push(amadeus);
-      this.hotels.push(amadeus);
+      this.hotels.push(new AmadeusProvider(env.amadeus));
     } else {
       this.disable(
         'amadeus',
         'Amadeus Self-Service',
-        'Set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search real flight and hotel inventory.',
+        'Set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search real hotel inventory.',
         ['AMADEUS_CLIENT_ID', 'AMADEUS_CLIENT_SECRET'],
-        {
-          flights: 'No flight provider is connected: set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search real flights.',
-          hotels: 'No hotel provider is connected: set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search real rooms and rates.',
-        },
+        { hotels: 'No hotel provider is connected: set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search real rooms and rates.' },
+      );
+    }
+
+    const hb = env.hotelbeds;
+    const hbClient = (creds: { apiKey: string; secret: string }) =>
+      new HotelbedsClient(creds, hb.environment, hb.minIntervalMs);
+    if (hb.hotels) {
+      this.hotels.push(new HotelbedsHotelsProvider(hbClient(hb.hotels)));
+    } else {
+      this.disable(
+        'hotelbeds-hotels',
+        'Hotelbeds Hotels',
+        'Set HOTELBEDS_API_KEY and HOTELBEDS_SECRET (or HOTELBEDS_HOTELS_API_KEY and HOTELBEDS_HOTELS_SECRET) to search Hotelbeds hotels.',
+        ['HOTELBEDS_API_KEY', 'HOTELBEDS_SECRET'],
+        { hotels: 'Hotelbeds Hotels is not connected: set HOTELBEDS_API_KEY and HOTELBEDS_SECRET to search its rooms and rates.' },
+      );
+    }
+    if (hb.activities) {
+      this.activities.push(new HotelbedsActivitiesProvider(hbClient(hb.activities)));
+    } else {
+      this.disable(
+        'hotelbeds-activities',
+        'Hotelbeds Activities',
+        'Set HOTELBEDS_API_KEY and HOTELBEDS_SECRET (or HOTELBEDS_ACTIVITIES_API_KEY and HOTELBEDS_ACTIVITIES_SECRET) to search bookable activities.',
+        ['HOTELBEDS_API_KEY', 'HOTELBEDS_SECRET'],
+        { activities: 'Hotelbeds Activities is not connected: set HOTELBEDS_API_KEY and HOTELBEDS_SECRET to include bookable tours and tickets.' },
+      );
+    }
+    if (hb.transfers) {
+      this.quotedTransfers.push(new HotelbedsTransfersProvider(hbClient(hb.transfers)));
+    } else {
+      this.disable(
+        'hotelbeds-transfers',
+        'Hotelbeds Transfers',
+        'Set HOTELBEDS_API_KEY and HOTELBEDS_SECRET (or HOTELBEDS_TRANSFERS_API_KEY and HOTELBEDS_TRANSFERS_SECRET) to quote airport transfers.',
+        ['HOTELBEDS_API_KEY', 'HOTELBEDS_SECRET'],
+        { transfers: 'Hotelbeds Transfers is not connected, so airport transfers are estimated from routing and tariffs instead of quoted.' },
       );
     }
 
@@ -204,7 +257,11 @@ export class ProviderRegistry {
         'Bus provider',
         'No bus provider is connected. Point BUS_PROVIDER_URL at a service you are authorised to use that implements the surface-transport contract in docs/providers.md.',
         ['BUS_PROVIDER_URL'],
-        { buses: 'No bus provider is connected, so buses were not searched. Point BUS_PROVIDER_URL at a service you are authorised to use (contract in docs/providers.md).' },
+        {
+          buses: env.busFare
+            ? 'No live bus provider is connected; bus fares are estimated from your configured assumptions (BUS_FARE_ESTIMATE) and no bus service is confirmed.'
+            : 'No bus provider is connected and no bus fare assumptions are configured (BUS_FARE_ESTIMATE), so buses were not searched.',
+        },
       );
     }
 
@@ -213,6 +270,9 @@ export class ProviderRegistry {
     const primaryRouting = this.routing.length > 1 ? new FallbackRoutingProvider(this.routing, this.policy) : this.routing[0];
     if (primaryRouting) {
       this.selfDrive = new SelfDriveProvider(primaryRouting, env.selfDriveProfile);
+      this.groundTransport.push(new OsrmTransferProvider(primaryRouting, env.taxiTariffs, env.autoTariffs));
+      // Bus fares are estimated only while no real bus provider is connected.
+      if (!env.bus && env.busFare) this.buses.push(new BusEstimateProvider(primaryRouting, env.busFare));
     }
   }
 
@@ -241,8 +301,8 @@ export class ProviderRegistry {
 
   /**
    * The note the UI shows when a capability has no provider at all. It says
-   * what is missing *for that capability*: Flights and Hotels both come from
-   * Amadeus, and a message about one must not stand in for the other.
+   * what is missing *for that capability*: Flights come from Duffel and Hotels
+   * from Amadeus, and a message about one must not stand in for the other.
    */
   missingCapabilityNote(capability: ProviderCapability, ids: string[]): ProviderFailure {
     const label = CAPABILITY_LABEL[capability];
@@ -269,6 +329,7 @@ export class ProviderRegistry {
       ...this.buses,
       ...this.routing,
       ...this.groundTransport,
+      ...this.quotedTransfers,
       ...this.activities,
     ]);
     return [...set];

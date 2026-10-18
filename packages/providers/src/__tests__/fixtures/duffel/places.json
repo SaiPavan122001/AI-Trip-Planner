@@ -1,0 +1,7 @@
+{
+  "data": [
+    { "type": "city", "iata_code": "HYD", "name": "Hyderabad", "latitude": 17.2403, "longitude": 78.4294 },
+    { "type": "airport", "iata_code": "BPM", "name": "Begumpet Airport", "latitude": 17.4531, "longitude": 78.4676 },
+    { "type": "airport", "iata_code": "HYD", "name": "Rajiv Gandhi International Airport", "latitude": 17.2403, "longitude": 78.4294 }
+  ]
+}

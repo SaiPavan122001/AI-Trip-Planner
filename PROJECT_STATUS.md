@@ -386,7 +386,8 @@ with a reason, agents re-run on re-plan.
   Removing it is a lockfile change left for the user to approve.
 - Validation does not re-check accessibility (the engine enforces it) or that items lie inside the trip
   window.
-- **`npm audit` fails at baseline**; the fix needs Next 16 / Vitest 5 majors, which the user forbade.
+- **Dependency audit:** production dependencies have 0 advisories (CI blocks on these). The full audit reports 4 highs, all under
+  the Next.js lint plugin with no fixed release (`braces`); CI prints them without blocking. Vitest 5 and Tailwind 4 since the user's decision.
 - **Latent:** fixtures with 2026-11-10 dates will hit `departure_in_past` after that date; the agents'
   tests use 2030 dates and a fixed `TODAY`.
 - **Documented security limits** (`SECURITY.md`): a botnet or an IPv6 allocation larger than one /64 defeats
@@ -401,11 +402,45 @@ with a reason, agents re-run on re-plan.
 - Booking remains disabled; migration drift (schema vs SQL) is not checked automatically. Phase 5/6 added **no
   migration** (the queue/idempotency/session tables already had what was needed).
 
+## Flights moved to Duffel (after Phase 8; user instruction)
+
+- Flights: `packages/providers/src/adapters/duffel.ts` (search, offer re-read, nearest airports; read only).
+  Amadeus now serves hotels only. Config: `DUFFEL_ACCESS_TOKEN`, `DUFFEL_ENVIRONMENT` (default `test`),
+  `DUFFEL_MIN_INTERVAL_MS`; setup and limits in `docs/providers.md` ("Duffel setup"). Tests:
+  `duffel-flights.test.ts` (synthetic fixtures, no network). **Not run against the real Duffel service**: no
+  token was available; the response shape is from Duffel's documentation.
+- The project now runs on C: (the H: USB drive and `.devcache` are retired); a git-ignored root `.env` exists.
+- Old tests of the engine/API still use the string "amadeus" as a stand-in provider id; that is intentional and harmless.
+
+## Provider integrations: what is implemented, tested and live-verified
+
+Four different claims, kept apart. **Live** means a real request succeeded with real credentials; **no integration below
+has been live-tested** (no credentials were available to the sessions that wrote them), except OSRM's public demo server,
+which `npm run live:check` reached once. **Production** means inventory, permissions and billing confirmed: none.
+
+| Integration | Implemented | Mock-tested | Live-tested | Notes |
+|---|---|---|---|---|
+| Duffel flights, re-price, airports | yes (read only) | yes | no | test mode default; see "Flights moved to Duffel" |
+| Google Maps (Places New, Routes) | yes (earlier phase) | yes | no | enable Places API (New) + Routes API, billing required |
+| Hotelbeds Hotels | yes (availability, check-rate, content) | yes | no | priced in contract currency; non-INR set aside |
+| Hotelbeds Activities | yes (availability) | yes | no | location = destination centre; per-day check not built |
+| Hotelbeds Transfers | yes (airport-hotel quotes) | yes (engine + adapter) | no | only for Hotelbeds hotels; falls back to estimate |
+| Bus fare estimate | yes (no default; needs `BUS_FARE_ESTIMATE`) | yes | n/a | estimate only; no operator/timetable/availability |
+| Taxi / auto estimate | yes (min fare, source/date, auto tariff) | yes | OSRM only | estimate, never a quote |
+| Qrail trains | **no** | n/a | n/a | endpoints not publicly documented; needs the API reference |
+| Gemini (via `LLM_*`) | yes (existing generic adapter) | config + request shape | no | no `GEMINI_*` variable |
+
+Unified cost: the plan total adds flights/trains/buses (fares, estimated fees), the hotel (room price plus provider-stated
+taxes payable at the property), activities, and each transfer (quotes and estimates), meals from the stated allowance;
+unpriced items are listed under "not included", never counted as ₹0; non-INR prices are set aside, never converted; and
+`estimatedPortion` separates modelled cost from quoted cost. Contingency is not added to the total (not implemented).
+Not claimed: that any plan is the cheapest or optimal overall.
+
 ## Exact next step when a new session starts
 
 1. Read `CLAUDE.md`, this file, `PHASE_PLAN.md`, `DECISIONS.md` (and `SECURITY.md`, `README.md`, `docs/` when the
    work touches them). Do not ask the user to paste them.
-2. `source "/h/Projects/Mutli Agent AI Trip Planner/.devcache/env.sh"`, then `git status` and
+2. (The project now runs on C:, no env script.) `git status` and
    `git log --oneline -5`; confirm branch `phase-0-hardening` and that `5451f24` (Phase 3+4) is in the history. Phases 5–8 may still be
    uncommitted (see "Git state"). Check C: free space (5.4 GB free at the end of Phase 8, 5.8 GB at the end of Phase 6; the difference was
    not traced to this project: no project-named file was found on C:).
@@ -423,3 +458,25 @@ with a reason, agents re-run on re-plan.
 5. Whatever is done next: run lint, typecheck, build and tests (and `test:integration` if storage or the API
    changed, and both smoke topologies if the request path changed), never claim a pass that was not executed, and
    do not push.
+
+## Local run notes (manual testing)
+
+- Run on C:: `npm run dev:api` (API; the search worker runs inside it, `RUN_WORKER=true`) and, from `apps/web`, `npx next dev -p 3001`
+  (port 3000 is used by another program on this machine). `.env` has `CORS_ORIGINS` and `WEB_BASE_URL` set to `http://localhost:3001`.
+- No `DATABASE_URL`/`REDIS_URL`: trips live in memory and are lost when the API restarts (the documented local default).
+- API tests no longer read the developer's `.env` (`VITEST` skips the loader), and `apps/api/scripts/smoke.mjs` blanks provider keys,
+  so neither makes a real provider call or depends on a local port setting.
+
+## Mode choice and itinerary fixes (after a user report that chosen modes were ignored)
+
+- Verified end to end against the running API: only the ways of travelling the traveller chose are searched and planned
+  (`mode-choice.test.ts`). The report's real causes: the Duffel token lacked the `air.offer_requests.create` permission (flights
+  failed), no bus source was configured, and the message said "no provider is connected" for a provider that was connected
+  but refused.
+- Duffel failures now carry Duffel's own reason (e.g. the missing permission); feasibility names each chosen mode's reason.
+- `BUS_FARE_ESTIMATE` is set in the local `.env` (approximate per-km values, TGSRTC 2023 minimum fares; labelled; replace with
+  the official tariff). The estimate states no stop position.
+- The scheduler no longer plans a transfer to a stop with neither a code nor a position (it planned "Hyderabad to Hyderabad,
+  0 km" with a taxi fare, which the validator then blocked); it uses a provider's stop coordinates when given.
+- The validator checks the check-in allowance's length instead of the zero-minute joins either side of it, which had flagged
+  every terminal journey as a tight connection.

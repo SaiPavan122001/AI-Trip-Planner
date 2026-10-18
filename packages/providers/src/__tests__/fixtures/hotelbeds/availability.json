@@ -1,0 +1,94 @@
+{
+  "auditData": { "processTime": "120", "environment": "synthetic-fixture" },
+  "hotels": {
+    "total": 3,
+    "checkIn": "2030-11-10",
+    "checkOut": "2030-11-13",
+    "hotels": [
+      {
+        "code": 1001,
+        "name": "Fixture Budget Inn",
+        "categoryCode": "2EST",
+        "categoryName": "2 STARS",
+        "destinationCode": "BLR",
+        "destinationName": "Bengaluru",
+        "zoneName": "Fixture Zone",
+        "latitude": "12.9716",
+        "longitude": "77.5946",
+        "minRate": "9000.00",
+        "maxRate": "9000.00",
+        "currency": "INR",
+        "rooms": [
+          {
+            "code": "DBL.ST",
+            "name": "Double Standard",
+            "rates": [
+              {
+                "rateKey": "FIXTURE|RATEKEY|1001|A",
+                "rateClass": "NRF",
+                "rateType": "BOOKABLE",
+                "net": "9000.00",
+                "allotment": 4,
+                "paymentType": "AT_WEB",
+                "packaging": false,
+                "boardCode": "RO",
+                "boardName": "ROOM ONLY",
+                "cancellationPolicies": [{ "amount": "9000.00", "from": "2030-11-01T23:59:00+05:30" }],
+                "taxes": { "allIncluded": true, "taxes": [{ "included": true, "amount": "500.00", "currency": "INR" }] },
+                "rooms": 1,
+                "adults": 2,
+                "children": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "code": 2002,
+        "name": "Fixture Grand Hotel",
+        "categoryCode": "5LUX",
+        "categoryName": "5 STARS LUXURY",
+        "destinationCode": "BLR",
+        "destinationName": "Bengaluru",
+        "zoneName": "Fixture Centre",
+        "latitude": 12.975,
+        "longitude": 77.6,
+        "minRate": "60000.00",
+        "maxRate": "60000.00",
+        "currency": "INR",
+        "rooms": [
+          {
+            "code": "SUI.DX",
+            "name": "Deluxe Suite",
+            "rates": [
+              {
+                "rateKey": "FIXTURE|RATEKEY|2002|B",
+                "rateClass": "NOR",
+                "rateType": "RECHECK",
+                "net": "50000.00",
+                "sellingRate": "60000.00",
+                "hotelMandatory": true,
+                "allotment": 2,
+                "paymentType": "AT_WEB",
+                "boardCode": "BB",
+                "boardName": "BED AND BREAKFAST",
+                "cancellationPolicies": [{ "amount": "20000.00", "from": "2030-11-05T23:59:00+05:30" }],
+                "taxes": { "allIncluded": false, "taxes": [{ "included": false, "amount": "1500.00", "currency": "INR", "type": "TAX" }] },
+                "rooms": 2,
+                "adults": 2,
+                "children": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "code": 3003,
+        "name": "Fixture Unlocated Lodge",
+        "categoryCode": "HS",
+        "currency": "INR",
+        "rooms": [{ "code": "X", "rates": [{ "rateKey": "FIXTURE|3003", "net": "5000.00" }] }]
+      }
+    ]
+  }
+}

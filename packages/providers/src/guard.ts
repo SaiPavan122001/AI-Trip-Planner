@@ -37,7 +37,7 @@ export function readResponse<S extends z.ZodTypeAny>(schema: S, raw: unknown, so
  * Parses a list one item at a time. An item that does not match is dropped and
  * counted, so one bad row does not discard its neighbours; the caller decides
  * what to do when *every* item was bad (`allInvalid`). The untouched raw item
- * is returned beside the parsed one, for the few places (an Amadeus fare that
+ * is returned beside the parsed one, for the few places (a fare that
  * is later re-priced from its own payload) that must keep every field the
  * provider sent, including ones this planner does not read.
  */

@@ -49,7 +49,7 @@ export function SayItBox({
       </p>
       <form className="mt-4 space-y-3" onSubmit={submit}>
         <textarea
-          className="field min-h-[5rem] w-full"
+          className="field min-h-20 w-full"
           value={text}
           onChange={(e) => setText(e.target.value)}
           maxLength={2000}

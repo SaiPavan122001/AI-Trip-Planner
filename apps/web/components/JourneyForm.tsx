@@ -115,7 +115,7 @@ export function JourneyForm() {
               type="checkbox"
               checked={oneWay}
               onChange={(e) => setOneWay(e.target.checked)}
-              className="rounded border-sand-300"
+              className="rounded-sm border-sand-300"
             />
             One way — no return leg or accommodation
           </label>

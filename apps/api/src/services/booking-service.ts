@@ -305,9 +305,8 @@ export class BookingService {
 
     await this.transition(id, 'PROVIDER_BOOKING_STARTED', { note: 'Sending the booking to the provider.' });
 
-    // No connected adapter implements ticketing yet: Amadeus Self-Service
-    // requires a separate production agreement for the Flight Create Orders
-    // endpoint. Rather than simulate a confirmation, the booking fails with
+    // No connected adapter implements ticketing: the Duffel adapter is
+    // read only (search and offer retrieval, no orders or payments). Rather than simulate a confirmation, the booking fails with
     // an accurate reason and the payment is flagged for release.
     const failed = await this.transition(id, 'PROVIDER_FAILED', {
       note: 'No connected provider is authorised to issue tickets for this deployment.',

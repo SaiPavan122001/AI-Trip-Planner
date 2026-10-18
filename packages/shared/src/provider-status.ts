@@ -65,7 +65,7 @@ export function statusLabel(status: string): string {
 /**
  * The kinds of thing a provider is asked for. A note names the capability it
  * is about, so "flights could not be searched" and "hotels could not be
- * searched" stay two notes even when one vendor (Amadeus) serves both.
+ * searched" stay two notes even when one vendor serves both.
  */
 export const PROVIDER_CAPABILITIES = [
   'geocoding',

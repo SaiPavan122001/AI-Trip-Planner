@@ -23,7 +23,7 @@ export function AccountMenu() {
 
   if (me.user && !me.user.isAnonymous) {
     return (
-      <Link href="/trips" className="max-w-[12rem] truncate hover:text-ink" title="Your trips and account">
+      <Link href="/trips" className="max-w-48 truncate hover:text-ink" title="Your trips and account">
         {me.user.email}
       </Link>
     );
