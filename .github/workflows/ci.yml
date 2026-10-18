@@ -171,9 +171,10 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
       # Everything, development tools included, is still audited and printed in
       # the log, so a fixable dev-tool advisory is seen and can be acted on.
+      # It ends with a warning, not an error, so its log is not mistaken for a failure.
       - name: Audit all dependencies (report only)
-        run: npm audit --audit-level=high
-        continue-on-error: true
+        run: |
+          npm audit --audit-level=high || echo "::warning title=Dependency audit (development tools)::Advisories remain in development or build tools only; production dependencies passed the blocking audit above. See this step's log."
 
   docker:
     name: Docker images build
