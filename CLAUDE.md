@@ -38,7 +38,8 @@ Wayfare (AI Trip Planner): a TypeScript monorepo, India-focused, INR only. Read,
 - Never delete the old npm cache on C: (the user asked for it to be left alone).
 - No destructive DB commands. Do not weaken tests, lint or TypeScript. Never claim a check passed
   unless it was executed.
-- Do not upgrade major dependencies (Next.js, Vitest, …).
+- Do not upgrade major dependencies (Next.js, …) without the user's say-so. The user approved Vitest 2 → 5 and
+  Tailwind 3 → 4 to clear the dependency audit (see DECISIONS.md); Next.js stays on 15.
 - Ask the user only if a decision (1) changes an explicit product requirement, (2) has materially
   different interpretations, (3) needs an external credential/service that is unavailable, or
   (4) blocks safe progress. Otherwise decide, and record important decisions in `DECISIONS.md`.
@@ -66,7 +67,8 @@ answers with citations, the vector store interface, the evaluation harness; noth
 (deterministic planner: `plans.ts` orchestrates, `optimize.ts` chooses, `feasibility.ts` reports,
 `provider-calls.ts` asks providers safely) → `packages/agents` (planning agents, budget and validation services,
 orchestrator; Phase 2) → `apps/api` (Fastify 5, Prisma 5.22, Zod) and `apps/web` (Next 15.5,
-React 18, Tailwind 3). Tests: Vitest 2.1. Lint: ESLint 10 flat config at the root. Node ≥ 22.
+React 18, Tailwind 4 with its theme in `app/globals.css`). Tests: Vitest 5 (each package has a `vitest.config.ts`
+that runs `src/**/*.test.ts` only). Lint: ESLint 10 flat config at the root. Node ≥ 22.
 Docs: `README.md`, `docs/api.md`, `docs/architecture.md`, `docs/providers.md`, `docs/reliability.md`,
 `docs/threat-model.md`, `docs/observability.md`, `docs/knowledge.md`, `docs/booking.md`, `SECURITY.md`, `CONTRIBUTING.md`.
 

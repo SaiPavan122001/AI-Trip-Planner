@@ -386,7 +386,8 @@ with a reason, agents re-run on re-plan.
   Removing it is a lockfile change left for the user to approve.
 - Validation does not re-check accessibility (the engine enforces it) or that items lie inside the trip
   window.
-- **`npm audit` fails at baseline**; the fix needs Next 16 / Vitest 5 majors, which the user forbade.
+- **Dependency audit:** production dependencies have 0 advisories (CI blocks on these). The full audit reports 4 highs, all under
+  the Next.js lint plugin with no fixed release (`braces`); CI prints them without blocking. Vitest 5 and Tailwind 4 since the user's decision.
 - **Latent:** fixtures with 2026-11-10 dates will hit `departure_in_past` after that date; the agents'
   tests use 2030 dates and a fixed `TODAY`.
 - **Documented security limits** (`SECURITY.md`): a botnet or an IPv6 allocation larger than one /64 defeats

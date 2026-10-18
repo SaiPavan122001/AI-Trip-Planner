@@ -19,7 +19,8 @@ instruction to decide engineering details. Nothing here is aspirational.
 6. **Budget is a guide by default; "do not exceed ₹X" is a hard limit.**
 7. **Hotel suitability counts in plan ranking.**
 8. **Accessibility is a hard filter, with the reason recorded.**
-9. **Do not upgrade major dependencies** (e.g. Next.js, Vitest).
+9. **Do not upgrade major dependencies** (e.g. Next.js) without the user's approval. Approved exceptions: Vitest 2 → 5 and
+   Tailwind 3 → 4, to clear the dependency audit.
 10. **Local development with Docker where required; architecture ready for production without
     production-specific assumptions.**
 11. **Do not push and do not open a PR.**
@@ -416,6 +417,21 @@ encrypt until booking returns. All three stay deferred and listed in `PROJECT_ST
 - **Gemini stays on the generic `LLM_*` settings**; no `GEMINI_*` variable. Tested against a stub only.
 - **`npm run live:check`** is the only way a real request is made; it is opt-in, read only, and prints no credential.
 
+## Dependency audit (user decision: upgrade and gate on production)
+
+- The audit failed on `main` (20 advisories). Patch-level updates only (no --force): Next 15.5.25 → 15.5.28,
+  concurrently, shell-quote, sharp, source-map-js; an `overrides` entry moves Next's own pinned postcss 8.4.31 to ^8.5.28
+  (same major). Production dependencies: 0 advisories.
+- **Vitest 2 → 5** (with Vite 8 as its peer) cleared both criticals. Vitest 3+ no longer skips `dist/`, so each package has a
+  `vitest.config.ts` that runs `src/**/*.test.ts`; the PostgreSQL global setup takes the `TestProject`.
+- **Tailwind 3 → 4** through the official upgrade tool: the theme moved from `tailwind.config.ts` into `@theme` in
+  `apps/web/app/globals.css`, `@layer components` classes became `@utility`, renamed classes were rewritten (e.g.
+  `shadow-sm` → `shadow-xs`, `rounded` → `rounded-sm`), the PostCSS plugin is `@tailwindcss/postcss`, autoprefixer was removed
+  (Tailwind 4 prefixes itself). v3's default border colour and the pointer cursor on buttons are kept by compatibility rules.
+- **CI gate**: `npm audit --omit=dev --audit-level=high` blocks; the full audit still runs and prints, but does not block.
+  What remained: 4 highs, all one chain under the Next.js **lint** plugin (`fast-glob` → `micromatch` → `braces`), where the
+  `braces` advisory covers every published version, so no release fixes it.
+
 ## Open decisions (not made)
 
 - Whether the agents' checks are well-tuned against a real language model (never run).
@@ -432,7 +448,6 @@ encrypt until booking returns. All three stay deferred and listed in `PROJECT_ST
 - **Needs the user's approval:** removing the now-unused `@fastify/rate-limit` dependency (a lockfile change), and confirming the new `ioredis` dependency.
 - **Needs the user's approval:** the default limits and shares (address ceilings, `MAX_QUEUED_RUNS`, `MAX_ACTIVE_RUNS_PER_USER`, stage shares, breaker thresholds, cache lifetimes) once real traffic exists; whether `/v1/providers/health` should ever be on in production (and behind what).
 - **Needs the user's approval:** whether to tighten the web CSP with per-request nonces (needs middleware), and whether the web client should send `Idempotency-Key` (needs a rule for which clicks share a key).
-- How CI's dependency-audit gate should be handled while major upgrades are forbidden.
 - Qrail: needs its API reference (endpoints, parameters, response fields) from the user's account before an adapter can be written.
 - Hotelbeds: whether the account's contract currency is INR (otherwise its results are set aside), and whether Hotelbeds' child-age and facility lookups, and the activity Details/CheckRate call, should be built once real responses are available.
 - Hotels: Duffel does not offer general hotel search, so hotels stay on Amadeus; whether to replace that provider is open.

@@ -1,13 +1,99 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
 
+/*
+  The visual language: warm neutrals with a single deep teal accent, and one
+  amber reserved exclusively for "this number is modelled, not quoted". Giving
+  uncertainty its own colour means a traveller can see, at a glance, which
+  parts of a total are real prices. (Moved here from tailwind.config.ts when
+  upgrading to Tailwind 4, which reads its theme from CSS.)
+*/
+@theme {
+  --color-ink: #14211f;
+  --color-ink-soft: #3d4a47;
+  --color-ink-faint: #6b7875;
+
+  --color-sand-50: #fbfaf7;
+  --color-sand-100: #f5f2ec;
+  --color-sand-200: #e9e4d9;
+  --color-sand-300: #d8d1c2;
+
+  --color-teal-500: #0f6b60;
+  --color-teal-600: #0b564d;
+  --color-teal-700: #08423b;
+
+  --color-clay: #c0603c;
+  /* Estimates and assumptions only. Never decorative. */
+  --color-estimate: #a97516;
+
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', ui-sans-serif, sans-serif;
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+
+  --shadow-card:
+    0 1px 2px rgba(20, 33, 31, 0.04), 0 8px 24px -12px rgba(20, 33, 31, 0.18);
+  --shadow-lift:
+    0 2px 4px rgba(20, 33, 31, 0.06), 0 16px 40px -16px rgba(20, 33, 31, 0.28);
+
+  --radius-xl: 0.875rem;
+  --radius-2xl: 1.25rem;
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
 @layer base {
-  :root {
-    --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-    --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
   }
 
+  /* Tailwind 4's reset no longer gives buttons a pointer cursor; v3's is kept. */
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+@utility card {
+  @apply rounded-2xl border border-sand-200 bg-white shadow-card;
+}
+
+@utility btn-primary {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl bg-teal-500 px-5 py-3
+           text-sm font-medium text-white transition hover:bg-teal-600
+           disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+@utility btn-ghost {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl border border-sand-300
+           bg-white px-4 py-2.5 text-sm font-medium text-ink-soft transition
+           hover:border-ink-faint hover:text-ink disabled:opacity-50;
+}
+
+@utility field {
+  @apply w-full rounded-xl border border-sand-300 bg-white px-4 py-3 text-sm text-ink
+           placeholder:text-ink-faint focus:border-teal-500;
+}
+
+@utility label {
+  @apply mb-1.5 block text-xs font-medium uppercase tracking-wide text-ink-faint;
+}
+
+@utility estimate-chip {
+  /* Reserved for figures the planner modelled rather than received from a
+     provider. Used nowhere else. */
+  @apply inline-flex items-center gap-1 rounded-full bg-estimate/10 px-2 py-0.5
+           text-[11px] font-medium text-estimate;
+}
+
+@layer base {
   html {
     scroll-behavior: smooth;
   }
@@ -19,41 +105,7 @@
   /* Focus is never removed, only restyled: the whole booking flow has to be
      usable from a keyboard. */
   :focus-visible {
-    @apply outline-none ring-2 ring-teal-500 ring-offset-2 ring-offset-sand-50;
-  }
-}
-
-@layer components {
-  .card {
-    @apply rounded-2xl border border-sand-200 bg-white shadow-card;
-  }
-
-  .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-teal-500 px-5 py-3
-           text-sm font-medium text-white transition hover:bg-teal-600
-           disabled:cursor-not-allowed disabled:opacity-50;
-  }
-
-  .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-sand-300
-           bg-white px-4 py-2.5 text-sm font-medium text-ink-soft transition
-           hover:border-ink-faint hover:text-ink disabled:opacity-50;
-  }
-
-  .field {
-    @apply w-full rounded-xl border border-sand-300 bg-white px-4 py-3 text-sm text-ink
-           placeholder:text-ink-faint focus:border-teal-500;
-  }
-
-  .label {
-    @apply mb-1.5 block text-xs font-medium uppercase tracking-wide text-ink-faint;
-  }
-
-  /* Reserved for figures the planner modelled rather than received from a
-     provider. Used nowhere else. */
-  .estimate-chip {
-    @apply inline-flex items-center gap-1 rounded-full bg-estimate/10 px-2 py-0.5
-           text-[11px] font-medium text-estimate;
+    @apply outline-hidden ring-2 ring-teal-500 ring-offset-2 ring-offset-sand-50;
   }
 }
 

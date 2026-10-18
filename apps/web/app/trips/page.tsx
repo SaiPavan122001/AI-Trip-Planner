@@ -121,7 +121,7 @@ function SignIn({ me }: { me: Me }) {
         planned here come with you.
       </p>
       {sent ? (
-        <div className="mt-4 rounded-xl bg-teal-500/[0.08] px-4 py-3 text-sm text-teal-700" role="status">
+        <div className="mt-4 rounded-xl bg-teal-500/8 px-4 py-3 text-sm text-teal-700" role="status">
           <p>{sent.message}</p>
           {safeHttpLink(sent.devLink) ? (
             <p className="mt-2 break-all">
@@ -196,7 +196,7 @@ function AccountSection({ me, onGone }: { me: Me; onGone: () => Promise<void> })
         </button>
       </div>
 
-      <div className="mt-6 rounded-xl bg-clay/[0.06] p-4">
+      <div className="mt-6 rounded-xl bg-clay/6 p-4">
         <h3 className="text-sm font-semibold">Delete my account</h3>
         <p className="mt-1 text-xs leading-relaxed text-ink-soft">
           This removes your account and every trip, plan and sign-in that belongs to it. It cannot

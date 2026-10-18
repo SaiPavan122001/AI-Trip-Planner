@@ -77,7 +77,7 @@ export default function SourcesPage() {
                     <div className="flex flex-wrap items-baseline justify-between gap-2">
                       <h3 className="text-sm font-semibold">{p.label}</h3>
                       {p.requiredEnv.length > 0 ? (
-                        <code className="rounded bg-sand-100 px-2 py-0.5 text-[11px] text-ink-soft">
+                        <code className="rounded-sm bg-sand-100 px-2 py-0.5 text-[11px] text-ink-soft">
                           {p.requiredEnv.join(', ')}
                         </code>
                       ) : null}

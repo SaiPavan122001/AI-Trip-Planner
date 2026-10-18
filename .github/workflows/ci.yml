@@ -162,9 +162,18 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # High and critical advisories fail the build; lower severities are
-      # reported without blocking a pull request on transitive noise.
-      - run: npm audit --audit-level=high
+      # What ships to users is the gate: a high or critical advisory in a
+      # production dependency fails the build. (User decision: development and
+      # build tools no longer block, because an advisory with no fixed release,
+      # such as the one in `braces` under the Next.js lint plugin, would block
+      # every pull request with nothing anyone could do about it.)
+      - name: Audit production dependencies (blocking)
+        run: npm audit --omit=dev --audit-level=high
+      # Everything, development tools included, is still audited and printed in
+      # the log, so a fixable dev-tool advisory is seen and can be acted on.
+      - name: Audit all dependencies (report only)
+        run: npm audit --audit-level=high
+        continue-on-error: true
 
   docker:
     name: Docker images build
