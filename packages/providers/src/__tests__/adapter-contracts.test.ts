@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isOk, statusClass, type Place, type ProviderFailure, type ProviderResult } from '@trip/shared';
+import { isOk, statusClass, type Place, type ProviderResult } from '@trip/shared';
 import { AmadeusProvider } from '../adapters/amadeus.js';
 import { GooglePlacesProvider, GoogleRoutesProvider } from '../adapters/google-maps.js';
 import { GenericRailProvider } from '../adapters/generic-surface.js';
@@ -49,10 +49,6 @@ const bengaluru = place('Bengaluru', 12.9716, 77.5946, {
 
 /** The outcome the traveller sees, as a class. */
 const classOf = (r: ProviderResult<unknown>) => statusClass(r.status);
-const failure = (r: ProviderResult<unknown>): ProviderFailure => {
-  if (isOk(r)) throw new Error('expected a failure, got ok');
-  return r;
-};
 
 // ---------------------------------------------------------------- Amadeus
 
