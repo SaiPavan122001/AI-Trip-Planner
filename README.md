@@ -128,7 +128,11 @@ would add.
 | Capability | Adapter | Variables | Notes |
 |---|---|---|---|
 | Place lookup | OpenStreetMap Nominatim | `NOMINATIM_USER_AGENT` | Free. Required — a journey cannot be classified without resolving both places to a country. Public instance allows 1 req/s. |
-| Flights, hotels | Amadeus Self-Service | `AMADEUS_CLIENT_ID`, `AMADEUS_CLIENT_SECRET` | Free sandbox. Test-environment prices are labelled as such. |
+| Flights | Duffel | `DUFFEL_ACCESS_TOKEN`, `DUFFEL_ENVIRONMENT` (default `test`) | Free test mode: sandbox airline, not live availability, labelled as such. Read only (no orders). Setup in [docs/providers.md](docs/providers.md). |
+| Hotels, activities, airport transfers | Hotelbeds (three separate APIs) | `HOTELBEDS_API_KEY`, `HOTELBEDS_SECRET` (or per-API pairs), `HOTELBEDS_ENV` | Free test account, limited. Priced in your contract currency; non-INR is set aside, never converted. Each API is connected and reported on its own. See [docs/providers.md](docs/providers.md). |
+| Buses, local taxi / auto | Configured fare assumptions | `BUS_FARE_ESTIMATE`, `GROUND_TRANSPORT_TARIFFS`, `AUTO_RICKSHAW_TARIFFS` | Estimates only, labelled with their source and date; no live bus or ride-hail API. |
+| Trains | (Qrail not implemented) | `RAIL_PROVIDER_URL` | Qrail's endpoints are not publicly documented; see docs/providers.md. |
+| Hotels | Amadeus Self-Service | `AMADEUS_CLIENT_ID`, `AMADEUS_CLIENT_SECRET` | Free sandbox. Test-environment prices are labelled as such. |
 | Routing, transfers, self-drive | OSRM | `OSRM_BASE_URL` | Free. Real distance and duration; fares come from your tariff config. |
 | Things to do, traffic-aware transfers | Google Maps Platform | `GOOGLE_MAPS_API_KEY` | Billed. Brings published opening hours. |
 | Rail | Your authorised provider | `RAIL_PROVIDER_URL` | No global open API exists. Implement the documented contract. |

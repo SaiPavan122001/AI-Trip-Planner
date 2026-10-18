@@ -6,7 +6,7 @@ Saved: 2026-09-27 (after Phases 5, 6, 7 and 8). Status of each phase as of the G
 
 Fix what the repository audit found; keep the product to planning/search/recommendation; no booking.
 Fifteen numbered fixes (S1–S15) plus two follow-ups, each a commit (see `PROJECT_STATUS.md`).
-Dependencies installed on H:, caches redirected to `.devcache`.
+Dependencies installed locally on C: (earlier phases used H: and `.devcache`).
 
 ## Phase 1 — Product rules, storage, identity, background planning — DONE
 
@@ -161,5 +161,5 @@ stay with providers, calculations and validation with deterministic code, planni
 
 ## Standing constraints for every phase
 
-See `CLAUDE.md`: everything on H:, booking disabled, no push/PR, no destructive DB commands, no
+See `CLAUDE.md`: everything on C: (H: retired), booking disabled, no push/PR, no destructive DB commands, no
 weakened checks, no major upgrades, agents untrusted, ask only in the four cases listed there. **Phases 9 and later are not defined: do not invent them.**

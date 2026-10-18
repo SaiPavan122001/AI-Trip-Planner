@@ -25,7 +25,8 @@ instruction to decide engineering details. Nothing here is aspirational.
 11. **Do not push and do not open a PR.**
 12. **Decide important product matters when they become relevant;** ask only in the four cases in
     `CLAUDE.md`.
-13. **Environment:** everything on the USB drive H:, nothing project-related on C:.
+13. **Environment:** originally everything on the USB drive H:. Superseded by the user: C: now has space, so the
+    project runs on C: only and H: is no longer used.
 14. **Never ask for API keys or credentials** (use env placeholders). Earlier: "no agents /
     multi-agent frameworks" — **superseded in Phase 2** (see 15).
 15. **Phase 2 (user-defined): introduce the multi-agent trip-planning architecture.** Not browser
@@ -372,6 +373,49 @@ encrypt until booking returns. All three stay deferred and listed in `PROJECT_ST
   test fixtures (a fake `sk-...` key) would have failed the repository's own credential scan (`leakage.test.ts`, tracked files only) at the
   moment they were committed, so they are assembled at run time (`kit.ts`) and a scan over tracked *and* untracked files was run.
 
+## Architectural decisions (Claude, flights moved from Amadeus to Duffel — under the user's instruction)
+
+- **Flights now come from Duffel (`adapters/duffel.ts`); Amadeus is kept for hotels only.** Duffel's API is
+  flights (and ancillaries); it has no general hotel search, so removing Amadeus altogether would have removed
+  hotels. Amadeus left the flight registry, its flight, re-pricing and airport code and tests were removed, and
+  `registry.amadeus` became `registry.duffel` (used for airport lookup). Hotels are untouched.
+- **Read only.** The adapter searches, re-reads an offer by id (`revalidateFlight`) and looks up airports. It has
+  no order or payment call; booking stays disabled and still fails with "no provider authorised to issue tickets".
+- **One host, mode by token.** Duffel uses `https://api.duffel.com` for test and live; `DUFFEL_ENVIRONMENT`
+  (default `test`) must agree with the token prefix or start-up fails, so a live token is never used by
+  accident and a test token is never labelled live. Offers carry the label "Duffel (test mode)".
+- **No currency conversion.** Duffel prices in the airline's currency and has no currency parameter; a non-INR
+  offer is passed on as it is and the engine's existing INR rule sets it aside. A conversion would be a made-up price.
+- **Carrier and price filters are applied after the search** (Duffel has none); the offer id is the revalidation token.
+- **Not built, on purpose:** a Resend mailer (mail goes through the existing `MAILER`/`MAIL_WEBHOOK_URL`; there is no
+  Resend code, so no `RESEND_*` variable was added) and a `GEMINI_API_KEY` setting (Gemini is reached through the
+  existing OpenAI-compatible `LLM_*` settings, documented in `.env.example`; not yet run against the real service).
+  Either is a separate feature if wanted.
+- Older notes in this file that say "Amadeus" for flights describe what was true then.
+
+## Architectural decisions (Claude, Hotelbeds, estimates and Qrail — under the user's instruction)
+
+- **Hotelbeds is three capabilities, not one provider.** Separate adapters, per-API credentials resolution (shared pair or
+  `HOTELBEDS_<API>_*`), per-API `..._ENABLED` switches, separate registry entries and "disabled" notes. Only hosts and signing
+  are shared (`hotelbeds-client.ts`). Variable names are `HOTELBEDS_*` (the user's `HOTELBED_*` placeholder was a placeholder).
+- **Transfers are a quote layer, not a transfer search.** Hotelbeds Transfers sells airport-hotel runs between provider codes, so
+  it is a new `QuotedTransferProvider` capability that the scheduler asks only for an airport-to-Hotelbeds-hotel leg; its quote
+  replaces that leg's routing estimate (distance/time stay the routing's), never blends with it, and falls back to the estimate
+  with a note. Routing-based taxi/auto estimates remain the default for every other leg.
+- **Additive model fields:** `HotelRoomOffer.payAtProperty`, `HotelOffer.description`, `TransferOffer.quote`, and the
+  transfer mode `auto_rickshaw`. The plan's accommodation cost adds `payAtProperty`; an estimated fee that is the whole fare
+  counts as modelled (`estimatedPortion`).
+- **Currency stays INR.** Hotelbeds answers in the contract currency; non-INR results are set aside, never converted, because
+  there is no verified exchange-rate source.
+- **Activities are placed at the destination centre** (the availability answer has no coordinates) and priced from the date
+  range, flagged as not confirmed for a day; the day-specific check is not implemented (its request format is unverified).
+- **Bus fares are an operator-supplied estimate with no default**, required `source` and `asOf`, India only, replaced by a real
+  provider when one is configured. Taxi fares gain `minimumFare`, `source`, `asOf` and an optional auto-rickshaw tariff; the
+  transfer provider now sits on whichever routing is first choice (so Google-only setups get taxi estimates too).
+- **Qrail is not implemented**: no verifiable public endpoint documentation; guessing was not acceptable. Documented as blocked.
+- **Gemini stays on the generic `LLM_*` settings**; no `GEMINI_*` variable. Tested against a stub only.
+- **`npm run live:check`** is the only way a real request is made; it is opt-in, read only, and prints no credential.
+
 ## Open decisions (not made)
 
 - Whether the agents' checks are well-tuned against a real language model (never run).
@@ -389,5 +433,9 @@ encrypt until booking returns. All three stay deferred and listed in `PROJECT_ST
 - **Needs the user's approval:** the default limits and shares (address ceilings, `MAX_QUEUED_RUNS`, `MAX_ACTIVE_RUNS_PER_USER`, stage shares, breaker thresholds, cache lifetimes) once real traffic exists; whether `/v1/providers/health` should ever be on in production (and behind what).
 - **Needs the user's approval:** whether to tighten the web CSP with per-request nonces (needs middleware), and whether the web client should send `Idempotency-Key` (needs a rule for which clicks share a key).
 - How CI's dependency-audit gate should be handled while major upgrades are forbidden.
+- Qrail: needs its API reference (endpoints, parameters, response fields) from the user's account before an adapter can be written.
+- Hotelbeds: whether the account's contract currency is INR (otherwise its results are set aside), and whether Hotelbeds' child-age and facility lookups, and the activity Details/CheckRate call, should be built once real responses are available.
+- Hotels: Duffel does not offer general hotel search, so hotels stay on Amadeus; whether to replace that provider is open.
+- Whether to add a Resend mailer and a native Gemini setting (see the Duffel decisions above).
 - Whether/when to add push progress and second factors.
 - Anonymous-abuse policy beyond the current caps (documented in `SECURITY.md`): the limits stop cookie clearing, not a botnet.

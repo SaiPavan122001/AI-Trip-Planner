@@ -116,8 +116,8 @@ machine and the state check above, not by a stored response.
 
 - **Payment.** Card data never reaches this service, and there is no field for it. The state machine
   would accept only an authorisation reference from a payment provider.
-- **Ticketing.** No adapter is authorised to create orders. Amadeus Self-Service requires a separate
-  production agreement for that.
+- **Ticketing.** No adapter creates orders. The Duffel adapter is read only (search, offer re-read,
+  airport lookup); ordering and payment through Duffel are not built.
 - **Authentication.** Booking needs a real identity for every request. That does not exist yet, so
   `principal` is `null` everywhere. Enabling booking without it would make booking ids and idempotency
   keys the only thing standing between one person's trip and another's.

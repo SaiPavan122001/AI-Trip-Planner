@@ -130,9 +130,9 @@ describe('the cache is connected', () => {
   });
 
   it('never caches flights or hotels: their prices change by the minute', () => {
-    const registry = new ProviderRegistry(env({ AMADEUS_CLIENT_ID: 'placeholder', AMADEUS_CLIENT_SECRET: 'placeholder' }));
-    // The Amadeus adapter is registered as itself, not behind a caching wrapper.
-    expect(registry.flights[0]!.constructor.name).toBe('AmadeusProvider');
+    const registry = new ProviderRegistry(env({ DUFFEL_ACCESS_TOKEN: 'duffel_test_placeholder', AMADEUS_CLIENT_ID: 'placeholder', AMADEUS_CLIENT_SECRET: 'placeholder' }));
+    // The adapters are registered as themselves, not behind a caching wrapper.
+    expect(registry.flights[0]!.constructor.name).toBe('DuffelProvider');
     expect(registry.hotels[0]!.constructor.name).toBe('AmadeusProvider');
   });
 

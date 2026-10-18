@@ -12,6 +12,8 @@ import { z } from 'zod';
  * developer who set a key does not spend an hour wondering why it was ignored.
  */
 function loadDotenvFromNearestRoot(): void {
+  // A test run is hermetic: it must not pick up a developer's own keys, origins or ports.
+  if (process.env['VITEST']) return;
   let dir = process.cwd();
   const { root } = parse(dir);
   while (true) {

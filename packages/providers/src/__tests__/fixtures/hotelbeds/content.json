@@ -1,0 +1,19 @@
+{
+  "from": 1,
+  "to": 2,
+  "total": 2,
+  "hotels": [
+    {
+      "code": 1001,
+      "description": { "content": "A plain, clean fixture inn near the fixture market." },
+      "address": { "content": "1 Fixture Road" },
+      "city": { "content": "Bengaluru" }
+    },
+    {
+      "code": 2002,
+      "description": { "content": "A fixture landmark with a fixture spa." },
+      "address": { "content": "2 Fixture Avenue" },
+      "city": { "content": "Bengaluru" }
+    }
+  ]
+}

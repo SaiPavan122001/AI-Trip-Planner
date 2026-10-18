@@ -127,8 +127,8 @@ describe('the default provider policy', () => {
 describe('a note says what it is about', () => {
   const registry = () => new ProviderRegistry(loadProvidersEnv({}));
 
-  it('keeps Flights and Hotels apart even though one vendor would serve both', () => {
-    const flights = registry().missingCapabilityNote('flights', ['amadeus']);
+  it('keeps Flights and Hotels apart, each with its own words', () => {
+    const flights = registry().missingCapabilityNote('flights', ['duffel']);
     const hotels = registry().missingCapabilityNote('hotels', ['amadeus']);
     expect(flights.capability).toBe('flights');
     expect(hotels.capability).toBe('hotels');
@@ -150,7 +150,7 @@ describe('a note says what it is about', () => {
   it('gives each capability its own words', () => {
     const r = registry();
     const messages = (['flights', 'hotels', 'trains', 'buses', 'activities', 'transfers', 'self_drive', 'geocoding'] as const).map(
-      (c) => r.missingCapabilityNote(c, ['amadeus', 'rail', 'bus', 'google-maps', 'osrm', 'nominatim']).message,
+      (c) => r.missingCapabilityNote(c, ['duffel', 'amadeus', 'rail', 'bus', 'google-maps', 'osrm', 'nominatim']).message,
     );
     expect(new Set(messages).size).toBe(messages.length);
   });

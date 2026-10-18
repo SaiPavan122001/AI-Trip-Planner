@@ -1,0 +1,45 @@
+{
+  "search": {
+    "language": "en",
+    "departure": { "date": "2030-11-10", "time": "10:30:00" },
+    "occupancy": { "adults": 2, "children": 0, "infants": 0 },
+    "from": { "code": "BLR", "description": "Fixture Airport", "type": "IATA" },
+    "to": { "code": "1001", "description": "Fixture Budget Inn", "type": "ATLAS" }
+  },
+  "services": [
+    {
+      "id": 11,
+      "direction": "ARRIVAL",
+      "transferType": "PRIVATE",
+      "vehicle": { "code": "CAR", "name": "Standard Car" },
+      "category": { "code": "STND", "name": "Standard" },
+      "minPaxCapacity": 1,
+      "maxPaxCapacity": 3,
+      "rateKey": "FIXTURE|TRANSFER|11",
+      "price": { "totalAmount": 1800.5, "netAmount": 1500.0, "currencyId": "INR" },
+      "cancellationPolicies": [{ "amount": 1800.5, "from": "2030-11-09T10:30:00", "currencyId": "INR" }],
+      "content": { "transferDetailInfo": [{ "name": "Luggage", "type": "BAGGAGE", "description": "2 suitcases" }] }
+    },
+    {
+      "id": 12,
+      "direction": "ARRIVAL",
+      "transferType": "PRIVATE",
+      "vehicle": { "code": "VAN", "name": "Minivan" },
+      "category": { "code": "STND", "name": "Standard" },
+      "minPaxCapacity": 1,
+      "maxPaxCapacity": 8,
+      "rateKey": "FIXTURE|TRANSFER|12",
+      "price": { "totalAmount": 2600.0, "currencyId": "INR" }
+    },
+    {
+      "id": 13,
+      "direction": "ARRIVAL",
+      "transferType": "SHARED",
+      "vehicle": { "code": "BUS", "name": "Shared Shuttle" },
+      "category": { "code": "SHRD", "name": "Shared" },
+      "maxPaxCapacity": 12,
+      "rateKey": "FIXTURE|TRANSFER|13",
+      "price": { "totalAmount": 700.0, "currencyId": "INR" }
+    }
+  ]
+}

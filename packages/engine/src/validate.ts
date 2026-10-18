@@ -101,11 +101,25 @@ function checkSequencing(items: ItineraryItem[]): ValidationIssue[] {
     }
 
     // A transfer that lands you at the gate with nine minutes to spare is not
-    // a plan, it is a gamble. Terminal legs get a stricter floor.
-    const isTerminalHandoff =
-      (prev.kind === 'transfer' && current.kind === 'buffer') ||
-      (prev.kind === 'buffer' && current.kind === 'transport');
-    if (isTerminalHandoff && gap < MIN_CONNECTION_MINUTES && gap >= 0) {
+    // a plan, it is a gamble. The margin before a departure is the check-in
+    // allowance (the buffer item) that sits between the transfer and the
+    // departure, and the two meet it end to end by design; so what is checked is
+    // the allowance's own length, and the gaps around it only when there is no
+    // allowance at all. Measuring the zero-minute joins either side of an
+    // allowance used to flag every terminal journey as a tight connection.
+    if (current.kind === 'buffer' && current.endUtc && current.startUtc) {
+      const allowance = minutesBetween(current.startUtc, current.endUtc);
+      const next = items[i + 1];
+      if (next?.kind === 'transport' && allowance < MIN_CONNECTION_MINUTES) {
+        issues.push({
+          code: 'tight_connection',
+          severity: 'warning',
+          message: `Only ${allowance} minutes are allowed at "${current.title}" before "${next.title}".`,
+          itemIds: [current.id, next.id],
+          suggestions: ['Leave earlier, or pick a later departure.'],
+        });
+      }
+    } else if (prev.kind === 'transfer' && current.kind === 'transport' && gap < MIN_CONNECTION_MINUTES && gap >= 0) {
       issues.push({
         code: 'tight_connection',
         severity: 'warning',

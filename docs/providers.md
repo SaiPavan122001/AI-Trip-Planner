@@ -65,7 +65,7 @@ not "change your dates" is not "tell your provider its API changed".
 
 ## Notes are per capability
 
-Amadeus serves both flights and hotels, so a missing or failing Amadeus is two different problems. Every
+A vendor can serve more than one capability, and a missing or failing one is a different problem for each. Every
 note the planner shows carries the `capability` it is about (`flights`, `hotels`, `trains`, `buses`,
 `self_drive`, `transfers`, `activities`, `geocoding`), each capability's absence is worded for that
 capability (`ProviderRegistry.missingCapabilityNote`), and notes are only merged when the provider,
@@ -120,7 +120,12 @@ accounting, and any live verification of the above against a real provider.
 | id | Capabilities | Credentials | Cost |
 |---|---|---|---|
 | `nominatim` | geocoding | `NOMINATIM_USER_AGENT` | free, 1 req/s on the public instance |
-| `amadeus` | flights, hotels, airport reference data | `AMADEUS_CLIENT_ID`, `AMADEUS_CLIENT_SECRET` | free sandbox |
+| `duffel` | flights, airport reference data | `DUFFEL_ACCESS_TOKEN` (`DUFFEL_ENVIRONMENT`, default `test`) | free test mode |
+| `amadeus` | hotels | `AMADEUS_CLIENT_ID`, `AMADEUS_CLIENT_SECRET` | free sandbox |
+| `hotelbeds-hotels` | hotels (availability, rate re-check, descriptive content) | `HOTELBEDS_API_KEY`, `HOTELBEDS_SECRET` (or `HOTELBEDS_HOTELS_*`) | test account free, limited |
+| `hotelbeds-activities` | bookable activities | same pair (or `HOTELBEDS_ACTIVITIES_*`) | test account free, limited |
+| `hotelbeds-transfers` | priced airport-hotel transfers | same pair (or `HOTELBEDS_TRANSFERS_*`) | test account free, limited |
+| `bus-estimate` | bus fare ESTIMATE (not a search) | `BUS_FARE_ESTIMATE` (+ routing) | free |
 | `osrm` | routing | `OSRM_BASE_URL` | free, self-hostable |
 | `osrm-transfer` | ground transfers | `OSRM_BASE_URL` + tariffs | free |
 | `self-drive` | drive cost and duration | routing + `SELF_DRIVE_PROFILE` | free |
@@ -137,10 +142,14 @@ timezone is discarded rather than patched up, because guessing it would silently
 the whole trip. The public instance's usage policy (identifying User-Agent, one request per second)
 is enforced in the adapter rather than left to the operator to remember.
 
-**Amadeus** in the test environment returns real but cached inventory. The adapter labels itself
-"Amadeus (test environment)" so the UI can say which environment a price came from instead of
-implying live availability. Flight re-pricing carries the full offer payload as its revalidation
-token, because that is the only input the pricing endpoint accepts.
+**Duffel** (flights; `adapters/duffel.ts`) is read only: it searches (`POST /air/offer_requests`),
+re-reads one offer (`GET /air/offers/{id}`) and looks up airports near a point
+(`GET /places/suggestions`). It has no call that creates an order, a payment or a hold. See "Duffel
+setup" below.
+
+**Amadeus** now serves hotels only (flights moved to Duffel). In the test environment it returns real
+but cached inventory. The adapter labels itself "Amadeus (test environment)" so the UI can say which
+environment a price came from instead of implying live availability.
 
 Hotel mapping states only what Amadeus states. `refundable` comes only from
 `policies.refundable.cancellationRefund` (`REFUNDABLE_UP_TO_DEADLINE` is true, `NON_REFUNDABLE` is false,
@@ -279,9 +288,201 @@ offset, or one that arrives before it departs) is dropped and counted in a warni
 search reports `invalid_response` — failing at the cause rather than somewhere far from it.
 
 **Offer ids include the day** (`rail:2030-11-10:12785`), because a service number repeats every day.
-Amadeus numbers its offers within each response, so its ids include the route and date too
-(`amadeus-flight:HYD-BLR-2030-11-10:1`); the outward and return searches would otherwise both produce
-`…:1`.
+Flight offer ids include the route and date too (`duffel-flight:HYD-BLR-2030-11-10:off_…`), so an outward
+and a return search can never produce the same id.
+
+---
+
+## Hotelbeds (Hotels, Activities, Transfers)
+
+One Hotelbeds APItude account, three APIs, **three capabilities**. Each has its own adapter
+(`hotelbeds-hotels.ts`, `hotelbeds-activities.ts`, `hotelbeds-transfers.ts`), its own credentials resolution and its
+own on/off switch; `hotelbeds-client.ts` holds only what they truly share (hosts and request signing). A capability is
+connected only when *its* credentials resolve, is listed as disabled with its own reason when not, and a failure in one
+is reported against that one. Official docs: <https://developer.hotelbeds.com/documentation/hotels/>,
+<https://developer.hotelbeds.com/documentation/activities/>, <https://developer.hotelbeds.com/documentation/transfers/>.
+
+**Variables** (all optional; unset means that API is off and the app still starts):
+
+| Variable | Meaning |
+|---|---|
+| `HOTELBEDS_API_KEY`, `HOTELBEDS_SECRET` | the shared pair; must be set together |
+| `HOTELBEDS_HOTELS_API_KEY` / `_SECRET`, `HOTELBEDS_ACTIVITIES_...`, `HOTELBEDS_TRANSFERS_...` | a pair for one API (Hotelbeds issues keys per API); wins over the shared pair |
+| `HOTELBEDS_HOTELS_ENABLED`, `HOTELBEDS_ACTIVITIES_ENABLED`, `HOTELBEDS_TRANSFERS_ENABLED` | `false` switches one API off |
+| `HOTELBEDS_ENV` | `test` (default, `api.test.hotelbeds.com`) or `live` (`api.hotelbeds.com`) |
+| `HOTELBEDS_MIN_INTERVAL_MS` | smallest gap between requests (default 250) |
+
+**Authentication** (documented): headers `Api-key` and `X-Signature`, where the signature is the hex SHA-256 of the key,
+the secret and the current Unix time in seconds, concatenated; it is made fresh for each request.
+
+**Test account.** Hotelbeds' evaluation keys use the test host and, per its documentation, are limited to 50 requests a
+day (403 afterwards). Test data is not live inventory, and nothing here assumes an evaluation key sees live inventory.
+Every result from the test host carries a warning saying so and a "(test account)" label.
+
+**Currency (important).** Hotelbeds prices in the currency of *your contract*. This planner is INR only and never
+converts, so hotels, activities and transfers quoted in anything else are kept as they are and set aside by the planner with
+a note. Unless your contract is in INR, expect Hotelbeds results to be set aside; the adapters still prove the connection.
+
+### Hotels
+Availability `POST /hotel-api/1.0/hotels` (stay, occupancy, geolocation), re-check `POST /hotel-api/1.0/checkrates`
+(by rate key; this is `revalidateHotel`), liveness `GET /hotel-api/1.0/status`. Static text is separate:
+`GET /hotel-content-api/1.0/hotels` supplies description and address, cached for a day, best effort (a failure never
+fails a search or changes a price). Mapping: `sellingRate` is used when sent (`hotelMandatory`), else `net`; a rate that
+covers several rooms is divided to one room; taxes the provider marks as not included and gives an amount for are kept
+as `payAtProperty` and added to the plan's accommodation cost; `NRF` is non-refundable, a `NOR` rate with stated
+charges is refundable until the first charge date, anything else is not claimed; category `4EST`/`5LUX`/`H3_5` become
+stars, others are unrated; a property without a position is left out. Results are spread from cheapest to dearest so
+budget, standard and premium/luxury plans all have rooms to choose from. Not done: facilities (they come as codes needing
+a second lookup, so no amenities are claimed), images, child ages (children are counted as adults, with a warning), and
+booking.
+
+### Activities
+`POST /activity-api/3.0/activities/availability` with the trip's dates, travellers' ages (adults 30, children 8,
+infants 1, because ages are not collected) and a `gps` filter at the destination centre. Returns real bookable products
+with provider prices. What it does **not** claim: where an activity is (the availability answer has no coordinates, so each is
+placed at the destination centre and says so), opening hours or start times (left unknown), and availability on one
+particular day. The price is Hotelbeds' for the date range and is marked "not yet confirmed" (`priceIsEstimate`); the
+day-specific Details/CheckRate call is **not implemented** because its request format could not be verified from the public
+documentation. A Google Maps place is never assumed to be a bookable Hotelbeds activity.
+
+### Transfers
+`GET /transfer-api/1.0/availability/{language}/from/{fromType}/{fromCode}/to/{toType}/{toCode}/{outbound}/{adults}/{children}/{infants}`
+(one way). It is **not** a taxi-on-demand API: it prices a transfer between places it knows by code. The planner uses it
+only for airport (IATA) to a Hotelbeds hotel (ATLAS code = the hotel code from the Hotelbeds Hotel API) and back, so
+it applies only when the chosen hotel is a Hotelbeds one. A quote replaces the routing *estimate* for that leg
+(distance and time stay the routing's), is counted as quoted, not modelled, and is never mixed with an estimate; if the
+quote is in another currency or no vehicle fits the party, the estimate stays and a note says why. Each leg is asked once
+per search, so the same airport-hotel run in several plans is one request. The availability answer has no separate
+re-price call at this stage, so a service's `rateKey` is carried as its token and no revalidation is claimed. GPS and
+port/station locations are not used.
+
+### Verification status
+Written from Hotelbeds' public documentation and tested against synthetic fixtures only. The hotel availability/check-rate
+shapes follow Hotelbeds' own workflow example, the activities and transfers shapes follow their availability pages; the
+content call's exact fields, activity durations and transfer luggage fields were not confirmed and are read defensively
+(an unknown unit or field becomes "not stated"). **No real Hotelbeds request has been made.** Run
+`npm run live:check -- --searches` with your key to find out.
+
+---
+
+## Bus fare estimates (no live bus provider)
+
+No approved bus inventory API is connected. `BUS_FARE_ESTIMATE` (JSON, INR only) lets the operator supply a fare model:
+categories with `perKm`, `averageSpeedKmh` and `minimumFare`, an optional `baseFare`, an `assumedDepartureTime`, and
+**`source` and `asOf`, which are required** and are shown to the traveller. The distance comes from the routing
+provider. There is **no default**: without it, buses are reported as not searched. The offer names no operator, service or
+seat availability, its departure time is the assumed one (said so), it has no revalidation token, and it is counted as
+modelled cost. It applies to India only and is replaced by a real provider the moment `BUS_PROVIDER_URL` is set. The example
+numbers in `.env.example` are illustrative, not a tariff.
+
+## Local taxi and auto-rickshaw estimates
+
+Distance and time come from Google Routes (traffic-aware, if configured) or OSRM. The fare comes only from the operator's
+tariff (`GROUND_TRANSPORT_TARIFFS`, and `AUTO_RICKSHAW_TARIFFS` for autos, 3 seats each): base + per km + per minute, a
+night multiplier by the local clock, and an optional `minimumFare`; optional `source` and `asOf` are shown with it. The
+result is always an estimate ("Not a quote: actual fares vary by operator, traffic and time"). With no tariff the leg is
+timed and listed as not priced, never ₹0. Travelling in your own car stays ₹0 fare, fuel and wear separate, tolls and
+parking "not calculated". No ride-hailing or rental-car API is used.
+
+## Qrail (trains): not implemented
+
+Qrail's public developer pages list plans (Free: Train Between Stations, Train Schedule, PNR Status; Pro: Running Status,
+Live Station; Business: Fare & Availability) and show the key placed in the URL path, but publish no endpoint paths,
+parameters or response fields that could be checked (the pages that would hold them were empty to a non-logged-in
+reader). Nothing was guessed, so there is no adapter and trains stay "not connected" unless you point
+`RAIL_PROVIDER_URL` at a service implementing the documented surface-transport contract. To add Qrail, supply its
+API reference from your account. Note for that work: the key is in the URL, so the adapter must keep the URL out of every
+log and error (the HTTP layer includes the URL in its errors today). Schedules are not seat availability and fares need
+the Business plan.
+
+## Google Maps Platform
+
+One key (`GOOGLE_MAPS_API_KEY`) serves both uses and is sent in the `X-Goog-Api-Key` header, never in a URL, a log or a
+response. In Google Cloud Console enable **Places API (New)** (nearby search for things to do) and **Routes API**
+(`computeRoutes`: distance, traffic-aware time). Both are billed and need a billing account on the project. Geocoding is
+done by Nominatim, not Google. A place found by Google is a listing, never proof of room, ticket or price availability.
+Docs: <https://developers.google.com/maps/documentation/places/web-service>, <https://developers.google.com/maps/documentation/routes>.
+
+## Gemini
+
+Gemini has no dedicated setting: the code reads `LLM_PROVIDER=openai`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` and
+`LLM_LABEL`, so point them at Google's OpenAI-compatible endpoint
+(`https://generativelanguage.googleapis.com/v1beta/openai`, key as a bearer token, model id from
+<https://ai.google.dev/gemini-api/docs>). The model only interprets what a traveller types; prices, totals, currency and
+availability never come from it. Without it the planner uses keyword rules. The request shape is tested against a stub; a
+real Gemini request has not been made (`npm run live:check -- --llm`).
+
+## Live checks
+
+`npm run build && npm run live:check` runs read-only requests with whatever is in `.env` and prints PASS / FAIL / SKIPPED per
+integration without printing any credential. `-- --searches` adds one real search each for Hotelbeds Hotels, Activities,
+Transfers (counts against a test account's quota) and Google Places (billed); `-- --llm` adds one tiny model request.
+It never books, pays or creates an order. A PASS is one successful call; it does not establish live inventory, prices or
+account approvals.
+
+---
+
+## Duffel setup (flights)
+
+1. Create an account at <https://app.duffel.com> and, under Developers > Access tokens, create a **test**
+   token. It starts with `duffel_test_`.
+2. Put it in the **repository root `.env`** (that file is git-ignored; `.env.example` is the committed
+   template). Nothing else is needed for test mode:
+
+   ```dotenv
+   DUFFEL_ACCESS_TOKEN=duffel_test_...   # your token, entered locally
+   DUFFEL_ENVIRONMENT=test               # test (default) or live
+   DUFFEL_MIN_INTERVAL_MS=500            # optional: smallest gap between requests
+   ```
+
+3. Restart the API. The start-up log lists which providers are connected (and `/ops/status` does, when
+   `OPS_TOKEN` is set); flights show as "Duffel (test mode)".
+
+Rules the loader enforces (`config.ts`): with no token the adapter is simply off and the app still starts;
+the token must start with `duffel_test_` or `duffel_live_`; `DUFFEL_ENVIRONMENT` must name the same mode
+as the token, so a live token is never used by leaving a setting out and a test token is never passed off
+as live. A start-up error names the setting and never repeats the token.
+
+**Test offers are not live availability.** Duffel has one host (`https://api.duffel.com`); the token decides
+the mode. In test mode, searches return offers from Duffel's own sandbox airline ("Duffel Airways", IATA
+`ZZ`) with schedules and prices that do not describe real flights, and other airlines' sandboxes may be
+unavailable. The adapter labels every offer "Duffel (test mode)" so a price is never shown as a live fare.
+Live mode needs a live token, which Duffel issues after you complete their account and, for live
+ordering, payment onboarding; this project does not order or pay and has never been run in live mode.
+
+**Safe check of a token** (read only; spends no search and creates nothing). In Git Bash, with the token in
+your shell environment:
+
+```
+curl -s -H "Authorization: Bearer $DUFFEL_ACCESS_TOKEN" -H "Duffel-Version: v2" -H "Accept: application/json" \
+  "https://api.duffel.com/places/suggestions?query=hyd"
+```
+
+A JSON list of places means the token works; a 401 means it was refused. A flight search itself is
+`POST /air/offer_requests`, which creates an offer request in your Duffel account (free in test mode).
+
+**Limits and unverified points**
+
+- Duffel returns each offer in the airline's own currency. This planner is INR only: a non-INR offer is
+  kept as it is and the engine sets it aside with an explanation; nothing is converted.
+- Duffel has no carrier or price filter on a search, so preferred/excluded carriers and a price ceiling are
+  applied after the search. With no stop limit set, Duffel's own default (one connection) applies.
+- The default pacing (`DUFFEL_MIN_INTERVAL_MS=500`) is a conservative guess; Duffel documents per-token
+  rate limits and answers `429`, which the planner reports as "rate limited" and does not retry. Check the
+  limits for your account at <https://duffel.com/docs/api>.
+- The nearest-airport lookup passes a radius in metres to `/places/suggestions`; the docs do not state a
+  maximum radius, and this has not been run against the service.
+- `Duffel-Version: v2` is the current version in Duffel's versioning page at the time of writing.
+- Fixtures under `__tests__/fixtures/duffel` are synthetic, not recordings.
+
+Run the flight-provider tests (no credentials, no network):
+
+```
+npm run build
+npm test -w @trip/providers -- duffel-flights
+# or all provider tests
+npm test -w @trip/providers
+```
 
 ---
 

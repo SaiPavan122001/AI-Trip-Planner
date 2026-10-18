@@ -1,4 +1,4 @@
-import { passthroughPolicy, withBudget, type ProviderRegistry } from '@trip/providers';
+import { passthroughPolicy, withBudget, type ProviderRegistry, type QuotedTransfer, type TransferLocation } from '@trip/providers';
 import {
   add,
   divide,
@@ -80,7 +80,7 @@ const CHECK_OUT_MINUTES = 20;
  * Transfer lookups already made (or in flight) during one search, by request.
  * Plans built side by side often need the same leg; it is asked for once.
  */
-export type TransferMemo = Map<string, Promise<ProviderResult<TransferOffer[]>>>;
+export type TransferMemo = Map<string, Promise<ProviderResult<unknown>>>;
 
 export interface ScheduleInput {
   registry: ProviderRegistry;
@@ -146,12 +146,8 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
     // fictions — and zero-length ones at that, which the validator would then
     // flag as impossibly tight connections.
     if (usesTerminal(outbound.mode)) {
-      const departurePoint = terminalPoint(
-        intent.origin,
-        firstSegment.origin.code,
-        firstSegment.origin.name,
-      );
-      const toTerminal = await transferItem(
+      const departurePoint = terminalPoint(intent.origin, firstSegment.origin);
+      const toTerminal = !departurePoint.known ? null : await transferItem(
         input,
         { name: intent.origin.name, coordinates: intent.origin.coordinates },
         departurePoint,
@@ -160,17 +156,19 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
         `Travel to ${departurePoint.name}`,
         notes,
       );
-      if (toTerminal.offer) transfers.push(toTerminal.offer);
+      if (toTerminal?.offer) transfers.push(toTerminal.offer);
 
       // Work backwards from the departure so the traveller arrives in time,
       // rather than forwards from an arbitrary "leave at 6am".
-      const transferMinutes = toTerminal.durationMinutes;
-      const leaveHomeUtc = addMinutes(departUtc, -(buffer + transferMinutes));
-      items.push({
-        ...toTerminal.item,
-        startUtc: leaveHomeUtc,
-        endUtc: addMinutes(leaveHomeUtc, transferMinutes),
-      });
+      if (toTerminal) {
+        const transferMinutes = toTerminal.durationMinutes;
+        const leaveHomeUtc = addMinutes(departUtc, -(buffer + transferMinutes));
+        items.push({
+          ...toTerminal.item,
+          startUtc: leaveHomeUtc,
+          endUtc: addMinutes(leaveHomeUtc, transferMinutes),
+        });
+      }
       items.push({
         id: itemId('buffer'),
         kind: 'buffer',
@@ -189,7 +187,7 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
         cost: null,
         costIsEstimate: false,
         offerRef: null,
-        notes: ['Terminal time is an allowance, not a measured queue.'],
+        notes: ['Terminal time is an allowance, not a measured queue.', ...(departurePoint.known ? [] : [UNKNOWN_STOP_NOTE])],
       });
     }
 
@@ -200,16 +198,13 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
   if (hotel && arrivalAtDestination) {
     const hotelPoint = { name: hotel.hotel.name, coordinates: hotel.hotel.coordinates };
     const arrivalPoint = outbound
-      ? terminalPoint(
-          intent.destination,
-          outbound.segments[outbound.segments.length - 1]!.destination.code,
-          outbound.segments[outbound.segments.length - 1]!.destination.name,
-        )
-      : { name: intent.destination.name, coordinates: intent.destination.coordinates };
+      ? terminalPoint(intent.destination, outbound.segments[outbound.segments.length - 1]!.destination)
+      : { name: intent.destination.name, coordinates: intent.destination.coordinates, known: true };
 
     // Arriving under your own steam means you park at the hotel: there is no
     // onward transfer to schedule or to charge for.
-    const needsOnwardTransfer = !outbound || usesTerminal(outbound.mode);
+    // Nor is one planned from a stop whose position nobody stated.
+    const needsOnwardTransfer = (!outbound || usesTerminal(outbound.mode)) && arrivalPoint.known;
     let reachedHotel = arrivalAtDestination;
 
     if (needsOnwardTransfer) {
@@ -221,6 +216,13 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
         destinationTz,
         `Transfer to ${hotel.hotel.name}`,
         notes,
+        outbound?.mode === 'flight'
+          ? codesFor(
+              outbound.segments[outbound.segments.length - 1]!.destination.code,
+              hotel.hotel.id,
+              'airport_to_hotel',
+            )
+          : undefined,
       );
       if (toHotel.offer) transfers.push(toHotel.offer);
 
@@ -308,11 +310,7 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
       TERMINAL_BUFFER[inbound.mode]?.[classification.scope] ??
       (inbound.mode === 'self_drive' ? 0 : 45);
 
-    const departurePoint = terminalPoint(
-      intent.destination,
-      firstSegment.origin.code,
-      firstSegment.origin.name,
-    );
+    const departurePoint = terminalPoint(intent.destination, firstSegment.origin);
     const from = hotel
       ? { name: hotel.hotel.name, coordinates: hotel.hotel.coordinates }
       : { name: intent.destination.name, coordinates: intent.destination.coordinates };
@@ -320,7 +318,7 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
     // As on the way out: a self-drive return starts at the hotel door, so it
     // gets no transfer to a terminal and no check-in allowance.
     if (usesTerminal(inbound.mode)) {
-      const toTerminal = await transferItem(
+      const toTerminal = !departurePoint.known ? null : await transferItem(
         input,
         from,
         departurePoint,
@@ -328,16 +326,19 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
         destinationTz,
         `Travel to ${departurePoint.name}`,
         notes,
+        hotel && inbound.mode === 'flight' ? codesFor(firstSegment.origin.code, hotel.hotel.id, 'hotel_to_airport') : undefined,
       );
-      if (toTerminal.offer) transfers.push(toTerminal.offer);
+      if (toTerminal?.offer) transfers.push(toTerminal.offer);
 
-      const leaveUtc = addMinutes(departUtc, -(buffer + toTerminal.durationMinutes));
+      const leaveUtc = addMinutes(departUtc, -(buffer + (toTerminal?.durationMinutes ?? 0)));
       leaveHotelUtc = leaveUtc;
-      items.push({
-        ...toTerminal.item,
-        startUtc: leaveUtc,
-        endUtc: addMinutes(leaveUtc, toTerminal.durationMinutes),
-      });
+      if (toTerminal) {
+        items.push({
+          ...toTerminal.item,
+          startUtc: leaveUtc,
+          endUtc: addMinutes(leaveUtc, toTerminal.durationMinutes),
+        });
+      }
       items.push({
         id: itemId('buffer'),
         kind: 'buffer',
@@ -350,7 +351,7 @@ export async function buildItinerary(input: ScheduleInput): Promise<ScheduleResu
         cost: null,
         costIsEstimate: false,
         offerRef: null,
-        notes: [],
+        notes: departurePoint.known ? [] : [UNKNOWN_STOP_NOTE],
       });
     }
     // Your own car leaves from the hotel door.
@@ -625,6 +626,7 @@ async function transferItem(
   timezone: string,
   title: string,
   notes: ProviderNote[],
+  quoteCodes?: { from: TransferLocation; to: TransferLocation },
 ): Promise<TransferItemResult> {
   const provider = input.registry.groundTransport[0];
   const policy = input.registry.policy ?? passthroughPolicy;
@@ -688,7 +690,7 @@ async function transferItem(
   // Every field the answer depends on is in the key, so only a genuinely
   // identical question shares an answer.
   const memoKey = JSON.stringify(request);
-  let pending = input.transferMemo?.get(memoKey);
+  let pending = input.transferMemo?.get(memoKey) as Promise<ProviderResult<TransferOffer[]>> | undefined;
   if (!pending) {
     pending = ask();
     input.transferMemo?.set(memoKey, pending);
@@ -709,7 +711,10 @@ async function transferItem(
 
   // Prefer a car for terminal transfers: walking an airport run with luggage
   // is not a realistic default whatever the distance says.
-  const chosen = res.data.find((o) => o.mode === 'taxi') ?? res.data[0]!;
+  const estimated = res.data.find((o) => o.mode === 'taxi') ?? res.data[0]!;
+  // Where a transfer provider will actually sell this airport-hotel run, its
+  // quote replaces the estimate. Distance and time stay the routing's.
+  const chosen = quoteCodes ? await quotedOrEstimated(input, estimated, request, quoteCodes, notes) : estimated;
   // The route and time are still right when the fare is in another currency;
   // only the fare becomes unknown.
   const priced = supportedPriceOrUnknown(chosen.price, chosen.provenance, 'transfers');
@@ -732,6 +737,106 @@ async function transferItem(
     },
     offer,
     durationMinutes: offer.durationMinutes,
+  };
+}
+
+/**
+ * An airport-hotel code pair for a priced transfer, or nothing. The hotel must
+ * be a Hotelbeds property (its code is the one the transfer service knows) and
+ * the airport must have an IATA code; otherwise the leg stays a routing estimate.
+ */
+function codesFor(
+  airportCode: string | null,
+  hotelId: string,
+  direction: 'airport_to_hotel' | 'hotel_to_airport',
+): { from: TransferLocation; to: TransferLocation } | undefined {
+  const hotel = /^hotelbeds-hotel:([A-Za-z0-9_-]{1,20})$/.exec(hotelId)?.[1];
+  if (!hotel || !airportCode || !/^[A-Z]{3}$/.test(airportCode)) return undefined;
+  const airport: TransferLocation = { type: 'IATA', code: airportCode };
+  const stay: TransferLocation = { type: 'ATLAS', code: hotel };
+  return direction === 'airport_to_hotel' ? { from: airport, to: stay } : { from: stay, to: airport };
+}
+
+/**
+ * Asks the connected transfer-quote provider for this leg. A quote is used only
+ * when it is in the trip's currency and for a vehicle that carries the party;
+ * anything else leaves the routing estimate in place, with a note saying why.
+ * A quote is never mixed with an estimate: the offer is wholly one or the other.
+ */
+async function quotedOrEstimated(
+  input: ScheduleInput,
+  estimated: TransferOffer,
+  request: { at: string; timezone: string; party: TripIntent['travelers']; currency: string },
+  codes: { from: TransferLocation; to: TransferLocation },
+  notes: ProviderNote[],
+): Promise<TransferOffer> {
+  const provider = input.registry.quotedTransfers[0];
+  if (!provider) return estimated;
+  const policy = input.registry.policy ?? passthroughPolicy;
+  const ask = () =>
+    withBudget({ ms: TRANSFER_LOOKUP_MS }, () =>
+      policy.execute(
+        {
+          provider: provider.descriptor.id,
+          providerLabel: provider.descriptor.label,
+          capability: 'transfers',
+          operation: 'quoteTransfers',
+        },
+        () => provider.quoteTransfers({ from: codes.from, to: codes.to, at: request.at, timezone: request.timezone, party: request.party, currency: request.currency }),
+      ),
+    );
+  const key = `quote:${JSON.stringify({ codes, at: request.at, party: request.party, currency: request.currency })}`;
+  let pending = input.transferMemo?.get(key) as Promise<ProviderResult<QuotedTransfer[]>> | undefined;
+  if (!pending) {
+    pending = ask();
+    input.transferMemo?.set(key, pending);
+  }
+  const res = await pending;
+  if (!isOk(res)) {
+    const note = noteFromFailure(res, 'transfers');
+    if (!notes.some((n) => n.provider === note.provider && n.message === note.message)) notes.push(note);
+    return estimated;
+  }
+  for (const w of res.warnings) {
+    const n = noteFromWarning(res.provenance, w, 'transfers');
+    if (!notes.some((x) => x.message === n.message)) notes.push(n);
+  }
+
+  const seats = seatedTravelers(request.party);
+  const usable = res.data
+    .filter((q) => q.price.currency === request.currency && (q.maxPassengers === null || q.maxPassengers >= seats))
+    .sort((a, b) => a.price.amount - b.price.amount);
+  const best = usable[0];
+  if (!best) {
+    const foreign = res.data.find((q) => q.price.currency !== request.currency);
+    notes.push(
+      noteFromWarning(
+        res.provenance,
+        foreign
+          ? `${res.provenance.providerLabel} quoted this transfer in ${foreign.price.currency}, and the planner works in ${request.currency} only, so the estimate is shown instead. Nothing is converted.`
+          : `${res.provenance.providerLabel} has no vehicle for this party on this transfer, so the estimate is shown instead.`,
+        'transfers',
+      ),
+    );
+    return estimated;
+  }
+  return {
+    ...estimated,
+    id: best.id,
+    mode: best.kind === 'shared' ? 'shuttle' : 'taxi',
+    vehicles: 1,
+    price: best.price,
+    priceIsEstimate: false,
+    estimateBasis: null,
+    quote: {
+      vehicle: best.vehicle,
+      serviceType: best.kind,
+      maxPassengers: best.maxPassengers,
+      luggage: best.luggage,
+      cancellationPolicy: best.cancellationPolicy,
+      revalidationToken: best.token,
+    },
+    provenance: res.provenance,
   };
 }
 
@@ -784,15 +889,27 @@ function transportItem(
  * the city centre. The fallback is honest about what it is: it changes a
  * transfer estimate, never a departure time.
  */
+/**
+ * Where a journey leaves from or arrives at. The provider's own position for
+ * the stop comes first (a station, an airport), then the airport the place is
+ * known to have, then the place itself for a named terminal. With neither a code
+ * nor a position, as for an estimated bus fare that names no stand, it is `known: false` and no leg is planned to it: a
+ * transfer to the city centre would be a journey nobody takes.
+ */
 function terminalPoint(
   place: Place,
-  code: string | null,
-  name: string,
-): { name: string; coordinates: Coordinates } {
-  const airport = code ? place.airports.find((a) => a.iataCode === code) : undefined;
-  if (airport?.coordinates) return { name: airport.name, coordinates: airport.coordinates };
-  return { name: name || place.name, coordinates: place.coordinates };
+  stop: { code: string | null; name: string; coordinates: Coordinates | null },
+): { name: string; coordinates: Coordinates; known: boolean } {
+  if (stop.coordinates) return { name: stop.name || place.name, coordinates: stop.coordinates, known: true };
+  const airport = stop.code ? place.airports.find((a) => a.iataCode === stop.code) : undefined;
+  if (airport?.coordinates) return { name: airport.name, coordinates: airport.coordinates, known: true };
+  // A named terminal (an airport code) is real even when its position is not given: the place stands in for it.
+  // With neither a code nor a position there is no stop to go to.
+  return { name: stop.name || place.name, coordinates: place.coordinates, known: Boolean(stop.code) };
 }
+
+const UNKNOWN_STOP_NOTE =
+  'Where this service leaves from is not stated, so no transfer to it is planned or priced. Allow time to get there.';
 
 /** Straight-line distance at typical urban speed, with a floor for door time. */
 export function estimateLocalLegMinutes(from: Coordinates, to: Coordinates): number {

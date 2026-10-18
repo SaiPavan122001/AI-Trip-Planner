@@ -67,6 +67,42 @@ describe('itinerary validation', () => {
     expect(overlap?.itemIds).toEqual(['a', 'b']);
   });
 
+  describe('connections at a terminal', () => {
+    const run = (items: ItineraryItem[]) =>
+      validateItinerary({
+        intent: tripIntent,
+        classification,
+        profile: profile(),
+        constraints: noConstraints,
+        items,
+        cost: cost(),
+        outbound: null,
+        inbound: null,
+        hotel: null,
+      }).filter((i) => i.code === 'tight_connection');
+    const transfer = item({ id: 't', kind: 'transfer', title: 'Travel to the airport', startUtc: '2026-11-11T02:00:00.000Z', endUtc: '2026-11-11T02:30:00.000Z' });
+    const depart = (start: string) =>
+      item({ id: 'd', kind: 'transport', title: 'Flight', startUtc: start, endUtc: '2026-11-11T06:00:00.000Z' });
+
+    it('accepts a full check-in allowance that meets the transfer and the departure end to end', () => {
+      const allowance = item({ id: 'b', kind: 'buffer', title: 'Check in', startUtc: '2026-11-11T02:30:00.000Z', endUtc: '2026-11-11T04:30:00.000Z' });
+      expect(run([transfer, allowance, depart('2026-11-11T04:30:00.000Z')])).toEqual([]);
+    });
+
+    it('warns when the allowance itself is too short', () => {
+      const allowance = item({ id: 'b', kind: 'buffer', title: 'Check in', startUtc: '2026-11-11T02:30:00.000Z', endUtc: '2026-11-11T02:40:00.000Z' });
+      const issues = run([transfer, allowance, depart('2026-11-11T02:40:00.000Z')]);
+      expect(issues).toHaveLength(1);
+      expect(issues[0]!.message).toMatch(/Only 10 minutes are allowed at "Check in"/);
+    });
+
+    it('warns when a transfer runs straight into a departure with no allowance', () => {
+      const issues = run([transfer, depart('2026-11-11T02:35:00.000Z')]);
+      expect(issues).toHaveLength(1);
+      expect(issues[0]!.message).toMatch(/Only 5 minutes between/);
+    });
+  });
+
   it('warns, but does not block, when a plan exceeds a budget that is only a guide', () => {
     const issues = validateItinerary({
       intent: tripIntent,

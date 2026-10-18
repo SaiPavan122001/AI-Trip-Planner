@@ -53,8 +53,15 @@ export function computeCost(input: CostInput): CostBreakdown {
     .flatMap((o) => o.itemisedFees.filter((f) => !f.included).map((f) => f.amount))
     .filter(inCurrency);
 
+  // The room price, plus any taxes or fees the provider says are collected at the property.
+  const dueAtProperty = input.hotel?.room.payAtProperty;
   const accommodation = input.hotel && inCurrency(input.hotel.room.totalPrice)
-    ? multiply(input.hotel.room.totalPrice, input.hotel.rooms)
+    ? multiply(
+        dueAtProperty && inCurrency(dueAtProperty)
+          ? add(input.hotel.room.totalPrice, dueAtProperty)
+          : input.hotel.room.totalPrice,
+        input.hotel.rooms,
+      )
     : z;
 
   const localTransport = sum(
@@ -89,7 +96,8 @@ export function computeCost(input: CostInput): CostBreakdown {
   // as fuel for a drive.
   const estimatedFees = [input.outbound, input.inbound]
     .filter((o): o is TransportOffer => o !== null)
-    .flatMap((o) => o.itemisedFees.filter((f) => !f.included && f.isEstimate).map((f) => f.amount))
+    // An estimated fee counts as modelled whether it is paid on top (fuel) or is the whole fare (an estimated bus fare).
+    .flatMap((o) => o.itemisedFees.filter((f) => f.isEstimate).map((f) => f.amount))
     .filter(inCurrency);
   const estimatedPortion = sum([
     ...input.items

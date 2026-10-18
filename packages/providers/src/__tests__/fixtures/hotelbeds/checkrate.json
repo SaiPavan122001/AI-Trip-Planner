@@ -1,0 +1,32 @@
+{
+  "auditData": { "environment": "synthetic-fixture" },
+  "hotel": {
+    "code": 2002,
+    "name": "Fixture Grand Hotel",
+    "categoryCode": "5LUX",
+    "destinationName": "Bengaluru",
+    "currency": "INR",
+    "rooms": [
+      {
+        "code": "SUI.DX",
+        "name": "Deluxe Suite",
+        "rates": [
+          {
+            "rateKey": "FIXTURE|RATEKEY|2002|B",
+            "rateClass": "NOR",
+            "rateType": "BOOKABLE",
+            "net": "52000.00",
+            "sellingRate": "62000.00",
+            "hotelMandatory": true,
+            "boardCode": "BB",
+            "boardName": "BED AND BREAKFAST",
+            "cancellationPolicies": [{ "amount": "20000.00", "from": "2030-11-05T23:59:00+05:30" }],
+            "rooms": 2,
+            "adults": 2,
+            "children": 0
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -28,6 +28,8 @@ import type {
 
 /** Passengers one car carries. A larger party is priced as several cars, not one. */
 export const TAXI_SEATS = 4;
+/** Passengers one auto-rickshaw carries. */
+export const AUTO_SEATS = 3;
 
 const ROUTING_DESCRIPTOR: ProviderDescriptor = {
   id: 'osrm',
@@ -121,6 +123,11 @@ export interface TaxiTariff {
   perMinute: number;
   /** Multiplier applied between 22:00 and 05:00 local time. */
   nightMultiplier: number;
+  /** The least a ride costs, in major units; 0 when the fare model has none. */
+  minimumFare?: number;
+  /** Where the numbers come from, and when they were last checked; shown with every estimate. */
+  source?: string;
+  asOf?: string;
 }
 
 /**
@@ -136,6 +143,7 @@ export class OsrmTransferProvider implements GroundTransportProvider {
   constructor(
     private readonly routing: RoutingProvider,
     private readonly tariffs: Record<string, TaxiTariff>,
+    private readonly autoTariffs: Record<string, TaxiTariff> = {},
   ) {}
 
   isConfigured(): boolean {
@@ -179,12 +187,33 @@ export class OsrmTransferProvider implements GroundTransportProvider {
       vehicles,
       price,
       priceIsEstimate: price !== null,
-      estimateBasis: tariff
-        ? `Configured ${req.currency} tariff: base ${tariff.baseFare} + ${tariff.perKm}/km + ${tariff.perMinute}/min${vehicles > 1 ? `, for ${vehicles} cars` : ''}`
-        : null,
+      estimateBasis: tariff ? tariffBasis('Taxi', tariff, vehicles > 1 ? `, for ${vehicles} cars` : '') : null,
       accessible: null,
+      quote: null,
       provenance: provenance(TRANSFER_DESCRIPTOR),
     });
+
+    // An auto-rickshaw is offered only where a fare model for it is configured.
+    const autoTariff = this.autoTariffs[req.currency];
+    if (autoTariff) {
+      const autos = Math.max(1, Math.ceil(seatedTravelers(req.party) / AUTO_SEATS));
+      const perAuto = estimateFare(autoTariff, distanceKm, durationMinutes, req.at, req.timezone);
+      offers.push({
+        id: `osrm-auto:${hashLeg(req)}`,
+        mode: 'auto_rickshaw',
+        from: req.from,
+        to: req.to,
+        distanceKm,
+        durationMinutes,
+        vehicles: autos,
+        price: multiply(perAuto, autos),
+        priceIsEstimate: true,
+        estimateBasis: tariffBasis('Auto-rickshaw', autoTariff, autos > 1 ? `, for ${autos} autos` : ''),
+        accessible: null,
+        quote: null,
+        provenance: provenance(TRANSFER_DESCRIPTOR),
+      });
+    }
 
     // Walking is only a genuine option for short, luggage-light legs.
     if (distanceKm <= 1.5 && req.luggagePieces <= 2) {
@@ -206,6 +235,7 @@ export class OsrmTransferProvider implements GroundTransportProvider {
           priceIsEstimate: false,
           estimateBasis: null,
           accessible: null,
+          quote: null,
           provenance: provenance(TRANSFER_DESCRIPTOR),
         });
       }
@@ -233,7 +263,16 @@ function estimateFare(
   const hour = localParts(at, timezone).hour;
   const night = hour >= 22 || hour < 5;
   const base = tariff.baseFare + tariff.perKm * distanceKm + tariff.perMinute * durationMinutes;
-  return money(base * (night ? tariff.nightMultiplier : 1), tariff.currency);
+  const fare = base * (night ? tariff.nightMultiplier : 1);
+  return money(Math.max(fare, tariff.minimumFare ?? 0), tariff.currency);
+}
+
+/** The words that travel with an estimated fare: what it was worked out from, and that real fares vary. */
+function tariffBasis(vehicle: string, t: TaxiTariff, suffix: string): string {
+  const parts = [`base ${t.baseFare} + ${t.perKm}/km + ${t.perMinute}/min`];
+  if (t.minimumFare) parts.push(`minimum ${t.minimumFare}`);
+  const origin = t.source ? `; source: ${t.source}${t.asOf ? `, last checked ${t.asOf}` : ''}` : t.asOf ? `; last checked ${t.asOf}` : '';
+  return `${vehicle} fare estimated from a configured ${t.currency} tariff: ${parts.join(', ')}${suffix}${origin}. Not a quote: actual fares vary by operator, traffic and time.`;
 }
 
 function hashLeg(req: TransferSearchRequest): string {

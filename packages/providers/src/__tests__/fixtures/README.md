@@ -20,10 +20,15 @@ All prices are in INR because the planner works in Indian rupees only.
 | File | Serves |
 |---|---|
 | `amadeus/token.json` | `POST /v1/security/oauth2/token` |
-| `amadeus/flight-offers.json` | `GET /v2/shopping/flight-offers` (two offers) |
-| `amadeus/airports.json` | `GET /v1/reference-data/locations/airports` |
+| `duffel/offer-request.json` | `POST /air/offer_requests` (two synthetic offers) |
+| `duffel/places.json` | `GET /places/suggestions` |
 | `amadeus/hotels-by-geocode.json` | `GET /v1/reference-data/locations/hotels/by-geocode` |
 | `amadeus/hotel-offers.json` | `GET /v3/shopping/hotel-offers` (two properties) |
+| `hotelbeds/availability.json` | `POST /hotel-api/1.0/hotels` (synthetic; three properties incl. one with no position) |
+| `hotelbeds/checkrate.json` | `POST /hotel-api/1.0/checkrates` |
+| `hotelbeds/content.json` | `GET /hotel-content-api/1.0/hotels` |
+| `hotelbeds/activities.json` | `POST /activity-api/3.0/activities/availability` |
+| `hotelbeds/transfers.json` | `GET /transfer-api/1.0/availability/...` |
 | `osrm/route.json` | `GET /route/v1/driving/...` |
 | `osrm/no-route.json` | The same, for two points no road joins |
 | `nominatim/search.json` | `GET /search` (Hyderabad) |

@@ -3,40 +3,29 @@ import {
   fail,
   money,
   ok,
-  type Coordinates,
-  type FareClass,
   type HotelOffer,
   type HotelRoomOffer,
   type ProviderProvenance,
   type ProviderResult,
-  type TransportOffer,
-  type TransportSegment,
 } from '@trip/shared';
 import { InvalidResponseError, httpJson, RequestPacer, toProviderFailure } from '../http.js';
 import { droppedWarning, readItems, readResponse } from '../guard.js';
 import {
-  AmadeusAirport,
-  AmadeusAirportsResponse,
-  AmadeusFlightOffer,
-  AmadeusFlightSearchResponse,
   AmadeusHotel,
   AmadeusHotelListResponse,
   AmadeusHotelOffer,
   AmadeusHotelOffersResponse,
-  AmadeusPricingResponse,
   AmadeusSingleHotelOfferResponse,
   AmadeusToken,
 } from '../schemas.js';
 import type {
-  FlightProvider,
-  FlightSearchRequest,
   HotelProvider,
   HotelSearchRequest,
   ProviderDescriptor,
 } from '../types.js';
 
 /**
- * Amadeus Self-Service adapter: flights and hotels.
+ * Amadeus Self-Service adapter: hotels. (Flights moved to Duffel; see duffel.ts.)
  *
  * The test environment returns a cached subset of real inventory, so results
  * are genuine offers but not necessarily bookable. That distinction is carried
@@ -44,14 +33,14 @@ import type {
  * a price came from instead of implying live production availability.
  */
 
-const FLIGHT_DESCRIPTOR = (env: string): ProviderDescriptor => ({
+const DESCRIPTOR = (env: string): ProviderDescriptor => ({
   id: 'amadeus',
   label: env === 'production' ? 'Amadeus' : 'Amadeus (test environment)',
-  kinds: ['flight', 'hotel'],
+  kinds: ['hotel'],
   requiredEnv: ['AMADEUS_CLIENT_ID', 'AMADEUS_CLIENT_SECRET'],
   coverage: 'global',
   docsUrl: 'https://developers.amadeus.com/self-service',
-  attribution: 'Flight and hotel content provided by Amadeus',
+  attribution: 'Hotel content provided by Amadeus',
 });
 
 export interface AmadeusConfig {
@@ -61,7 +50,7 @@ export interface AmadeusConfig {
   minIntervalMs: number;
 }
 
-export class AmadeusProvider implements FlightProvider, HotelProvider {
+export class AmadeusProvider implements HotelProvider {
   readonly descriptor: ProviderDescriptor;
   private readonly baseUrl: string;
   private readonly pacer: RequestPacer;
@@ -69,7 +58,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
   private readonly tokenFlight = new SingleFlight<string>();
 
   constructor(private readonly config: AmadeusConfig) {
-    this.descriptor = FLIGHT_DESCRIPTOR(config.environment);
+    this.descriptor = DESCRIPTOR(config.environment);
     this.baseUrl =
       config.environment === 'production'
         ? 'https://api.amadeus.com'
@@ -87,171 +76,6 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
     try {
       await this.accessToken();
       return ok({ ok: true as const, latencyMs: Date.now() - started }, this.provenance());
-    } catch (err) {
-      return toProviderFailure(err, this.descriptor.id, this.descriptor.label);
-    }
-  }
-
-  // ---------------------------------------------------------------- flights
-
-  async searchFlights(req: FlightSearchRequest): Promise<ProviderResult<TransportOffer[]>> {
-    if (!this.isConfigured()) return this.notConfigured();
-
-    const originCode = pickIata(req.origin);
-    const destinationCode = pickIata(req.destination);
-    if (!originCode || !destinationCode) {
-      return fail(
-        'unsupported_route',
-        this.descriptor.id,
-        this.descriptor.label,
-        `No airport code is known for ${!originCode ? req.origin.name : req.destination.name}, so flights cannot be searched for this leg.`,
-      );
-    }
-
-    try {
-      const raw = await this.get<unknown>(
-        '/v2/shopping/flight-offers',
-        {
-          originLocationCode: originCode,
-          destinationLocationCode: destinationCode,
-          departureDate: req.departureDate,
-          returnDate: req.returnDate ?? undefined,
-          adults: req.party.adults,
-          children: req.party.children || undefined,
-          infants: req.party.infants || undefined,
-          travelClass: req.cabinClass ? req.cabinClass.toUpperCase() : undefined,
-          nonStop: req.maxStops === 0 ? true : undefined,
-          currencyCode: req.currency,
-          includedAirlineCodes: req.preferredCarriers.length
-            ? req.preferredCarriers.join(',')
-            : undefined,
-          excludedAirlineCodes: req.excludedCarriers.length
-            ? req.excludedCarriers.join(',')
-            : undefined,
-          maxPrice: req.maxPrice ?? undefined,
-          max: req.limit,
-        },
-        req.signal,
-      );
-
-      const res = readResponse(AmadeusFlightSearchResponse, raw, 'flight search');
-      const carriers = res.dictionaries?.carriers ?? {};
-      const items = readItems(res.data, AmadeusFlightOffer);
-      if (items.allInvalid) throw new InvalidResponseError('flight search', 'no offer had the documented shape');
-      // Each offer keeps the payload Amadeus sent: re-pricing needs every field of it back.
-      // Amadeus numbers offers within one response ("1", "2", ...), so the same number
-      // comes back for the outward and the return search. The search is part of the id.
-      const scope = `${originCode}-${destinationCode}-${req.departureDate}`;
-      const offers = items.valid.map((o) => this.toTransportOffer(o.data, carriers, req.party, o.raw, scope));
-      if (offers.length === 0) {
-        return fail(
-          'no_availability',
-          this.descriptor.id,
-          this.descriptor.label,
-          `No flights were returned for ${originCode} to ${destinationCode} on ${req.departureDate}.`,
-        );
-      }
-      return ok(
-        offers,
-        this.provenance(`${originCode}-${destinationCode}-${req.departureDate}`),
-        droppedWarning(this.descriptor.label, items.dropped, 'flight offer(s)'),
-      );
-    } catch (err) {
-      return toProviderFailure(err, this.descriptor.id, this.descriptor.label);
-    }
-  }
-
-  /**
-   * Amadeus pricing confirms the fare is still sellable and returns the
-   * current total. Any difference from the quoted price is surfaced as a
-   * `price_changed` failure so the booking machine can ask the traveller
-   * before charging a different amount.
-   */
-  async revalidateFlight(token: string): Promise<ProviderResult<TransportOffer>> {
-    if (!this.isConfigured()) return this.notConfigured();
-    let payload: AmadeusFlightOffer;
-    let rawPayload: unknown;
-    try {
-      rawPayload = JSON.parse(token);
-      payload = AmadeusFlightOffer.parse(rawPayload);
-    } catch {
-      return fail(
-        'invalid_request',
-        this.descriptor.id,
-        this.descriptor.label,
-        'This offer can no longer be re-priced because its provider payload is missing. Search again to get a current price.',
-      );
-    }
-    try {
-      const res = readResponse(
-        AmadeusPricingResponse,
-        await this.post<unknown>('/v1/shopping/flight-offers/pricing', {
-          data: { type: 'flight-offers-pricing', flightOffers: [rawPayload] },
-        }),
-        'flight pricing',
-      );
-      const rawPriced = res.data.flightOffers[0];
-      if (rawPriced === undefined) {
-        return fail(
-          'booking_unavailable',
-          this.descriptor.id,
-          this.descriptor.label,
-          'Amadeus no longer offers this fare. Choose another option.',
-        );
-      }
-      const priced = readResponse(AmadeusFlightOffer, rawPriced, 'flight pricing');
-      const party = inferParty(payload);
-      return ok(this.toTransportOffer(priced, {}, party, rawPriced, 'priced'), this.provenance(payload.id));
-    } catch (err) {
-      return toProviderFailure(err, this.descriptor.id, this.descriptor.label);
-    }
-  }
-
-  /** Nearest airports for a coordinate, used to give a place an IATA code. */
-  async nearestAirports(
-    coords: Coordinates,
-    radiusKm = 300,
-    signal?: AbortSignal,
-  ): Promise<
-    ProviderResult<
-      Array<{ iataCode: string; name: string; distanceKm: number; coordinates: Coordinates | null }>
-    >
-  > {
-    if (!this.isConfigured()) return this.notConfigured();
-    try {
-      const res = readResponse(
-        AmadeusAirportsResponse,
-        await this.get<unknown>('/v1/reference-data/locations/airports', {
-          latitude: coords.lat,
-          longitude: coords.lon,
-          radius: Math.min(radiusKm, 500),
-          'page[limit]': 5,
-          sort: 'distance',
-        }, signal),
-        'airport search',
-      );
-      const items = readItems(res.data, AmadeusAirport);
-      if (items.allInvalid) throw new InvalidResponseError('airport search', 'no airport had the documented shape');
-      const airports = items.valid
-        .map((v) => v.data)
-        .map((a) => ({
-          iataCode: a.iataCode,
-          name: a.name,
-          distanceKm:
-            a.distance?.unit === 'MILE' ? (a.distance.value ?? 0) * 1.609 : a.distance?.value ?? 0,
-          coordinates: a.geoCode
-            ? { lat: a.geoCode.latitude, lon: a.geoCode.longitude }
-            : null,
-        }));
-      if (airports.length === 0) {
-        return fail(
-          'no_availability',
-          this.descriptor.id,
-          this.descriptor.label,
-          'No airport was found within range of this location.',
-        );
-      }
-      return ok(airports, this.provenance(), droppedWarning(this.descriptor.label, items.dropped, 'airport(s)'));
     } catch (err) {
       return toProviderFailure(err, this.descriptor.id, this.descriptor.label);
     }
@@ -385,110 +209,6 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
 
   // ---------------------------------------------------------------- mapping
 
-  private toTransportOffer(
-    o: AmadeusFlightOffer,
-    carriers: Record<string, string>,
-    party: { adults: number; children: number; infants: number },
-    rawOffer: unknown,
-    scope: string,
-  ): TransportOffer {
-    const segments: TransportSegment[] = o.itineraries.flatMap((it) =>
-      it.segments.map((s) => ({
-        mode: 'flight' as const,
-        operatorCode: s.carrierCode,
-        operatorName: carriers[s.carrierCode] ?? null,
-        serviceNumber: `${s.carrierCode}${s.number}`,
-        origin: {
-          code: s.departure.iataCode,
-          name: s.departure.iataCode,
-          coordinates: null,
-          timezone: null,
-          terminal: s.departure.terminal ?? null,
-        },
-        destination: {
-          code: s.arrival.iataCode,
-          name: s.arrival.iataCode,
-          coordinates: null,
-          timezone: null,
-          terminal: s.arrival.terminal ?? null,
-        },
-        departureAt: s.departure.at,
-        arrivalAt: s.arrival.at,
-        durationMinutes: parseIsoDuration(s.duration) ?? diffMinutes(s.departure.at, s.arrival.at),
-        vehicleType: s.aircraft?.code ?? null,
-      })),
-    );
-
-    const currency = o.price.currency;
-    const total = money(Number(o.price.grandTotal ?? o.price.total), currency);
-    const paying = Math.max(1, party.adults + party.children);
-    const firstFare = o.travelerPricings?.[0]?.fareDetailsBySegment?.[0];
-
-    const fareClasses: FareClass[] = firstFare?.cabin
-      ? [
-          {
-            code: firstFare.class ?? firstFare.cabin,
-            label: humaniseCabin(firstFare.cabin),
-            cabin: normaliseCabin(firstFare.cabin),
-            price: total,
-            availability: o.numberOfBookableSeats ?? null,
-            availabilityLabel:
-              o.numberOfBookableSeats !== undefined
-                ? `${o.numberOfBookableSeats} seat(s) bookable at this fare`
-                : null,
-            refundable: o.pricingOptions?.refundableFare ?? null,
-            checkedBagsIncluded: firstFare.includedCheckedBags?.quantity ?? null,
-            cabinBagKg: null,
-          },
-        ]
-      : [];
-
-    const itineraryCount = o.itineraries.length;
-    const transfers = o.itineraries.reduce((acc, it) => acc + Math.max(0, it.segments.length - 1), 0);
-    const overnight = o.itineraries.some((it) => {
-      const first = it.segments[0];
-      const last = it.segments[it.segments.length - 1];
-      return Boolean(first && last && first.departure.at.slice(0, 10) !== last.arrival.at.slice(0, 10));
-    });
-
-    return {
-      id: `amadeus-flight:${scope}:${o.id}`,
-      mode: 'flight',
-      segments,
-      totalPrice: total,
-      pricePerTraveler: money(Number(o.price.grandTotal ?? o.price.total) / paying, currency),
-      itemisedFees: (o.price.fees ?? [])
-        .filter((f) => Number(f.amount) > 0)
-        .map((f) => ({
-          label: humaniseFee(f.type),
-          amount: money(Number(f.amount), currency),
-          // Already inside the quoted grand total, and quoted, not modelled.
-          included: true,
-          isEstimate: false,
-          basis: null,
-        })),
-      unpricedCosts: [],
-      fareClasses,
-      selectedFareCode: fareClasses[0]?.code ?? null,
-      totalDurationMinutes: o.itineraries.reduce(
-        (acc, it) => acc + (parseIsoDuration(it.duration) ?? 0),
-        0,
-      ),
-      transfers: itineraryCount > 1 ? transfers : transfers,
-      overnight,
-      refundable: o.pricingOptions?.refundableFare ?? null,
-      cancellationPolicy: null,
-      baggageSummary:
-        firstFare?.includedCheckedBags?.quantity !== undefined
-          ? `${firstFare.includedCheckedBags.quantity} checked bag(s) included per traveller`
-          : null,
-      // The full offer payload is the only accepted input to Amadeus pricing,
-      // so it is carried along verbatim for revalidation.
-      revalidationToken: JSON.stringify(rawOffer),
-      provenance: this.provenance(o.id),
-    };
-  }
-
   private toHotelOffer(
     h: AmadeusHotelOffer,
     geo: AmadeusHotel | undefined,
@@ -527,6 +247,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
         totalPrice: total,
         pricePerNight: money(Number(offer.price.total) / Math.max(1, nights), currency),
         taxesIncluded: offer.price.taxes?.some((t) => t.included === true) ?? null,
+        payAtProperty: null,
         revalidationToken: offer.id,
       };
     });
@@ -537,6 +258,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
       id: `amadeus-hotel:${h.hotel.hotelId}`,
       name: h.hotel.name,
       propertyType: null,
+      description: null,
       category: finiteOrNull(h.hotel.rating ?? geo?.rating),
       guestRating: null,
       guestRatingCount: null,
@@ -613,7 +335,7 @@ export class AmadeusProvider implements FlightProvider, HotelProvider {
       'not_configured',
       this.descriptor.id,
       this.descriptor.label,
-      'Amadeus is not configured. Set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search real flight and hotel inventory.',
+      'Amadeus is not configured. Set AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET to search real hotel inventory.',
     );
   }
 
@@ -669,22 +391,6 @@ function finiteOrNull(value: string | number | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function pickIata(place: { iataCityCode?: string; airports: Array<{ iataCode: string }> }): string | null {
-  return place.iataCityCode ?? place.airports[0]?.iataCode ?? null;
-}
-
-export function parseIsoDuration(d: string | undefined): number | null {
-  if (!d) return null;
-  const m = /^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?$/.exec(d);
-  if (!m) return null;
-  const [, days, hours, minutes] = m;
-  return Number(days ?? 0) * 1440 + Number(hours ?? 0) * 60 + Number(minutes ?? 0);
-}
-
-function diffMinutes(a: string, b: string): number {
-  return Math.round((Date.parse(b) - Date.parse(a)) / 60_000);
-}
-
 function nightsBetweenDates(a: string, b: string): number {
   return Math.max(1, Math.round((Date.parse(b) - Date.parse(a)) / 86_400_000));
 }
@@ -693,38 +399,6 @@ function inferNights(h: AmadeusHotelOffer): number {
   const o = h.offers[0];
   if (!o) return 1;
   return nightsBetweenDates(o.checkInDate, o.checkOutDate);
-}
-
-function inferParty(o: AmadeusFlightOffer): { adults: number; children: number; infants: number } {
-  const count = o.travelerPricings?.length ?? 1;
-  return { adults: count, children: 0, infants: 0 };
-}
-
-function normaliseCabin(cabin: string): 'economy' | 'premium_economy' | 'business' | 'first' | null {
-  switch (cabin.toUpperCase()) {
-    case 'ECONOMY':
-      return 'economy';
-    case 'PREMIUM_ECONOMY':
-      return 'premium_economy';
-    case 'BUSINESS':
-      return 'business';
-    case 'FIRST':
-      return 'first';
-    default:
-      return null;
-  }
-}
-
-function humaniseCabin(cabin: string): string {
-  return cabin
-    .toLowerCase()
-    .split('_')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
-function humaniseFee(type: string): string {
-  return type === 'SUPPLIER' ? 'Supplier fee' : type === 'TICKETING' ? 'Ticketing fee' : type;
 }
 
 function ratingsAtOrAbove(min: number): number[] {

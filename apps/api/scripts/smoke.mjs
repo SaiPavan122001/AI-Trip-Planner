@@ -78,6 +78,12 @@ const appEnv = {
     CORS_ORIGINS: 'http://localhost:3000', RUN_POLL_MS: '200',
     NOMINATIM_BASE_URL: 'http://127.0.0.1:4199', NOMINATIM_USER_AGENT: 'wayfare-smoke (dev@example.com)',
     NOMINATIM_MIN_INTERVAL_MS: '20', OSRM_BASE_URL: 'http://127.0.0.1:4199', OSRM_MIN_INTERVAL_MS: '10',
+    // The smoke run talks only to its own fake servers: a developer's real keys in .env stay unused.
+    // (An empty value counts as set, so the .env loader does not fill it in.)
+    DUFFEL_ACCESS_TOKEN: '', GOOGLE_MAPS_API_KEY: '', AMADEUS_CLIENT_ID: '', AMADEUS_CLIENT_SECRET: '',
+    HOTELBEDS_API_KEY: '', HOTELBEDS_SECRET: '', HOTELBEDS_HOTELS_API_KEY: '', HOTELBEDS_HOTELS_SECRET: '',
+    HOTELBEDS_ACTIVITIES_API_KEY: '', HOTELBEDS_ACTIVITIES_SECRET: '', HOTELBEDS_TRANSFERS_API_KEY: '', HOTELBEDS_TRANSFERS_SECRET: '',
+    LLM_BASE_URL: '', LLM_API_KEY: '', LLM_MODEL: '', ANTHROPIC_API_KEY: '',
 };
 const api = spawn(process.execPath, ['dist/index.js'], {
   cwd: root + '/apps/api',

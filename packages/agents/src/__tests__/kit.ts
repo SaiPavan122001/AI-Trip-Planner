@@ -168,7 +168,7 @@ export function flightOn(date: string, fromCode: string, toCode: string, hour: n
 
 export function hotelOffer(id: string, name: string, category: number, totalRupees: number, nights = 4): HotelOffer {
   return {
-    id, name, propertyType: null, category, guestRating: null, guestRatingCount: null,
+    id, name, propertyType: null, description: null, category, guestRating: null, guestRatingCount: null,
     coordinates: { lat: 12.9716, lon: 77.5946 }, address: null, neighbourhood: null, amenities: [],
     checkInTime: null, checkOutTime: null,
     rooms: [
@@ -176,7 +176,7 @@ export function hotelOffer(id: string, name: string, category: number, totalRupe
         id: `${id}-room`, description: 'Double room', roomType: null, beds: null, maxOccupancy: 2, boardType: null,
         breakfastIncluded: false, refundable: true, cancellationDeadline: null, cancellationPolicy: null,
         totalPrice: money(totalRupees, 'INR'), pricePerNight: money(totalRupees / nights, 'INR'),
-        taxesIncluded: null, revalidationToken: 'tok',
+        taxesIncluded: null, payAtProperty: null, revalidationToken: 'tok',
       },
     ],
     images: [],

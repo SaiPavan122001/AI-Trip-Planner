@@ -83,8 +83,9 @@ function transportFindings(
       out.push({
         code: `${direction}_not_searched`,
         severity: 'blocker',
-        message: `Nothing was searched for ${which}: no provider is connected for ${unique(search.modes.map((m) => MODE_NAME[m.mode] ?? m.mode)).slice(0, 4).join(', ')}.`,
-        suggestions: ['Connect a provider for at least one way of travelling (see docs/providers.md).'],
+        // Each mode's own reason: "not connected" and "connected but refused" are different problems.
+        message: `Nothing could be searched for ${which}. ${unique(search.modes.map((m) => `${capitalise(MODE_NAME[m.mode] ?? m.mode)}: ${m.note!.message}`)).slice(0, 4).join(' ')}`,
+        suggestions: ['Fix the source named above for at least one way of travelling you chose (see docs/providers.md), or choose another way of travelling. Nothing was swapped in for you.'],
       });
     } else if (trouble.length > 0) {
       out.push({
@@ -233,4 +234,8 @@ export function analyseFeasibility(input: FeasibilityInput): FeasibilityReport {
     });
   }
   return { status, findings };
+}
+
+function capitalise(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }

@@ -58,6 +58,7 @@ const taxi = (req: { from: TransferOffer['from']; to: TransferOffer['to'] }): Tr
   priceIsEstimate: true,
   estimateBasis: 'test',
   accessible: null,
+  quote: null,
   provenance: provenance('transfers'),
 });
 
