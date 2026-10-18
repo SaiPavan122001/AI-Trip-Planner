@@ -5,7 +5,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { GlobalSetupContext } from 'vitest/node';
+import type { TestProject } from 'vitest/node';
 
 /**
  * Starts a real PostgreSQL for the integration tests and applies the project's
@@ -47,7 +47,9 @@ ${output.stderr?.toString() ?? ''}${output.stdout?.toString() ?? ''}`, { cause: 
   }
 }
 
-export default async function setup({ provide }: GlobalSetupContext): Promise<() => Promise<void>> {
+// Vitest 3 and later pass the project (it was a context object before); `provide` is on it.
+export default async function setup(project: TestProject): Promise<() => Promise<void>> {
+  const provide = project.provide.bind(project);
   const supplied = process.env['TEST_DATABASE_URL'];
   if (supplied) {
     migrate(supplied);
